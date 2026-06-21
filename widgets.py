@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QCursor
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, Property, QEasingCurve,
-    QRectF, QPointF, Signal, QSize,
+    QRectF, QPointF, Signal, QSize, QEvent,
 )
 from PySide6.QtGui import (
     QPainter, QPen, QBrush, QColor, QConicalGradient,
@@ -352,15 +352,32 @@ class StatusBadge(QWidget):
 #  Section Header
 # ---------------------------------------------------------------------------
 class SectionHeader(QWidget):
-    """A styled section header with optional right-side text."""
+    """A styled section header with optional right-side text.
+
+    Optionally collapsible: call set_collapsible(True) to show a chevron
+    on the left and make the header clickable. The header itself doesn't
+    hide anything; it just emits `clicked` so the owner can toggle
+    whatever child widgets belong to the section.
+    """
+
+    clicked = Signal()
 
     def __init__(self, title, right_text="", parent=None):
         super().__init__(parent)
         self.setFixedHeight(28)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._collapsible = False
+        self._collapsed = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(6)
+
+        self.chevron = QLabel("")
+        self.chevron.setFont(Fonts.tiny())
+        self.chevron.setStyleSheet("color: #64648c;")
+        self.chevron.setFixedWidth(10)
+        layout.addWidget(self.chevron)
 
         left = QLabel(title.upper())
         left.setFont(Fonts.label())
@@ -373,6 +390,34 @@ class SectionHeader(QWidget):
         self.right_label.setFont(Fonts.tiny())
         self.right_label.setStyleSheet("color: #64648c;")
         layout.addWidget(self.right_label)
+
+    def set_collapsible(self, collapsible: bool):
+        self._collapsible = collapsible
+        if collapsible:
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self._refresh_chevron()
+        else:
+            self.unsetCursor()
+            self.chevron.setText("")
+
+    def set_collapsed(self, collapsed: bool):
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self._refresh_chevron()
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def _refresh_chevron(self):
+        # ▾ when expanded (pointing down → content below visible)
+        # ▸ when collapsed (pointing right → click to expand)
+        self.chevron.setText("▸" if self._collapsed else "▾")
+
+    def mousePressEvent(self, event):
+        if self._collapsible and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +614,117 @@ class ModelListItem(QWidget):
 
 
 # ---------------------------------------------------------------------------
+#  Provider info popup (click-toggle, dismisses on outside click)
+# ---------------------------------------------------------------------------
+class ProviderPopup(QWidget):
+    """Floating panel shown when the user clicks the (i) icon on a pinned
+    model. Uses an application-wide event filter so any click outside the
+    popup dismisses it. Content is HTML rendered into a QLabel.
+    """
+
+    hidden = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Tool window so it stays on top, doesn't take focus, and isn't
+        # listed in the taskbar / Alt+Tab.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+
+        self._frame = QFrame(self)
+        self._frame.setObjectName("ProviderPopupFrame")
+        self._frame.setStyleSheet(
+            "QFrame#ProviderPopupFrame {"
+            "  background: #1c1c32;"
+            "  border: 1px solid #00d2ff;"
+            "  border-radius: 10px;"
+            "}"
+            "QLabel { color: #f0f0ff; font-family: 'Segoe UI'; font-size: 9pt; }"
+        )
+        shadow = QGraphicsDropShadowEffect(self._frame)
+        shadow.setBlurRadius(28)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 4)
+        self._frame.setGraphicsEffect(shadow)
+
+        inner = QVBoxLayout(self._frame)
+        inner.setContentsMargins(14, 10, 14, 10)
+
+        self.label = QLabel("", self._frame)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setWordWrap(True)
+        inner.addWidget(self.label)
+
+        root.addWidget(self._frame)
+
+        self.setFixedWidth(340)
+
+        # App-wide event filter so any mouse press outside us dismisses.
+        # Installed lazily on first show to avoid touching QApplication
+        # during construction.
+        self._filter_installed = False
+
+    def show_for(self, html: str, anchor_global_pos: QPointF):
+        """Render `html` and position so the popup's right edge sits to
+        the left of `anchor_global_pos`. Falls back to the right side or
+        clamps to screen if there's no room."""
+        self.label.setText(html)
+        self.adjustSize()
+        size = self.size()
+
+        screen = QApplication.screenAt(anchor_global_pos.toPoint())
+        avail = screen.availableGeometry() if screen else None
+
+        # Preferred: place popup to the LEFT of the anchor, vertically
+        # centered on the icon.
+        x = int(anchor_global_pos.x()) - size.width() - 8
+        y = int(anchor_global_pos.y()) - size.height() // 2
+
+        if avail is not None:
+            # Fallback: if it would go off the left edge, place to right
+            if x < avail.left() + 4:
+                x = int(anchor_global_pos.x()) + 24
+            # Clamp horizontally
+            x = max(avail.left() + 4, min(x, avail.right() - size.width() - 4))
+            # Clamp vertically
+            y = max(avail.top() + 4, min(y, avail.bottom() - size.height() - 4))
+
+        self.move(x, y)
+
+        if not self._filter_installed:
+            QApplication.instance().installEventFilter(self)
+            self._filter_installed = True
+
+        self.show()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and self.isVisible():
+            try:
+                gp = event.globalPosition().toPoint()
+            except AttributeError:
+                gp = event.globalPos()
+            if not self.geometry().contains(gp):
+                self.hide()
+                # Don't consume the event; let it propagate so the icon
+                # click that closed us can still register (the dashboard
+                # handler debounces to prevent immediate reopen).
+        return False
+
+    def hideEvent(self, event):
+        self.hidden.emit()
+        super().hideEvent(event)
+
+
+# ---------------------------------------------------------------------------
 #  Pinned Model Card (per-provider health)
 # ---------------------------------------------------------------------------
 class PinnedModelCard(QWidget):
@@ -576,12 +732,20 @@ class PinnedModelCard(QWidget):
 
     Width is whatever the parent gives us; height grows with provider count.
     All drawing happens in paintEvent for tight column alignment.
+
+    An (i) icon in the top-right corner toggles a detail popup when
+    clicked. The icon's hover state is rendered with a cyan halo. The
+    popup itself is owned by the dashboard.
     """
 
     ROW_H = 22
     HEADER_H = 28
     PAD_X = 14
     PAD_Y = 8
+    ICON_VISIBLE = 16   # rendered glyph
+    ICON_HIT = 22       # hit area (slightly bigger for usability)
+
+    info_clicked = Signal(str, QPointF)   # (model_id, global anchor pos)
 
     def __init__(self, model_id, parent=None):
         super().__init__(parent)
@@ -590,7 +754,10 @@ class PinnedModelCard(QWidget):
         self._error = False
         self._loading = True
         self._best = None
+        self._icon_hit_rect = QRectF()  # set in paintEvent
+        self._icon_hover = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
         self._update_height()
 
     def _update_height(self):
@@ -608,22 +775,21 @@ class PinnedModelCard(QWidget):
         else:
             self._best = None
         self._update_height()
-        self._build_tooltip()
         self.update()
 
-    def _build_tooltip(self):
+    def provider_html(self) -> str:
+        """Return the HTML content for the info popup (dashboard pulls
+        this on icon click)."""
         if self._error:
-            self.setToolTip(
+            return (
                 f"<b>Couldn't load {self.model_id}</b><br>"
                 f"<span style='color:#a0a0c8;'>Will retry on the next refresh.</span>"
             )
-            return
         if self._loading or not self._endpoints:
-            self.setToolTip(
+            return (
                 f"<b>{self.model_id}</b><br>"
                 f"<span style='color:#a0a0c8;'>Loading provider data…</span>"
             )
-            return
 
         # Helpers for clean per-cell formatting
         def lat_cell(ep):
@@ -671,7 +837,7 @@ class PinnedModelCard(QWidget):
             )
 
         model_name = self._display_model_name()
-        html = (
+        return (
             f"<b>{model_name}</b><br>"
             f"<span style='color:#a0a0c8;'>Live from openrouter.ai · refreshed every 5 min</span><br>"
             f"<br>"
@@ -687,7 +853,31 @@ class PinnedModelCard(QWidget):
             f"</table>"
             f"{recommendation}"
         )
-        self.setToolTip(html)
+
+    # ---- mouse handling for the info icon ----
+
+    def mouseMoveEvent(self, event):
+        pos = event.position()
+        new_hover = self._icon_hit_rect.contains(pos)
+        if new_hover != self._icon_hover:
+            self._icon_hover = new_hover
+            if new_hover:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            else:
+                self.unsetCursor()
+            self.update()
+
+    def leaveEvent(self, event):
+        if self._icon_hover:
+            self._icon_hover = False
+            self.unsetCursor()
+            self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._icon_hit_rect.contains(event.position()):
+            center_local = self._icon_hit_rect.center()
+            global_pos = self.mapToGlobal(center_local.toPoint())
+            self.info_clicked.emit(self.model_id, QPointF(global_pos))
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -704,12 +894,22 @@ class PinnedModelCard(QWidget):
         painter.setPen(QPen(Colors.BORDER, 1))
         painter.drawPath(path)
 
-        # Header: model name (left) · best provider chip (right)
+        # Reserve space on the right of the header for the (i) icon.
+        icon_right = w - self.PAD_X
+        icon_x = icon_right - self.ICON_VISIBLE
+        icon_y = self.PAD_Y + (self.HEADER_H - self.ICON_VISIBLE) / 2
+        icon_pad = (self.ICON_HIT - self.ICON_VISIBLE) / 2
+        self._icon_hit_rect = QRectF(
+            icon_x - icon_pad, icon_y - icon_pad,
+            self.ICON_HIT, self.ICON_HIT,
+        )
+
+        # Header: model name (left) · best provider chip (right, before icon)
         name = self._display_model_name()
         painter.setPen(Colors.TEXT_PRIMARY)
         painter.setFont(Fonts.subheading())
         painter.drawText(
-            QRectF(self.PAD_X, self.PAD_Y, w - 2 * self.PAD_X, self.HEADER_H),
+            QRectF(self.PAD_X, self.PAD_Y, w - 2 * self.PAD_X - self.ICON_HIT - 4, self.HEADER_H),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             name,
         )
@@ -719,10 +919,32 @@ class PinnedModelCard(QWidget):
             painter.setPen(Colors.CYAN)
             painter.setFont(Fonts.tiny())
             painter.drawText(
-                QRectF(self.PAD_X, self.PAD_Y, w - 2 * self.PAD_X, self.HEADER_H),
+                QRectF(
+                    self.PAD_X, self.PAD_Y,
+                    w - 2 * self.PAD_X - self.ICON_HIT - 4, self.HEADER_H,
+                ),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 chip_text,
             )
+
+        # Info icon (cyan halo on hover)
+        if self._icon_hover:
+            painter.setBrush(QBrush(QColor(0, 210, 255, 38)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(self._icon_hit_rect)
+            icon_pen_color = Colors.CYAN
+        else:
+            icon_pen_color = Colors.TEXT_MUTED
+
+        painter.setPen(icon_pen_color)
+        icon_font = Fonts.body()
+        icon_font.setPointSize(11)
+        painter.setFont(icon_font)
+        painter.drawText(
+            QRectF(icon_x, icon_y, self.ICON_VISIBLE, self.ICON_VISIBLE),
+            Qt.AlignmentFlag.AlignCenter,
+            "ⓘ",
+        )
 
         y = self.PAD_Y + self.HEADER_H
 

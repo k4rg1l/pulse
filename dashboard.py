@@ -30,7 +30,7 @@ from config import (
 from widgets import (
     ArcGauge, StatCard, SectionHeader, BurnRateBar, GradientStrip,
     ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
-    ModelPicker,
+    ModelPicker, ProviderPopup,
 )
 
 
@@ -154,6 +154,11 @@ class Dashboard(QWidget):
         self._history = history
         self._settings = settings
         self._last_key_info = None
+
+        # Provider info popup (lazy)
+        self._provider_popup = None
+        self._popup_model_id = None
+        self._popup_just_hidden_at = 0.0
 
         self._build_ui()
 
@@ -306,7 +311,10 @@ class Dashboard(QWidget):
 
     def _build_pinned_models(self):
         self._pinned_header = SectionHeader("Pinned Models")
+        self._pinned_header.set_collapsible(True)
+        self._pinned_header.clicked.connect(self._toggle_pinned_collapsed)
         self._pinned_count_label = self._pinned_header.right_label
+        self._pinned_collapsed = False
         self._content.addWidget(self._pinned_header)
 
         # Search bar + picker dropdown
@@ -359,6 +367,7 @@ class Dashboard(QWidget):
         for mid in wanted:
             if mid not in self._pinned_cards:
                 card = PinnedModelCard(mid, self._pinned_container)
+                card.info_clicked.connect(self._on_info_clicked)
                 self._pinned_cards[mid] = card
                 self._pinned_layout.addWidget(card)
 
@@ -371,7 +380,10 @@ class Dashboard(QWidget):
 
         self._pinned_empty.setVisible(len(wanted) == 0)
         # Hide the column header strip when there are no cards to label
-        self._pinned_col_header.setVisible(len(wanted) > 0)
+        # (and respect the collapsed state if the section is hidden)
+        self._pinned_col_header.setVisible(
+            len(wanted) > 0 and not self._pinned_collapsed
+        )
         self._pinned_count_label.setText(
             f"{len(wanted)} model{'' if len(wanted) == 1 else 's'}"
             if wanted else ""
@@ -422,6 +434,67 @@ class Dashboard(QWidget):
             (not is_open) and len(self._pinned_cards) > 0
         )
         self._pinned_container.setVisible(not is_open)
+
+    # ---- Section collapse ----
+
+    def _toggle_pinned_collapsed(self):
+        self._pinned_collapsed = not self._pinned_collapsed
+        self._pinned_header.set_collapsed(self._pinned_collapsed)
+        collapsed = self._pinned_collapsed
+        has_cards = len(self._pinned_cards) > 0
+        self.model_picker.setVisible(not collapsed)
+        self._pinned_col_header.setVisible((not collapsed) and has_cards)
+        self._pinned_container.setVisible(not collapsed)
+        # Also close the picker dropdown if it was open
+        if collapsed:
+            try:
+                self.model_picker.search.clearFocus()
+            except Exception:
+                pass
+            self._hide_provider_popup()
+
+    # ---- Provider info popup (click-to-toggle on the card's (i) icon) ----
+
+    def _ensure_provider_popup(self):
+        if self._provider_popup is None:
+            self._provider_popup = ProviderPopup()
+            self._provider_popup.hidden.connect(self._on_popup_hidden)
+        return self._provider_popup
+
+    def _on_popup_hidden(self):
+        self._popup_just_hidden_at = time.monotonic()
+
+    def _hide_provider_popup(self):
+        if self._provider_popup is not None and self._provider_popup.isVisible():
+            self._provider_popup.hide()
+
+    def _on_info_clicked(self, model_id, global_anchor):
+        popup = self._ensure_provider_popup()
+
+        # Race: when the popup is open and the user clicks the SAME icon,
+        # the app-wide event filter on the popup closes it first, then this
+        # handler runs. Without a debounce we'd reopen the popup we just
+        # closed. 150ms window catches that case for the same model id.
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == model_id
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+
+        # Same icon while open → toggle off (defensive: usually the event
+        # filter has hidden it by this point).
+        if popup.isVisible() and self._popup_model_id == model_id:
+            popup.hide()
+            self._popup_model_id = None
+            return
+
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        popup.show_for(card.provider_html(), global_anchor)
+        self._popup_model_id = model_id
 
     def _build_quick_links(self):
         self._content.addWidget(SectionHeader("Quick Links"))
@@ -756,6 +829,12 @@ class Dashboard(QWidget):
 
     def _on_refresh(self):
         self.refresh_requested.emit()
+
+    def hideEvent(self, event):
+        # If the provider popup is floating, hide it when the dashboard
+        # closes so it doesn't get orphaned.
+        self._hide_provider_popup()
+        super().hideEvent(event)
 
     def paintEvent(self, event):
         pass
