@@ -163,10 +163,11 @@ QLineEdit:focus {
 QToolTip {
     background-color: #1c1c32;
     color: #f0f0ff;
-    border: 1px solid #323250;
-    border-radius: 4px;
-    padding: 4px 8px;
+    border: 1px solid #00d2ff;
+    border-radius: 8px;
+    padding: 10px 14px;
     font-family: "Segoe UI";
     font-size: 9pt;
+    opacity: 240;
 }
 """

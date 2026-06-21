@@ -8,6 +8,8 @@ More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
 
 ![pinned models](docs/dashboard-pinned.png)
 
+![model picker](docs/dashboard-picker.png)
+
 ![dashboard in context](docs/desktop.jpg)
 
 ## What it does
@@ -24,7 +26,15 @@ More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
 
 ## Install
 
-Requires Python 3.10 or newer and `pip`. PySide6 ships its own Qt runtime so there's nothing else to install.
+### Option A: pre-built .exe (no Python needed)
+
+Grab `Pulse.exe` from the [latest release](https://github.com/k4rg1l/pulse/releases/latest), double-click. That's it. First launch puts the tray icon in the hidden-icons area; drag it to the visible tray so it's always there.
+
+Configure your API key once: right-click the tray icon → **Open Settings File...** Add your key in the `api_key` field. Restart Pulse.
+
+The .exe is a self-contained PyInstaller bundle (~50 MB). Some antivirus flags PyInstaller binaries as suspicious on first run — that's a known false positive, you can verify the build is from this repo via the release page.
+
+### Option B: from source (Python 3.10+)
 
 ```powershell
 git clone https://github.com/k4rg1l/pulse.git
@@ -34,9 +44,17 @@ $env:OPENROUTER_API_KEY = "sk-or-v1-..."
 python main.py
 ```
 
-That's it. You'll see a tray icon in the bottom right. Left click opens the dashboard, right click opens the menu.
+Tray icon appears in the bottom right. Left click opens the dashboard, right click opens the menu.
 
 If you'd rather not use the env var, run the app once to generate `%APPDATA%\Pulse\settings.json`, then put your key in the `api_key` field there. The tray menu has an "Open Settings File..." entry that opens it in your default editor.
+
+### Option C: build your own .exe
+
+```powershell
+pip install pyinstaller
+python -m PyInstaller pulse.spec --clean --noconfirm
+# Output: dist\Pulse.exe
+```
 
 ## Run on startup
 

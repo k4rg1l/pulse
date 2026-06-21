@@ -29,7 +29,8 @@ from config import (
 )
 from widgets import (
     ArcGauge, StatCard, SectionHeader, BurnRateBar, GradientStrip,
-    ErrorBanner, TimelineChart, PinnedModelCard,
+    ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
+    ModelPicker,
 )
 
 
@@ -308,6 +309,16 @@ class Dashboard(QWidget):
         self._pinned_count_label = self._pinned_header.right_label
         self._content.addWidget(self._pinned_header)
 
+        # Search bar + picker dropdown
+        self.model_picker = ModelPicker(self)
+        self.model_picker.pin_toggled.connect(self._on_pin_toggled)
+        self.model_picker.open_changed.connect(self._on_picker_open_changed)
+        self._content.addWidget(self.model_picker)
+
+        # Column header (PROVIDER / LATENCY / UPTIME / PRICE) above cards
+        self._pinned_col_header = PinnedColumnHeader(self)
+        self._content.addWidget(self._pinned_col_header)
+
         # Container that holds the per-model cards
         self._pinned_container = QWidget()
         self._pinned_container.setStyleSheet("background: transparent;")
@@ -336,6 +347,7 @@ class Dashboard(QWidget):
         if self._settings:
             initial = list(getattr(self._settings, "tracked_models", []) or [])
         self.set_tracked_models(initial)
+        self.model_picker.set_pinned(initial)
 
     def set_tracked_models(self, model_ids):
         """Replace the pinned model list. Creates/removes cards as needed."""
@@ -363,6 +375,8 @@ class Dashboard(QWidget):
             self._pinned_layout.addWidget(self._pinned_cards[mid])
 
         self._pinned_empty.setVisible(len(wanted) == 0)
+        # Hide the column header strip when there are no cards to label
+        self._pinned_col_header.setVisible(len(wanted) > 0)
         self._pinned_count_label.setText(
             f"{len(wanted)} model{'' if len(wanted) == 1 else 's'}"
             if wanted else ""
@@ -374,8 +388,45 @@ class Dashboard(QWidget):
         if card is not None:
             card.set_endpoints(model_endpoints)
 
+    def update_model_catalog(self, models):
+        """Worker fetched the full /api/v1/models list; feed it to the picker."""
+        self.model_picker.set_catalog(models)
+
     def tracked_models(self):
         return list(self._pinned_cards.keys())
+
+    # ---- Pin/unpin from the search picker ----
+    refresh_endpoint_requested = Signal(str)
+
+    def _on_pin_toggled(self, model_id, is_pinned_after):
+        """User toggled pin on a row. Update settings + cards + persist."""
+        if self._settings is None:
+            return
+        current = list(getattr(self._settings, "tracked_models", []) or [])
+        if is_pinned_after and model_id not in current:
+            current.append(model_id)
+        elif not is_pinned_after and model_id in current:
+            current.remove(model_id)
+        else:
+            return
+        self._settings.tracked_models = current
+        try:
+            self._settings.save()
+        except Exception as e:
+            print(f"[dashboard] settings.save failed: {e}")
+        self.set_tracked_models(current)
+        # Kick off an endpoints fetch for a newly-pinned model so the
+        # user sees data without waiting for the 5-min polling cycle.
+        if is_pinned_after:
+            self.refresh_endpoint_requested.emit(model_id)
+
+    def _on_picker_open_changed(self, is_open):
+        """Hide the cards + column header while the picker dropdown is open
+        so the user isn't visually overwhelmed."""
+        self._pinned_col_header.setVisible(
+            (not is_open) and len(self._pinned_cards) > 0
+        )
+        self._pinned_container.setVisible(not is_open)
 
     def _build_quick_links(self):
         self._content.addWidget(SectionHeader("Quick Links"))
@@ -491,40 +542,90 @@ class Dashboard(QWidget):
 
     def _build_forecast_tooltip(self, key_info, rate_hourly, rate_daily,
                                  monthly_proj, rate_source):
-        lines = []
-        if rate_source:
-            lines.append(f"Burn rate source: {rate_source}")
-        else:
-            lines.append("Burn rate: not enough data yet")
-        if rate_hourly:
-            lines.append(f"Rate: ${rate_hourly:.4f}/hr · ${rate_daily:.2f}/day")
-        if monthly_proj:
-            lines.append(f"30-day projection: ${monthly_proj:.2f}")
+        """Human-readable HTML explanation of how the forecast was computed."""
         rem = key_info.remaining
-        if rem is not None:
-            lines.append(f"Current balance: ${rem:.2f}")
-        if self._settings and self._settings.autotopup_enabled:
-            thr = self._settings.auto_topup_threshold
-            amt = self._settings.auto_topup_amount
-            lines.append(
-                f"Auto-top-up: +${amt:g} when balance < ${thr:g} (settings.json)"
+        autotopup = self._settings and self._settings.autotopup_enabled
+        thr = self._settings.auto_topup_threshold if self._settings else 0
+        amt = self._settings.auto_topup_amount if self._settings else 0
+
+        # Empty-data shortcut
+        if not rate_hourly or rate_hourly == 0:
+            return (
+                "<b>Not enough data yet</b><br>"
+                "<span style='color:#a0a0c8;'>Pulse needs at least an hour "
+                "of activity before it can estimate your burn rate.</span><br>"
+                "<br>"
+                "<span style='color:#a0a0c8;'>Once OpenRouter usage shows up, "
+                "this will show your spend rate, a 30-day projection, and "
+                "when your next auto top-up will trigger.</span>"
             )
-            if rem is not None and rate_daily > 0:
-                days_to_topup = max(0, (rem - thr) / rate_daily)
-                lines.append(
-                    f"-> (balance - threshold) / rate = "
-                    f"(${rem:.2f} - ${thr:g}) / ${rate_daily:.2f}/day = "
-                    f"{_fmt_duration(days_to_topup)} until next top-up"
-                )
+
+        title = ("How <b style='color:#00d2ff;'>“next top-up”</b> is computed"
+                 if autotopup else
+                 "How <b style='color:#00d2ff;'>“depletes in X”</b> is computed")
+
+        bal_str = f"${rem:.2f}" if rem is not None else "unknown"
+
+        rate_row = (
+            f"<tr><td><span style='color:#a0a0c8;'>Burn rate</span></td>"
+            f"<td style='padding-left:14px;'><b>${rate_daily:.2f}/day</b> "
+            f"<span style='color:#64648c;'>({rate_source})</span></td></tr>"
+        )
+        bal_row = (
+            f"<tr><td><span style='color:#a0a0c8;'>Balance</span></td>"
+            f"<td style='padding-left:14px;'>{bal_str}</td></tr>"
+        )
+        proj_row = ""
+        if monthly_proj:
+            proj_row = (
+                f"<tr><td><span style='color:#a0a0c8;'>30-day projection</span></td>"
+                f"<td style='padding-left:14px;'>${monthly_proj:.2f}</td></tr>"
+            )
+
+        topup_row = ""
+        if autotopup:
+            topup_row = (
+                f"<tr><td><span style='color:#a0a0c8;'>Top-up at</span></td>"
+                f"<td style='padding-left:14px;'>${thr:g} <span style='color:#64648c;'>"
+                f"→ adds ${amt:g}</span></td></tr>"
+            )
+
+        if autotopup and rem is not None and rate_daily > 0:
+            days = max(0, (rem - thr) / rate_daily)
+            conclusion = (
+                f"At this rate, your balance hits ${thr:g} in "
+                f"<b style='color:#00d2ff;'>{_fmt_duration(days)}</b>. "
+                f"That's when your next top-up fires."
+            )
+        elif rem is not None and rate_daily > 0:
+            days = rem / rate_daily
+            conclusion = (
+                f"At this rate, you'll run out in "
+                f"<b style='color:#00d2ff;'>{_fmt_duration(days)}</b>."
+            )
         else:
-            lines.append("Auto-top-up: disabled (configure in settings.json)")
-            if rem is not None and rate_daily > 0:
-                days = rem / rate_daily
-                lines.append(
-                    f"-> balance / rate = ${rem:.2f} / ${rate_daily:.2f}/day = "
-                    f"{_fmt_duration(days)} until depletion"
-                )
-        return "\n".join(lines)
+            conclusion = "—"
+
+        footnote = (
+            "<span style='color:#64648c;'><i>Edit auto top-up in "
+            "settings.json (tray menu → Open Settings File).</i></span>"
+            if autotopup else
+            "<span style='color:#64648c;'><i>Set up auto top-up at "
+            "openrouter.ai/credits, then add the threshold and amount "
+            "to settings.json.</i></span>"
+        )
+
+        return (
+            f"{title}<br>"
+            f"<br>"
+            f"<table cellpadding='2' cellspacing='0'>"
+            f"{rate_row}{bal_row}{proj_row}{topup_row}"
+            f"</table>"
+            f"<br>"
+            f"{conclusion}<br>"
+            f"<br>"
+            f"{footnote}"
+        )
 
     # ------------------------------------------------------------------
     #  Error banner

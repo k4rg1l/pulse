@@ -6,8 +6,9 @@ import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QGraphicsDropShadowEffect, QSizePolicy, QLineEdit,
-    QScrollArea, QFrame,
+    QScrollArea, QFrame, QApplication,
 )
+from PySide6.QtGui import QCursor
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, Property, QEasingCurve,
     QRectF, QPointF, Signal, QSize,
@@ -612,25 +613,81 @@ class PinnedModelCard(QWidget):
 
     def _build_tooltip(self):
         if self._error:
-            self.setToolTip(f"Failed to fetch {self.model_id}")
+            self.setToolTip(
+                f"<b>Couldn't load {self.model_id}</b><br>"
+                f"<span style='color:#a0a0c8;'>Will retry on the next refresh.</span>"
+            )
             return
         if self._loading or not self._endpoints:
-            self.setToolTip(self.model_id)
-            return
-        lines = [f"{self._endpoints.model_name}", ""]
-        for ep in self._endpoints.endpoints:
-            lat = f"{ep.latency_last_30m:.0f}ms" if ep.latency_last_30m else "—"
-            up = f"{ep.uptime:.1f}%" if ep.uptime is not None else "—"
-            tp = f"{ep.throughput_last_30m:.0f} tok/s" if ep.throughput_last_30m else "—"
-            ctx = f"{ep.context_length // 1000}k ctx" if ep.context_length else ""
-            extra = f" · {ep.quantization}" if ep.quantization and ep.quantization != "unknown" else ""
-            lines.append(
-                f"{ep.provider_name}: {lat} · {up} uptime · {tp} · {ctx}{extra}"
+            self.setToolTip(
+                f"<b>{self.model_id}</b><br>"
+                f"<span style='color:#a0a0c8;'>Loading provider data…</span>"
             )
+            return
+
+        # Helpers for clean per-cell formatting
+        def lat_cell(ep):
+            ms = ep.latency_p50
+            if ms is None:
+                return "—"
+            return f"{ms/1000:.1f}s" if ms >= 1000 else f"{ms:.0f}ms"
+
+        def up_cell(ep):
+            return f"{ep.uptime:.0f}%" if ep.uptime is not None else "—"
+
+        def tp_cell(ep):
+            return f"{ep.throughput_p50:.0f} t/s" if ep.throughput_p50 else "—"
+
+        def ctx_cell(ep):
+            if not ep.context_length:
+                return "—"
+            if ep.context_length >= 1_000_000:
+                return f"{ep.context_length // 1_000_000}M"
+            return f"{ep.context_length // 1000}k"
+
+        rows = []
+        for ep in self._endpoints.endpoints:
+            region = ""
+            if ep.tag and "/" in ep.tag:
+                region = ep.tag.split("/", 1)[1]
+            name = ep.provider_name + (f" · {region}" if region else "")
+            row_color = "#00d2ff" if ep is self._best else "#f0f0ff"
+            rows.append(
+                f"<tr style='color:{row_color};'>"
+                f"<td>{name}</td>"
+                f"<td align='right' style='padding-left:18px;'>{lat_cell(ep)}</td>"
+                f"<td align='right' style='padding-left:14px;'>{up_cell(ep)}</td>"
+                f"<td align='right' style='padding-left:14px;'>{tp_cell(ep)}</td>"
+                f"<td align='right' style='padding-left:14px;'>{ctx_cell(ep)}</td>"
+                f"</tr>"
+            )
+
+        recommendation = ""
         if self._best is not None:
-            lines.append("")
-            lines.append(f"Best by latency+uptime: {self._best.provider_name}")
-        self.setToolTip("\n".join(lines))
+            recommendation = (
+                f"<br><span style='color:#00d2ff;'>★ Recommended: "
+                f"{self._best.provider_name}</span> "
+                f"<span style='color:#64648c;'>(fastest with ≥99% uptime)</span>"
+            )
+
+        model_name = self._display_model_name()
+        html = (
+            f"<b>{model_name}</b><br>"
+            f"<span style='color:#a0a0c8;'>Live from openrouter.ai · refreshed every 5 min</span><br>"
+            f"<br>"
+            f"<table cellpadding='3' cellspacing='0'>"
+            f"<tr style='color:#64648c;'>"
+            f"<td>PROVIDER</td>"
+            f"<td align='right' style='padding-left:18px;'>LAT</td>"
+            f"<td align='right' style='padding-left:14px;'>UPTIME</td>"
+            f"<td align='right' style='padding-left:14px;'>SPEED</td>"
+            f"<td align='right' style='padding-left:14px;'>CTX</td>"
+            f"</tr>"
+            f"{''.join(rows)}"
+            f"</table>"
+            f"{recommendation}"
+        )
+        self.setToolTip(html)
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -837,6 +894,339 @@ class PinnedModelCard(QWidget):
         if v < 10:
             return f"${v:.2f}"
         return f"${v:.0f}"
+
+
+# ---------------------------------------------------------------------------
+#  Model picker (search + pin/unpin)
+# ---------------------------------------------------------------------------
+class ModelPickerRow(QWidget):
+    """One row in the model picker dropdown. Click anywhere on the row
+    to toggle its pin state."""
+
+    toggled = Signal(str, bool)   # (model_id, is_pinned_after)
+
+    ROW_H = 30
+
+    def __init__(self, model_id, display_name, is_pinned, parent=None):
+        super().__init__(parent)
+        self.model_id = model_id
+        self._display = display_name
+        self._is_pinned = is_pinned
+        self._hover = False
+        self.setFixedHeight(self.ROW_H)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setMouseTracking(True)
+
+    def set_pinned(self, pinned):
+        self._is_pinned = pinned
+        self.update()
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_pinned = not self._is_pinned
+            self.toggled.emit(self.model_id, self._is_pinned)
+            self.update()
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w, h = self.width(), self.height()
+
+        # Hover background
+        if self._hover:
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(2, 2, w - 4, h - 4), 6, 6)
+            bg = QColor(Colors.CYAN)
+            bg.setAlpha(18)
+            painter.fillPath(path, QBrush(bg))
+
+        # Star (filled if pinned, hollow if not)
+        star_color = Colors.CYAN if self._is_pinned else Colors.TEXT_MUTED
+        star_char = "★" if self._is_pinned else "☆"
+        painter.setPen(star_color)
+        f = Fonts.body()
+        f.setPointSize(11)
+        painter.setFont(f)
+        painter.drawText(
+            QRectF(12, 0, 20, h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            star_char,
+        )
+
+        # Name (brighter when pinned)
+        painter.setPen(Colors.TEXT_PRIMARY if self._is_pinned else Colors.TEXT_SECONDARY)
+        painter.setFont(Fonts.body())
+        fm = QFontMetrics(Fonts.body())
+        text_x = 36
+        text_w = w - text_x - 12
+        painter.drawText(
+            QRectF(text_x, 0, text_w, h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            fm.elidedText(self._display, Qt.TextElideMode.ElideRight, int(text_w)),
+        )
+
+        painter.end()
+
+
+class ModelPicker(QWidget):
+    """Search bar + dropdown list of all OpenRouter models.
+
+    Closed state: just the search bar.
+    Open state: search bar + scrollable list of models (pinned at top
+    with filled stars, others below with hollow stars). Click anywhere
+    on a row to toggle pin/unpin.
+
+    Open triggers: search bar gets focus, OR has any text.
+    Close triggers: search bar loses focus AND text is empty.
+    """
+
+    pin_toggled = Signal(str, bool)  # (model_id, is_pinned_after)
+    open_changed = Signal(bool)
+
+    LIST_H = 260
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._all_models = []   # list of (id, display_name)
+        self._pinned = set()
+        self._is_open = False
+        self._rows = []         # ModelPickerRow widgets for the current view
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("Search models to pin or unpin…")
+        self.search.textChanged.connect(self._on_text_changed)
+        # Patch focus events to control the open/close lifecycle
+        self.search.focusInEvent = self._wrap_focus_in
+        self.search.focusOutEvent = self._wrap_focus_out
+        layout.addWidget(self.search)
+
+        # List card (rounded dark container)
+        self.list_card = QFrame(self)
+        self.list_card.setStyleSheet(
+            "QFrame { background: #1c1c32; border: 1px solid #323250; "
+            "border-radius: 8px; }"
+        )
+        self.list_card.setFixedHeight(self.LIST_H)
+        list_inner = QVBoxLayout(self.list_card)
+        list_inner.setContentsMargins(0, 0, 0, 0)
+        list_inner.setSpacing(0)
+
+        self.scroll = QScrollArea(self.list_card)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("background: transparent; border: none;")
+
+        self.list_content = QWidget()
+        self.list_content.setStyleSheet("background: transparent;")
+        self.list_layout = QVBoxLayout(self.list_content)
+        self.list_layout.setContentsMargins(4, 4, 4, 4)
+        self.list_layout.setSpacing(0)
+
+        self.scroll.setWidget(self.list_content)
+        list_inner.addWidget(self.scroll)
+        layout.addWidget(self.list_card)
+        self.list_card.hide()
+
+        # Debounce rebuilds while typing
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.timeout.connect(self._rebuild_list)
+
+    # ---- public API ----
+
+    def set_catalog(self, models):
+        """models: iterable of objects with .id and .name attributes."""
+        self._all_models = [(m.id, m.name) for m in models]
+        if self._is_open:
+            self._rebuild_list()
+
+    def set_pinned(self, pinned_ids):
+        self._pinned = set(pinned_ids)
+        # Update star state on existing rows in place; rebuild only when open
+        # changes the pinned section ordering on next open.
+        for row in self._rows:
+            row.set_pinned(row.model_id in self._pinned)
+
+    def is_open(self):
+        return self._is_open
+
+    # ---- internal ----
+
+    def _wrap_focus_in(self, event):
+        QLineEdit.focusInEvent(self.search, event)
+        self._open()
+
+    def _wrap_focus_out(self, event):
+        QLineEdit.focusOutEvent(self.search, event)
+        # delay close to let row clicks register
+        QTimer.singleShot(180, self._maybe_close)
+
+    def _maybe_close(self):
+        # Close on focus loss regardless of search text. Previously we
+        # kept it open if there was text, but users expect a dropdown
+        # to dismiss when they click away.
+        if self.search.hasFocus():
+            return
+        self._close()
+
+    def _on_text_changed(self, text):
+        if text.strip():
+            self._open()
+        elif not self.search.hasFocus():
+            self._close()
+            return
+        if self._is_open:
+            self._rebuild_timer.start(120)
+
+    def _open(self):
+        if self._is_open:
+            return
+        self._is_open = True
+        self.list_card.show()
+        self._rebuild_list()
+        self.open_changed.emit(True)
+
+    def _close(self):
+        if not self._is_open:
+            return
+        self._is_open = False
+        self.list_card.hide()
+        # Clear the search so the next open starts fresh, otherwise the
+        # user re-opens to see their previous filter and gets confused.
+        # blockSignals avoids re-triggering _on_text_changed mid-close.
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.open_changed.emit(False)
+
+    def _rebuild_list(self):
+        # Tear down
+        while self.list_layout.count():
+            child = self.list_layout.takeAt(0)
+            w = child.widget()
+            if w is not None:
+                w.deleteLater()
+        self._rows = []
+
+        query = self.search.text().strip().lower()
+        pinned_rows = []
+        unpinned_rows = []
+        for mid, name in self._all_models:
+            if query and query not in mid.lower() and query not in name.lower():
+                continue
+            display = name if name else mid
+            row = ModelPickerRow(mid, display, mid in self._pinned, self.list_content)
+            row.toggled.connect(self._on_row_toggled)
+            self._rows.append(row)
+            if mid in self._pinned:
+                pinned_rows.append(row)
+            else:
+                unpinned_rows.append(row)
+
+        # Pinned first, separator, then everything else
+        for r in pinned_rows:
+            self.list_layout.addWidget(r)
+        if pinned_rows and unpinned_rows:
+            sep = QFrame()
+            sep.setFixedHeight(1)
+            sep.setStyleSheet("background: #323250; margin: 4px 8px;")
+            self.list_layout.addWidget(sep)
+        for r in unpinned_rows:
+            self.list_layout.addWidget(r)
+
+        if not pinned_rows and not unpinned_rows:
+            empty = QLabel("No matches" if query else "Loading catalog…")
+            empty.setStyleSheet("color: #64648c; padding: 12px;")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setFont(Fonts.body())
+            self.list_layout.addWidget(empty)
+
+        self.list_layout.addStretch()
+
+    def _on_row_toggled(self, model_id, is_pinned_after):
+        if is_pinned_after:
+            self._pinned.add(model_id)
+        else:
+            self._pinned.discard(model_id)
+        self.pin_toggled.emit(model_id, is_pinned_after)
+
+
+# ---------------------------------------------------------------------------
+#  Pinned models column header (above the cards)
+# ---------------------------------------------------------------------------
+class PinnedColumnHeader(QWidget):
+    """Tiny one-row label strip explaining what each card column means.
+
+    Uses the SAME column geometry constants as PinnedModelCard so labels
+    sit directly above the data they describe.
+    """
+    # mirror PinnedModelCard constants
+    PAD_X = 14
+    PRICE_W = 82
+    UPTIME_W = 36
+    LATENCY_W = 46
+    GAP = 10
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(18)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w = self.width()
+        h = self.height()
+
+        price_right = w - self.PAD_X
+        up_right = price_right - self.PRICE_W - self.GAP
+        lat_right = up_right - self.UPTIME_W - self.GAP
+        name_x = self.PAD_X + 14  # match the indent of card rows
+
+        painter.setPen(Colors.TEXT_MUTED)
+        painter.setFont(Fonts.label())
+
+        painter.drawText(
+            QRectF(name_x, 0, lat_right - self.LATENCY_W - 8 - name_x, h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            "PROVIDER",
+        )
+        # Short labels so they actually fit the narrow metric columns
+        # at the same font weight as the section header.
+        painter.drawText(
+            QRectF(lat_right - self.LATENCY_W, 0, self.LATENCY_W, h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            "LAT",
+        )
+        painter.drawText(
+            QRectF(up_right - self.UPTIME_W, 0, self.UPTIME_W, h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            "UP%",
+        )
+        painter.drawText(
+            QRectF(price_right - self.PRICE_W, 0, self.PRICE_W, h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            "$/M  IN·OUT",
+        )
+        painter.end()
 
 
 # ---------------------------------------------------------------------------

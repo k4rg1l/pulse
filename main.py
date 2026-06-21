@@ -3,11 +3,45 @@ OpenRouter Pulse - Main Entry Point
 System tray application for monitoring your OpenRouter subscription.
 """
 import sys
+import os
 import ctypes
 import faulthandler
 import time
+from pathlib import Path
 
-faulthandler.enable()
+
+def _redirect_streams_if_frozen():
+    """In a PyInstaller windowed build, sys.stdout and sys.stderr are
+    None — any call to faulthandler.enable() or print() would crash.
+    Redirect both to %APPDATA%/Pulse/pulse.log so we still get crash
+    tracebacks for debugging."""
+    if sys.stderr is not None and sys.stdout is not None:
+        return
+    try:
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+        log_dir = Path(appdata) / "Pulse"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = open(log_dir / "pulse.log", "a", encoding="utf-8", buffering=1)
+        if sys.stderr is None:
+            sys.stderr = log
+        if sys.stdout is None:
+            sys.stdout = log
+    except Exception:
+        # Last resort: a devnull-ish writable thing so prints don't crash
+        class _Null:
+            def write(self, *a, **kw): pass
+            def flush(self): pass
+        if sys.stderr is None:
+            sys.stderr = _Null()
+        if sys.stdout is None:
+            sys.stdout = _Null()
+
+
+_redirect_streams_if_frozen()
+try:
+    faulthandler.enable()
+except Exception:
+    pass
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread, QTimer, Qt, Slot, Signal, QObject
@@ -40,6 +74,7 @@ class FetchTrigger(QObject):
     """Signals to trigger API fetches on the worker thread."""
     fetch_key = Signal()
     fetch_endpoints = Signal(str)   # model_id
+    fetch_models = Signal()         # full catalog for the picker
 
 
 class OpenRouterPulse(QObject):
@@ -65,8 +100,10 @@ class OpenRouterPulse(QObject):
         self.trigger = FetchTrigger()
         self.trigger.fetch_key.connect(self.api_worker.fetch_key_info)
         self.trigger.fetch_endpoints.connect(self.api_worker.fetch_endpoints)
+        self.trigger.fetch_models.connect(self.api_worker.fetch_models)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
+        self.api_worker.models_ready.connect(self._on_models)
         self.api_worker.error.connect(self._on_error)
 
         self.api_thread.start()
@@ -74,6 +111,9 @@ class OpenRouterPulse(QObject):
         # -- Dashboard --
         self.dashboard = Dashboard(self.history, self.settings)
         self.dashboard.refresh_requested.connect(self._refresh_all)
+        self.dashboard.refresh_endpoint_requested.connect(
+            self.trigger.fetch_endpoints.emit
+        )
 
         # -- Tray icon --
         self.tray = TrayIcon(self.settings)
@@ -93,6 +133,9 @@ class OpenRouterPulse(QObject):
         self.endpoints_timer.start(ENDPOINTS_REFRESH_INTERVAL)
 
         QTimer.singleShot(500, self._refresh_all)
+        # Fetch the full model catalog once on startup so the picker is
+        # ready as soon as the user clicks the search bar.
+        QTimer.singleShot(800, lambda: self.trigger.fetch_models.emit())
 
         # If no API key is set, surface it immediately
         if not API_KEY:
@@ -109,6 +152,10 @@ class OpenRouterPulse(QObject):
     def _refresh_all(self):
         self.trigger.fetch_key.emit()
         self._fetch_all_endpoints()
+        # Refresh the picker catalog too in case OpenRouter added new
+        # models since launch.  It's a slow-changing list so we don't
+        # do this every minute, only on manual refresh.
+        self.trigger.fetch_models.emit()
 
     def _fetch_all_endpoints(self):
         """Kick off an endpoints fetch for every pinned model."""
@@ -118,6 +165,10 @@ class OpenRouterPulse(QObject):
     @Slot(str, object)
     def _on_endpoints(self, model_id, model_endpoints):
         self.dashboard.update_endpoints(model_id, model_endpoints)
+
+    @Slot(object)
+    def _on_models(self, models):
+        self.dashboard.update_model_catalog(models)
 
     @Slot(object)
     def _on_key_info(self, key_info):

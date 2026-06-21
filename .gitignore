@@ -39,6 +39,9 @@ state.json
 .run.err
 .run.log
 .vrun.err
+.vrun.out
+.vrun.*
+_capture.py
 .2nd.err
 .2nd.log
 .dash*.png
@@ -46,3 +49,4 @@ state.json
 .menu.png
 .tip.png
 .final.png
+*.png.bak
