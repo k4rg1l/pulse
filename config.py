@@ -48,6 +48,7 @@ STATUS_URL = "https://status.openrouter.ai"
 KEY_REFRESH_INTERVAL = 60_000
 STATUS_REFRESH_INTERVAL = 120_000
 MODELS_REFRESH_INTERVAL = 1_800_000
+ENDPOINTS_REFRESH_INTERVAL = 300_000  # pinned-model health, every 5 min
 
 # -- Alert Thresholds (fallback when settings missing) --
 CREDIT_WARNING_THRESHOLD = 5.0
@@ -62,7 +63,7 @@ DASHBOARD_MAX_HEIGHT = 900
 
 # -- App Info --
 APP_NAME = "Pulse"
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.2.0"
 APP_ORG = "Pulse"
 
 # -- Startup Registry --

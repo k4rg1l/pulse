@@ -107,6 +107,75 @@ class ProviderInfo:
     headquarters: Optional[str] = None
 
 
+@dataclass
+class EndpointInfo:
+    """One provider's offering of a model: latency, uptime, price.
+
+    Latency in the API is a percentile dict {p50, p75, p90, p99} (or null).
+    We extract p50 for the primary metric and keep p90 around for tooltips.
+    """
+    provider_name: str = ""
+    tag: str = ""                       # e.g. "amazon-bedrock/eu-west-1"
+    quantization: str = ""
+    context_length: int = 0
+    pricing_prompt: float = 0.0         # $/token
+    pricing_completion: float = 0.0
+    uptime_last_30m: Optional[float] = None  # 0..100
+    uptime_last_5m: Optional[float] = None
+    uptime_last_1d: Optional[float] = None
+    latency_p50: Optional[float] = None  # ms
+    latency_p90: Optional[float] = None
+    throughput_p50: Optional[float] = None  # tokens/sec
+    status: int = 0
+    supports_implicit_caching: bool = False
+
+    # backwards-compat alias for older readers
+    @property
+    def latency_last_30m(self):
+        return self.latency_p50
+
+    @property
+    def throughput_last_30m(self):
+        return self.throughput_p50
+
+    @property
+    def price_per_mtok_prompt(self):
+        return self.pricing_prompt * 1_000_000
+
+    @property
+    def price_per_mtok_completion(self):
+        return self.pricing_completion * 1_000_000
+
+    @property
+    def uptime(self):
+        """Best uptime signal available: prefer 30m, then 1d, then 5m."""
+        for v in (self.uptime_last_30m, self.uptime_last_1d, self.uptime_last_5m):
+            if v is not None:
+                return v
+        return None
+
+
+@dataclass
+class ModelEndpoints:
+    """The full endpoint list for one model."""
+    model_id: str
+    model_name: str = ""
+    endpoints: list = field(default_factory=list)
+
+    def best_provider(self) -> Optional[EndpointInfo]:
+        """Lowest p50 latency among providers with uptime >= 99 percent.
+        Tie-breaker: cheaper prompt price. None if no metrics available."""
+        candidates = [
+            e for e in self.endpoints
+            if e.latency_p50 is not None
+            and (e.uptime is None or e.uptime >= 99.0)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda e: (e.latency_p50, e.pricing_prompt))
+        return candidates[0]
+
+
 class APIClient:
     """Synchronous API client for OpenRouter."""
 
@@ -216,6 +285,60 @@ class APIClient:
             print(f"[API] Error fetching model count: {e}")
             return 0
 
+    def get_model_endpoints(self, model_id: str) -> Optional[ModelEndpoints]:
+        """Fetch per-provider data for a single model."""
+        try:
+            url = f"{MODELS_ENDPOINT}/{model_id}/endpoints"
+            resp = self.session.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+
+            def _percentile(field, key):
+                v = ep.get(field)
+                if isinstance(v, dict):
+                    n = v.get(key)
+                    return float(n) if n is not None else None
+                if isinstance(v, (int, float)):
+                    return float(v)
+                return None
+
+            endpoints = []
+            for ep in data.get("endpoints", []):
+                pricing = ep.get("pricing", {})
+                try:
+                    pp = float(pricing.get("prompt", "0"))
+                except (ValueError, TypeError):
+                    pp = 0.0
+                try:
+                    cp = float(pricing.get("completion", "0"))
+                except (ValueError, TypeError):
+                    cp = 0.0
+                endpoints.append(EndpointInfo(
+                    provider_name=ep.get("provider_name", ""),
+                    tag=ep.get("tag", ""),
+                    quantization=ep.get("quantization", ""),
+                    context_length=ep.get("context_length", 0),
+                    pricing_prompt=pp,
+                    pricing_completion=cp,
+                    uptime_last_30m=ep.get("uptime_last_30m"),
+                    uptime_last_5m=ep.get("uptime_last_5m"),
+                    uptime_last_1d=ep.get("uptime_last_1d"),
+                    latency_p50=_percentile("latency_last_30m", "p50"),
+                    latency_p90=_percentile("latency_last_30m", "p90"),
+                    throughput_p50=_percentile("throughput_last_30m", "p50"),
+                    status=ep.get("status", 0),
+                    supports_implicit_caching=ep.get("supports_implicit_caching", False),
+                ))
+
+            return ModelEndpoints(
+                model_id=model_id,
+                model_name=data.get("name", model_id),
+                endpoints=endpoints,
+            )
+        except Exception as e:
+            print(f"[API] endpoints({model_id}) error: {e}")
+            return None
+
     def get_service_status(self) -> ServiceStatus:
         try:
             resp = self.session.get(STATUS_URL, timeout=10)
@@ -249,6 +372,7 @@ class APIWorker(QObject):
     model_count_ready = Signal(int)
     status_ready = Signal(object)
     providers_ready = Signal(object)
+    endpoints_ready = Signal(str, object)   # (model_id, ModelEndpoints|None)
     error = Signal(str)
 
     def __init__(self):
@@ -297,3 +421,14 @@ class APIWorker(QObject):
             self.providers_ready.emit(providers)
         except Exception as e:
             self.error.emit(str(e))
+
+    @Slot(str)
+    def fetch_endpoints(self, model_id: str):
+        """Fetch endpoints for one model. Always emits, even on failure
+        (so the section can show a per-row error state)."""
+        try:
+            ep = self.client.get_model_endpoints(model_id)
+            self.endpoints_ready.emit(model_id, ep)
+        except Exception as e:
+            print(f"[worker] endpoints({model_id}) crashed: {e}")
+            self.endpoints_ready.emit(model_id, None)

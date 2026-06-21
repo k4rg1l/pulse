@@ -16,9 +16,19 @@ The app is called Pulse. v0.1 supports OpenRouter. The name leaves room to add m
 - Persistence: snapshots, 90 day retention, top-up event detection
 - Single instance lock, click-outside dismiss, no taskbar entry
 
-## Next (v0.2)
+## Next (v0.2, building now)
 
-**Per-model and per-provider spend.** OpenRouter's `/api/v1/activity` is locked behind management keys. The user creates one at openrouter.ai/settings/keys and pastes it into settings.json. We then unlock:
+**Pinned models with per-provider health.** Uses `/api/v1/models/{author}/{slug}/endpoints` (untapped today). For each model you pin in settings, show every provider serving it with p50 latency, 30-min uptime, and price side by side. Mark the best-overall provider per model. 5-minute background refresh. Replaces the deleted Service Status section with something actionable.
+
+- New `tracked_models` field in settings.json (list of OpenRouter model IDs)
+- New PINNED MODELS section in the dashboard
+- Per-provider rows with metric pills and best-of indicator
+- Tooltip on each row with full numbers (throughput, p90 latency, quantization)
+- Auto-refresh every 5 min; manual refresh on dashboard refresh
+
+## Soon (v0.3)
+
+**Per-model and per-provider spend** via the management key in settings. Currently blocked by `/api/v1/activity` only seeing activity from org-scoped keys. Once enough org-scoped usage accumulates:
 
 - Spend by model (this month, this week, today)
 - Spend by provider
@@ -31,27 +41,9 @@ The app is called Pulse. v0.1 supports OpenRouter. The name leaves room to add m
 - Move API key out of plain text in settings.json into Windows Credential Manager
 - Pre-built `.exe` distributed through GitHub Releases (PyInstaller)
 
-## Soon (v0.3)
-
-**Per-provider health, done right.** The current `/api/v1/models/{author}/{slug}/endpoints` endpoint exposes uptime (5m, 30m, 1d), p50 to p99 latency, throughput, and quantization per provider serving a model. With management-key activity data, we know exactly which models the user actually hits. Combining these:
-
-- A watchlist of models the user pins (or auto-pinned from their top 5 by spend)
-- For each, a live heatmap of providers: green dot for high uptime, color graded down, hover for p90 latency and throughput
-- Click into a model to see all providers ranked
-- Outage detection: if a provider serving a pinned model drops below an uptime threshold, fire a toast
-
-This replaces the deleted Service Status section with something actually actionable.
-
-**Models, reinvented.** Don't replicate openrouter.ai/models. Be useful:
-
-- Pinned models list with live price and best-provider uptime in one row each
-- Cost calculator widget: pick a model, enter prompt token count and completion token count, get a cost in dollars with the cheapest provider
-- Smart picks card: "cheapest in chat", "cheapest in vision", "best uptime today"
-
 ## Distribution
 
 - Pre-built `.exe` via PyInstaller, attached to each GitHub Release. Removes the Python + pip + git clone install step entirely. Tracked separately because PyInstaller builds need iteration to get clean (no false positives from Windows Defender, bundled Qt plugins).
-- A second README screenshot showing the dashboard in context on a real desktop. Needs to be captured against a clean wallpaper / non-private backdrop. Skipped in v0.1 to avoid leaking dev session content into public assets.
 
 ## Later (v0.4 and on)
 
@@ -67,6 +59,15 @@ This replaces the deleted Service Status section with something actually actiona
 - Surface every detected top-up from snapshot history
 - Total auto-top-ups this month as a small KPI tile
 
+**Cost calculator**
+
+- Pick a model, enter prompt token count and completion token count, get a cost in dollars with the cheapest provider highlighted
+- Quick "what would this prompt cost across my pinned models" comparison
+
+**Smart picks card**
+
+- "cheapest in chat", "cheapest in vision", "best uptime today" auto-derived from the live `/endpoints` data
+
 **UX polish**
 
 - Global hotkey to open the dashboard (default Win+Shift+O, configurable)
@@ -80,6 +81,13 @@ This replaces the deleted Service Status section with something actually actiona
 - GitHub Actions for lint on every push
 - Issue templates for bug reports and feature requests
 - Contributor guide
+
+## Watching
+
+Things we'd love to add but the platform doesn't expose what we'd need yet.
+
+- **Claude Max subscription tracking.** Flat-rate consumer plan, no programmatic usage API today. If Anthropic ever exposes Max usage via the Console API, this becomes a second tab with the same shape as the OpenRouter one. Until then, no integration path that doesn't involve fragile auth-cookie scraping.
+- **Anthropic Console / OpenAI / Bedrock spend tabs.** All require admin-scoped credentials that change the UX significantly. Worth doing when we have the abstraction shape proven out by v0.3's per-model spend work.
 
 ## Maybe
 

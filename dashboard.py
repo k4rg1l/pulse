@@ -29,7 +29,7 @@ from config import (
 )
 from widgets import (
     ArcGauge, StatCard, SectionHeader, BurnRateBar, GradientStrip,
-    ErrorBanner, TimelineChart,
+    ErrorBanner, TimelineChart, PinnedModelCard,
 )
 
 
@@ -207,6 +207,7 @@ class Dashboard(QWidget):
         self._build_gauge_section()
         self._build_usage_section()
         self._build_burn_rate()
+        self._build_pinned_models()
         self._build_quick_links()
 
         self._content.addStretch()
@@ -301,6 +302,80 @@ class Dashboard(QWidget):
         burn_layout.addWidget(self.burn_rate_bar)
 
         self._content.addWidget(burn_card)
+
+    def _build_pinned_models(self):
+        self._pinned_header = SectionHeader("Pinned Models")
+        self._pinned_count_label = self._pinned_header.right_label
+        self._content.addWidget(self._pinned_header)
+
+        # Container that holds the per-model cards
+        self._pinned_container = QWidget()
+        self._pinned_container.setStyleSheet("background: transparent;")
+        self._pinned_layout = QVBoxLayout(self._pinned_container)
+        self._pinned_layout.setContentsMargins(0, 0, 0, 0)
+        self._pinned_layout.setSpacing(8)
+        self._content.addWidget(self._pinned_container)
+
+        # model_id -> PinnedModelCard
+        self._pinned_cards = {}
+
+        # Empty-state label (shown when no models pinned)
+        self._pinned_empty = QLabel(
+            "No models pinned.\n\n"
+            "Add OpenRouter model IDs to `tracked_models` in settings.json, e.g.\n"
+            '  ["anthropic/claude-sonnet-4.5", "openai/gpt-4o"]\n\n'
+            "Tray menu → Open Settings File."
+        )
+        self._pinned_empty.setFont(Fonts.body())
+        self._pinned_empty.setStyleSheet("color: #64648c; padding: 8px;")
+        self._pinned_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pinned_empty.setWordWrap(True)
+        self._pinned_layout.addWidget(self._pinned_empty)
+
+        initial = []
+        if self._settings:
+            initial = list(getattr(self._settings, "tracked_models", []) or [])
+        self.set_tracked_models(initial)
+
+    def set_tracked_models(self, model_ids):
+        """Replace the pinned model list. Creates/removes cards as needed."""
+        wanted = list(model_ids)
+
+        # Remove cards for models no longer tracked
+        for mid in list(self._pinned_cards.keys()):
+            if mid not in wanted:
+                card = self._pinned_cards.pop(mid)
+                self._pinned_layout.removeWidget(card)
+                card.deleteLater()
+
+        # Add cards for new models, preserving order
+        for mid in wanted:
+            if mid not in self._pinned_cards:
+                card = PinnedModelCard(mid, self._pinned_container)
+                self._pinned_cards[mid] = card
+                self._pinned_layout.addWidget(card)
+
+        # Reorder if needed: detach and re-add in wanted order
+        for mid in wanted:
+            card = self._pinned_cards[mid]
+            self._pinned_layout.removeWidget(card)
+        for mid in wanted:
+            self._pinned_layout.addWidget(self._pinned_cards[mid])
+
+        self._pinned_empty.setVisible(len(wanted) == 0)
+        self._pinned_count_label.setText(
+            f"{len(wanted)} model{'' if len(wanted) == 1 else 's'}"
+            if wanted else ""
+        )
+
+    def update_endpoints(self, model_id, model_endpoints):
+        """Worker reported new data (or None for failure) for one pinned model."""
+        card = self._pinned_cards.get(model_id)
+        if card is not None:
+            card.set_endpoints(model_endpoints)
+
+    def tracked_models(self):
+        return list(self._pinned_cards.keys())
 
     def _build_quick_links(self):
         self._content.addWidget(SectionHeader("Quick Links"))

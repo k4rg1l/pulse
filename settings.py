@@ -11,7 +11,7 @@ file is short and the user is technical.  A real dialog can come later.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict, fields
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 
 from persistence import state_dir
@@ -34,6 +34,11 @@ class Settings:
     # -- Auto top-up (set this if you've configured auto top-up on openrouter.ai)
     auto_topup_threshold: float = 0.0   # 0 disables; otherwise the trigger balance ($)
     auto_topup_amount: float = 0.0      # amount added per top-up ($)
+
+    # -- Pinned models for per-provider health section
+    # OpenRouter model IDs (e.g. "anthropic/claude-sonnet-4.5", "openai/gpt-4o").
+    # Each one shows every provider serving it with live latency, uptime, price.
+    tracked_models: list = field(default_factory=list)
 
     # -- Balance alerts (notifications)
     balance_warning: float = 5.0        # $ remaining → "Low credits" toast

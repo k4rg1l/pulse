@@ -6,6 +6,8 @@ More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
 
 ![dashboard](docs/dashboard.png)
 
+![pinned models](docs/dashboard-pinned.png)
+
 ![dashboard in context](docs/desktop.jpg)
 
 ## What it does
@@ -16,6 +18,7 @@ More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
 - Today's spend and a 30 day projection.
 - Hourly and daily burn rate computed from your own history, persisted across restarts.
 - Toast notifications when balance crosses your warning or critical threshold.
+- **Pinned models with per-provider health.** Pick the models you actually use, see live p50 latency, 30-min uptime, and price for every provider serving each one. Best provider per model is highlighted. Refreshes every 5 minutes.
 - Right-click menu for quick links to OpenRouter's dashboard, credits page, and models page.
 - Single instance lock so double-launching is a no-op.
 
@@ -52,9 +55,17 @@ All settings live in `%APPDATA%\Pulse\settings.json`:
   "balance_warning": 5,
   "balance_critical": 1,
   "key_refresh_seconds": 60,
-  "dismiss_on_focus_loss": true
+  "dismiss_on_focus_loss": true,
+  "tracked_models": [
+    "anthropic/claude-sonnet-4.5",
+    "openai/gpt-5",
+    "deepseek/deepseek-chat-v3.1",
+    "google/gemini-2.5-flash"
+  ]
 }
 ```
+
+`tracked_models` is the list of OpenRouter model IDs shown in the "Pinned Models" section. Add or remove freely; the dashboard updates on the next refresh. IDs are the same as the model slugs on openrouter.ai/models.
 
 Set `auto_topup_threshold` and `auto_topup_amount` to whatever you've configured on openrouter.ai. With them set, the forecast switches from "depletes in N days" to "next top-up in N hours" and the gauge shows an indicator.
 

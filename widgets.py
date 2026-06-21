@@ -568,6 +568,278 @@ class ModelListItem(QWidget):
 
 
 # ---------------------------------------------------------------------------
+#  Pinned Model Card (per-provider health)
+# ---------------------------------------------------------------------------
+class PinnedModelCard(QWidget):
+    """One pinned model with its per-provider health rows.
+
+    Width is whatever the parent gives us; height grows with provider count.
+    All drawing happens in paintEvent for tight column alignment.
+    """
+
+    ROW_H = 22
+    HEADER_H = 28
+    PAD_X = 14
+    PAD_Y = 8
+
+    def __init__(self, model_id, parent=None):
+        super().__init__(parent)
+        self.model_id = model_id
+        self._endpoints = None       # ModelEndpoints or None
+        self._error = False
+        self._loading = True
+        self._best = None
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._update_height()
+
+    def _update_height(self):
+        rows = len(self._endpoints.endpoints) if self._endpoints else 1
+        h = self.HEADER_H + max(1, rows) * self.ROW_H + self.PAD_Y * 2
+        self.setFixedHeight(h)
+
+    def set_endpoints(self, model_endpoints):
+        """ModelEndpoints or None (None means load failed)."""
+        self._endpoints = model_endpoints
+        self._error = model_endpoints is None
+        self._loading = False
+        if model_endpoints is not None:
+            self._best = model_endpoints.best_provider()
+        else:
+            self._best = None
+        self._update_height()
+        self._build_tooltip()
+        self.update()
+
+    def _build_tooltip(self):
+        if self._error:
+            self.setToolTip(f"Failed to fetch {self.model_id}")
+            return
+        if self._loading or not self._endpoints:
+            self.setToolTip(self.model_id)
+            return
+        lines = [f"{self._endpoints.model_name}", ""]
+        for ep in self._endpoints.endpoints:
+            lat = f"{ep.latency_last_30m:.0f}ms" if ep.latency_last_30m else "—"
+            up = f"{ep.uptime:.1f}%" if ep.uptime is not None else "—"
+            tp = f"{ep.throughput_last_30m:.0f} tok/s" if ep.throughput_last_30m else "—"
+            ctx = f"{ep.context_length // 1000}k ctx" if ep.context_length else ""
+            extra = f" · {ep.quantization}" if ep.quantization and ep.quantization != "unknown" else ""
+            lines.append(
+                f"{ep.provider_name}: {lat} · {up} uptime · {tp} · {ctx}{extra}"
+            )
+        if self._best is not None:
+            lines.append("")
+            lines.append(f"Best by latency+uptime: {self._best.provider_name}")
+        self.setToolTip("\n".join(lines))
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w = self.width()
+        h = self.height()
+
+        rect = QRectF(0, 0, w, h)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 10, 10)
+        painter.fillPath(path, QBrush(Colors.BG_CARD))
+        painter.setPen(QPen(Colors.BORDER, 1))
+        painter.drawPath(path)
+
+        # Header: model name (left) · best provider chip (right)
+        name = self._display_model_name()
+        painter.setPen(Colors.TEXT_PRIMARY)
+        painter.setFont(Fonts.subheading())
+        painter.drawText(
+            QRectF(self.PAD_X, self.PAD_Y, w - 2 * self.PAD_X, self.HEADER_H),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            name,
+        )
+
+        if self._best is not None:
+            chip_text = f"★ {self._best.provider_name}"
+            painter.setPen(Colors.CYAN)
+            painter.setFont(Fonts.tiny())
+            painter.drawText(
+                QRectF(self.PAD_X, self.PAD_Y, w - 2 * self.PAD_X, self.HEADER_H),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                chip_text,
+            )
+
+        y = self.PAD_Y + self.HEADER_H
+
+        if self._error:
+            painter.setPen(Colors.RED)
+            painter.setFont(Fonts.body())
+            painter.drawText(
+                QRectF(0, y, w, self.ROW_H),
+                Qt.AlignmentFlag.AlignCenter,
+                "Failed to load",
+            )
+            painter.end()
+            return
+
+        if self._loading or not self._endpoints:
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(Fonts.body())
+            painter.drawText(
+                QRectF(0, y, w, self.ROW_H),
+                Qt.AlignmentFlag.AlignCenter,
+                "Loading…",
+            )
+            painter.end()
+            return
+
+        if not self._endpoints.endpoints:
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(Fonts.body())
+            painter.drawText(
+                QRectF(0, y, w, self.ROW_H),
+                Qt.AlignmentFlag.AlignCenter,
+                "No providers reported",
+            )
+            painter.end()
+            return
+
+        # Column geometry: right-align all three metric columns from the right edge
+        # with explicit gaps so values never collide.
+        PRICE_W = 82
+        UPTIME_W = 36
+        LATENCY_W = 46
+        GAP = 10
+        price_right = w - self.PAD_X
+        up_right = price_right - PRICE_W - GAP
+        lat_right = up_right - UPTIME_W - GAP
+        name_x = self.PAD_X + 14
+        name_max_w = lat_right - LATENCY_W - 8 - name_x
+
+        for ep in self._endpoints.endpoints:
+            is_best = self._best is ep
+
+            if is_best:
+                hi_path = QPainterPath()
+                hi_path.addRoundedRect(
+                    QRectF(self.PAD_X - 4, y + 2, w - 2 * (self.PAD_X - 4), self.ROW_H - 4),
+                    6, 6,
+                )
+                hi = QColor(Colors.CYAN)
+                hi.setAlpha(18)
+                painter.fillPath(hi_path, QBrush(hi))
+
+                painter.setPen(Colors.CYAN)
+                painter.setFont(Fonts.body())
+                painter.drawText(
+                    QRectF(self.PAD_X, y, 12, self.ROW_H),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    "★",
+                )
+
+            painter.setPen(Colors.TEXT_PRIMARY if is_best else Colors.TEXT_SECONDARY)
+            painter.setFont(Fonts.body())
+            painter.drawText(
+                QRectF(name_x, y, name_max_w, self.ROW_H),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                self._elide(self._provider_label(ep), name_max_w, Fonts.body()),
+            )
+
+            lat_text, lat_color = self._latency_chip(ep.latency_last_30m)
+            painter.setPen(lat_color)
+            painter.setFont(Fonts.mono_small())
+            painter.drawText(
+                QRectF(lat_right - LATENCY_W, y, LATENCY_W, self.ROW_H),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                lat_text,
+            )
+
+            up_text, up_color = self._uptime_chip(ep.uptime)
+            painter.setPen(up_color)
+            painter.setFont(Fonts.mono_small())
+            painter.drawText(
+                QRectF(up_right - UPTIME_W, y, UPTIME_W, self.ROW_H),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                up_text,
+            )
+
+            price_text = self._price(ep)
+            painter.setPen(Colors.TEXT_ACCENT)
+            painter.setFont(Fonts.mono_small())
+            painter.drawText(
+                QRectF(price_right - PRICE_W, y, PRICE_W, self.ROW_H),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                price_text,
+            )
+
+            y += self.ROW_H
+
+        painter.end()
+
+    # ---- helpers ----
+
+    def _display_model_name(self):
+        if self._endpoints and self._endpoints.model_name:
+            n = self._endpoints.model_name
+            if ": " in n:
+                return n.split(": ", 1)[1]
+            return n
+        return self.model_id
+
+    def _provider_label(self, ep):
+        """Provider name with region suffix when the tag carries one,
+        so two 'Amazon Bedrock' rows become 'Amazon Bedrock · us-east-1'
+        and 'Amazon Bedrock · eu-west-1'."""
+        region = ""
+        if ep.tag and "/" in ep.tag:
+            region = ep.tag.split("/", 1)[1]
+        if region:
+            return f"{ep.provider_name} · {region}"
+        return ep.provider_name
+
+    def _elide(self, text, max_w, font):
+        fm = QFontMetrics(font)
+        return fm.elidedText(text, Qt.TextElideMode.ElideRight, int(max_w))
+
+    def _latency_chip(self, ms):
+        if ms is None:
+            return "—", Colors.TEXT_MUTED
+        if ms < 1000:
+            return f"{ms:.0f}ms", Colors.GREEN
+        s = ms / 1000.0
+        if s < 3:
+            return f"{s:.1f}s", Colors.YELLOW
+        return f"{s:.1f}s", Colors.ORANGE
+
+    def _uptime_chip(self, pct):
+        if pct is None:
+            return "—", Colors.TEXT_MUTED
+        if pct >= 99.0:
+            return f"{pct:.0f}%", Colors.GREEN
+        if pct >= 95.0:
+            return f"{pct:.0f}%", Colors.YELLOW
+        return f"{pct:.0f}%", Colors.RED
+
+    def _price(self, ep):
+        p, c = ep.price_per_mtok_prompt, ep.price_per_mtok_completion
+        if p == 0 and c == 0:
+            return "free"
+        return f"{self._fmt_money(p)}/{self._fmt_money(c)}"
+
+    def _fmt_money(self, v):
+        if v == 0:
+            return "$0"
+        if v < 0.01:
+            return f"${v:.3f}".rstrip("0").rstrip(".")
+        if v < 1:
+            return f"${v:.2f}"
+        # Drop trailing .00 so $3.00 -> $3 (saves column width)
+        if v == int(v):
+            return f"${int(v)}"
+        if v < 10:
+            return f"${v:.2f}"
+        return f"${v:.0f}"
+
+
+# ---------------------------------------------------------------------------
 #  Error Banner
 # ---------------------------------------------------------------------------
 class ErrorBanner(QWidget):

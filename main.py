@@ -12,7 +12,7 @@ faulthandler.enable()
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread, QTimer, Qt, Slot, Signal, QObject
 
-from config import APP_NAME, APP_ORG, API_KEY
+from config import APP_NAME, APP_ORG, API_KEY, ENDPOINTS_REFRESH_INTERVAL
 from theme import STYLESHEET
 from api_client import APIWorker
 from tray_icon import TrayIcon
@@ -39,6 +39,7 @@ def _acquire_single_instance_lock():
 class FetchTrigger(QObject):
     """Signals to trigger API fetches on the worker thread."""
     fetch_key = Signal()
+    fetch_endpoints = Signal(str)   # model_id
 
 
 class OpenRouterPulse(QObject):
@@ -63,7 +64,9 @@ class OpenRouterPulse(QObject):
 
         self.trigger = FetchTrigger()
         self.trigger.fetch_key.connect(self.api_worker.fetch_key_info)
+        self.trigger.fetch_endpoints.connect(self.api_worker.fetch_endpoints)
         self.api_worker.key_info_ready.connect(self._on_key_info)
+        self.api_worker.endpoints_ready.connect(self._on_endpoints)
         self.api_worker.error.connect(self._on_error)
 
         self.api_thread.start()
@@ -79,10 +82,15 @@ class OpenRouterPulse(QObject):
         self.tray.refresh_requested.connect(self._refresh_all)
         self.tray.show()
 
-        # -- Timer (single source of refresh) --
+        # -- Timers --
         self.key_timer = QTimer(self)
         self.key_timer.timeout.connect(self._fetch_key_info)
         self.key_timer.start(self.settings.key_refresh_seconds * 1000)
+
+        # Endpoints refresh on its own cadence (slower than balance polling).
+        self.endpoints_timer = QTimer(self)
+        self.endpoints_timer.timeout.connect(self._fetch_all_endpoints)
+        self.endpoints_timer.start(ENDPOINTS_REFRESH_INTERVAL)
 
         QTimer.singleShot(500, self._refresh_all)
 
@@ -100,6 +108,16 @@ class OpenRouterPulse(QObject):
     @Slot()
     def _refresh_all(self):
         self.trigger.fetch_key.emit()
+        self._fetch_all_endpoints()
+
+    def _fetch_all_endpoints(self):
+        """Kick off an endpoints fetch for every pinned model."""
+        for mid in self.dashboard.tracked_models():
+            self.trigger.fetch_endpoints.emit(mid)
+
+    @Slot(str, object)
+    def _on_endpoints(self, model_id, model_endpoints):
+        self.dashboard.update_endpoints(model_id, model_endpoints)
 
     @Slot(object)
     def _on_key_info(self, key_info):
