@@ -72,7 +72,7 @@ PySide6, Python 3.10+, requests. About 1.5k lines across 7 files. Pure Qt, no we
 
 Issues and PRs welcome. If you want to take a roadmap item, open an issue first so we don't duplicate work.
 
-Read [docs/AGENT_NOTES.md](docs/AGENT_NOTES.md) before touching tray, focus, or window code. It captures the non-obvious things we learned the hard way (frameless window quirks, why click-outside dismiss uses polling, the taskbar-entry fix, the safe restart command, the OpenRouter API constraints). Saves a couple of debugging cycles for anyone new.
+Read [AGENTS.md](AGENTS.md) before touching tray, focus, or window code. It lists the invariants, the validation checklist, and the API gotchas.
 
 ## License
 
