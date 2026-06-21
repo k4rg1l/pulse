@@ -26,6 +26,11 @@ class Settings:
     # -- API key (optional; OPENROUTER_API_KEY env var takes precedence)
     api_key: str = ""
 
+    # -- Management key (unlocks /api/v1/activity for v0.2 per-model spend)
+    # Create one at openrouter.ai/settings/keys.  Keep this secret; it has
+    # broader scope than a regular API key.
+    management_api_key: str = ""
+
     # -- Auto top-up (set this if you've configured auto top-up on openrouter.ai)
     auto_topup_threshold: float = 0.0   # 0 disables; otherwise the trigger balance ($)
     auto_topup_amount: float = 0.0      # amount added per top-up ($)

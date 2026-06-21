@@ -2,6 +2,8 @@
 
 What's coming after v0.1. Order is rough, not strict. Each item links back to why it's worth doing.
 
+The app is called Pulse. v0.1 supports OpenRouter. The name leaves room to add more providers and aggregators later (Anthropic console, OpenAI usage, AWS Bedrock spend, etc.) without a rename. Cross-provider unification is a long-term goal, not a v0.2 promise.
+
 ## Now (v0.1, shipped)
 
 - Tray icon with live balance gauge and rich tooltip
@@ -45,6 +47,11 @@ This replaces the deleted Service Status section with something actually actiona
 - Pinned models list with live price and best-provider uptime in one row each
 - Cost calculator widget: pick a model, enter prompt token count and completion token count, get a cost in dollars with the cheapest provider
 - Smart picks card: "cheapest in chat", "cheapest in vision", "best uptime today"
+
+## Distribution
+
+- Pre-built `.exe` via PyInstaller, attached to each GitHub Release. Removes the Python + pip + git clone install step entirely. Tracked separately because PyInstaller builds need iteration to get clean (no false positives from Windows Defender, bundled Qt plugins).
+- A second README screenshot showing the dashboard in context on a real desktop. Needs to be captured against a clean wallpaper / non-private backdrop. Skipped in v0.1 to avoid leaking dev session content into public assets.
 
 ## Later (v0.4 and on)
 

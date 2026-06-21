@@ -20,8 +20,8 @@ PROVIDERS_ENDPOINT = f"{BASE_URL}/api/v1/providers"
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
-    "HTTP-Referer": "https://github.com/openrouter-pulse",
-    "X-OpenRouter-Title": "OpenRouter Pulse",
+    "HTTP-Referer": "https://github.com/k4rg1l/pulse",
+    "X-OpenRouter-Title": "Pulse",
 }
 
 

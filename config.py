@@ -20,15 +20,17 @@ def _load_api_key() -> str:
     if env_key:
         return env_key
     appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
-    settings_path = Path(appdata) / "OpenRouterPulse" / "settings.json"
-    if settings_path.exists():
-        try:
-            data = json.loads(settings_path.read_text(encoding="utf-8-sig"))
-            key = str(data.get("api_key", "")).strip()
-            if key:
-                return key
-        except Exception:
-            pass
+    # Check new location first, then legacy "OpenRouterPulse" dir for migration
+    for dirname in ("Pulse", "OpenRouterPulse"):
+        path = Path(appdata) / dirname / "settings.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                key = str(data.get("api_key", "")).strip()
+                if key:
+                    return key
+            except Exception:
+                pass
     return ""
 
 
@@ -59,13 +61,14 @@ DASHBOARD_MIN_HEIGHT = 680
 DASHBOARD_MAX_HEIGHT = 900
 
 # -- App Info --
-APP_NAME = "OpenRouter Pulse"
-APP_VERSION = "0.1.0"
-APP_ORG = "OpenRouterPulse"
+APP_NAME = "Pulse"
+APP_VERSION = "0.1.1"
+APP_ORG = "Pulse"
 
 # -- Startup Registry --
 STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-STARTUP_REG_NAME = "OpenRouterPulse"
+STARTUP_REG_NAME = "Pulse"
+STARTUP_REG_LEGACY_NAME = "OpenRouterPulse"  # migrate on startup if present
 
 # -- Links --
 OPENROUTER_DASHBOARD_URL = "https://openrouter.ai/activity"

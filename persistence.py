@@ -26,10 +26,26 @@ MAX_SNAPSHOTS = 20_000  # hard cap (~2 weeks at 60s cadence)
 
 
 def state_dir() -> Path:
+    """%APPDATA%/Pulse, creating it if needed.
+
+    One-time migration: if the legacy %APPDATA%/OpenRouterPulse directory
+    exists from a pre-rebrand install and the new dir doesn't, copy its
+    contents over so the user keeps their settings, history, and key.
+    The legacy dir is left in place as a safety backup.
+    """
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    p = Path(base) / "OpenRouterPulse"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    new_dir = Path(base) / "Pulse"
+    legacy_dir = Path(base) / "OpenRouterPulse"
+
+    if not new_dir.exists() and legacy_dir.exists():
+        try:
+            import shutil
+            shutil.copytree(legacy_dir, new_dir)
+        except Exception as e:
+            print(f"[persistence] migrate from legacy dir failed: {e}")
+
+    new_dir.mkdir(parents=True, exist_ok=True)
+    return new_dir
 
 
 def state_path() -> Path:

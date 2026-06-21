@@ -19,7 +19,7 @@ from theme import Colors, Fonts
 from config import (
     APP_NAME, OPENROUTER_DASHBOARD_URL, OPENROUTER_CREDITS_URL,
     OPENROUTER_SETTINGS_URL, OPENROUTER_MODELS_URL,
-    STARTUP_REG_KEY, STARTUP_REG_NAME,
+    STARTUP_REG_KEY, STARTUP_REG_NAME, STARTUP_REG_LEGACY_NAME,
 )
 
 
@@ -40,8 +40,38 @@ class TrayIcon(QSystemTrayIcon):
         self._update_icon(1.0)
         self.setToolTip(f"{APP_NAME}\nLoading...")
 
+        self._migrate_legacy_startup_entry()
         self._build_menu()
         self.activated.connect(self._on_activated)
+
+    def _migrate_legacy_startup_entry(self):
+        """If a pre-rebrand 'OpenRouterPulse' Run entry exists, copy it
+        to the new name and remove the old one.  Preserves the user's
+        'Start with Windows' preference across the rebrand.
+        """
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0,
+                winreg.KEY_READ | winreg.KEY_WRITE,
+            )
+            try:
+                value, _ = winreg.QueryValueEx(key, STARTUP_REG_LEGACY_NAME)
+            except (FileNotFoundError, OSError):
+                value = None
+            if value is not None:
+                # Only set new entry if not already there (don't clobber a
+                # newer one the user has already configured).
+                try:
+                    winreg.QueryValueEx(key, STARTUP_REG_NAME)
+                except (FileNotFoundError, OSError):
+                    winreg.SetValueEx(key, STARTUP_REG_NAME, 0, winreg.REG_SZ, value)
+                try:
+                    winreg.DeleteValue(key, STARTUP_REG_LEGACY_NAME)
+                except (FileNotFoundError, OSError):
+                    pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"[tray] legacy startup migrate: {e}")
 
     # ------------------------------------------------------------------
     #  Dynamic icon drawing

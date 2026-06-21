@@ -24,7 +24,7 @@ from settings import Settings
 # ---------------------------------------------------------------------------
 #  Single-instance enforcement (Windows named mutex)
 # ---------------------------------------------------------------------------
-_MUTEX_NAME = "Global\\OpenRouterPulse_SingleInstance_v1"
+_MUTEX_NAME = "Global\\Pulse_SingleInstance_v1"
 _ERROR_ALREADY_EXISTS = 183
 
 
