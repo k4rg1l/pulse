@@ -330,17 +330,12 @@ class Dashboard(QWidget):
         # model_id -> PinnedModelCard
         self._pinned_cards = {}
 
-        # Empty-state label (shown when no models pinned)
-        self._pinned_empty = QLabel(
-            "No models pinned.\n\n"
-            "Add OpenRouter model IDs to `tracked_models` in settings.json, e.g.\n"
-            '  ["anthropic/claude-sonnet-4.5", "openai/gpt-4o"]\n\n'
-            "Tray menu → Open Settings File."
-        )
+        # Empty-state label (shown when no models pinned). Kept minimal
+        # since the picker above already prompts users to search and pin.
+        self._pinned_empty = QLabel("No models pinned.")
         self._pinned_empty.setFont(Fonts.body())
-        self._pinned_empty.setStyleSheet("color: #64648c; padding: 8px;")
+        self._pinned_empty.setStyleSheet("color: #64648c; padding: 16px;")
         self._pinned_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._pinned_empty.setWordWrap(True)
         self._pinned_layout.addWidget(self._pinned_empty)
 
         initial = []

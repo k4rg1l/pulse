@@ -1009,6 +1009,7 @@ class ModelPicker(QWidget):
 
         self.search = QLineEdit(self)
         self.search.setPlaceholderText("Search models to pin or unpin…")
+        self.search.setClearButtonEnabled(True)  # built-in X to clear text
         self.search.textChanged.connect(self._on_text_changed)
         # Patch focus events to control the open/close lifecycle
         self.search.focusInEvent = self._wrap_focus_in
@@ -1107,12 +1108,9 @@ class ModelPicker(QWidget):
             return
         self._is_open = False
         self.list_card.hide()
-        # Clear the search so the next open starts fresh, otherwise the
-        # user re-opens to see their previous filter and gets confused.
-        # blockSignals avoids re-triggering _on_text_changed mid-close.
-        self.search.blockSignals(True)
-        self.search.clear()
-        self.search.blockSignals(False)
+        # Preserve the search text. Re-focusing the bar re-opens the list
+        # with the same filter applied. Use the built-in X button on the
+        # line edit to clear.
         self.open_changed.emit(False)
 
     def _rebuild_list(self):
@@ -1165,6 +1163,10 @@ class ModelPicker(QWidget):
         else:
             self._pinned.discard(model_id)
         self.pin_toggled.emit(model_id, is_pinned_after)
+        # Restore focus to the search bar so the dropdown stays open and
+        # the user can pin/unpin more in a single visit without the list
+        # snapping shut on every click.
+        self.search.setFocus(Qt.FocusReason.OtherFocusReason)
 
 
 # ---------------------------------------------------------------------------
