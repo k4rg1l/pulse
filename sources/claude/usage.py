@@ -97,15 +97,48 @@ def parse_usage(data: dict) -> ClaudeUsage:
     return ClaudeUsage(windows=windows)
 
 
-def fetch_usage(access_token: str, timeout: float = 12.0) -> Optional[dict]:
-    """GET the usage endpoint. Returns the JSON dict, or None on any failure
-    (network, non-200, bad JSON). Never raises. Read-only."""
+@dataclass
+class UsageFetch:
+    """Classified outcome of one usage-endpoint GET so the source can react
+    differently to a transient throttle vs a dead token vs a network blip.
+
+    ``kind`` is one of:
+      * ``"ok"``           — ``data`` holds the parsed JSON
+      * ``"rate_limited"`` — HTTP 429; back off and keep showing last-known
+      * ``"auth"``         — HTTP 401/403; the token is expired/invalid
+      * ``"unavailable"``  — network error / unexpected status / bad JSON
+    """
+    kind: str
+    data: Optional[dict] = None
+    retry_after: Optional[float] = None
+
+
+def fetch_usage(access_token: str, timeout: float = 12.0) -> UsageFetch:
+    """GET the usage endpoint and CLASSIFY the result. Never raises. Read-only.
+
+    Distinguishing 429 (rate limited) from 401 (auth) is the whole point: a
+    throttle must NOT be reported as a dead token, or the UI tells the user to
+    "open Claude Code" when their token is actually fine.
+    """
     try:
         headers = dict(_BASE_HEADERS)
         headers["Authorization"] = f"Bearer {access_token}"
         resp = requests.get(USAGE_URL, headers=headers, timeout=timeout)
-        if resp.status_code != 200:
-            return None
-        return resp.json()
     except Exception:
-        return None
+        return UsageFetch("unavailable")
+
+    if resp.status_code == 200:
+        try:
+            return UsageFetch("ok", data=resp.json())
+        except Exception:
+            return UsageFetch("unavailable")
+    if resp.status_code == 429:
+        ra = None
+        try:
+            ra = float(resp.headers.get("Retry-After"))
+        except (TypeError, ValueError):
+            ra = None
+        return UsageFetch("rate_limited", retry_after=ra)
+    if resp.status_code in (401, 403):
+        return UsageFetch("auth")
+    return UsageFetch("unavailable")

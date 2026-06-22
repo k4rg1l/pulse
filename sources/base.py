@@ -45,3 +45,10 @@ class Source(ABC):
     @abstractmethod
     def build_card(self, parent: Optional[object] = None) -> Any:
         """MAIN thread. Return a QWidget exposing ``render(data)``."""
+
+    def force_refresh(self) -> None:
+        """Optional (MAIN thread): the user asked for an immediate refresh
+        (e.g. the dashboard Refresh button). A source with an internal poll
+        cooldown/backoff may override this to attempt a fetch on the next
+        poll() regardless of its schedule. Default: no-op."""
+        return None

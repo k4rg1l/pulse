@@ -57,6 +57,22 @@ def _fmt_reset(dt) -> str:
     return f"{m}m"
 
 
+def _fmt_age(seconds) -> str:
+    """Human 'as of …' age for cached usage."""
+    s = int(max(0, seconds or 0))
+    if s < 45:
+        return "just now"
+    m = s // 60
+    if m < 1:
+        return "just now"
+    if m < 60:
+        return f"{m}m ago"
+    h = m // 60
+    if h < 24:
+        return f"{h}h ago"
+    return f"{h // 24}d ago"
+
+
 def _sev_color(sev: str):
     """Map a usage severity to its bar/text colour."""
     if sev == "critical":
@@ -164,10 +180,13 @@ class ClaudeCard(QWidget):
                 p.drawText(QRectF(x, y, right - x, lh),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, tier)
                 note, col = (None, Colors.TEXT_MUTED)
-                if d and d.error:
+                st = getattr(d, "usage_status", "unavailable") if d else "unavailable"
+                if st == "expired":
+                    note, col = "open Claude Code", Colors.YELLOW
+                elif st in ("live", "cached") and d and d.usage_age_seconds is not None:
+                    note, col = f"as of {_fmt_age(d.usage_age_seconds)}", Colors.TEXT_MUTED
+                elif st == "unavailable" and d and d.error:
                     note, col = "unavailable", Colors.RED
-                elif d and d.stale:
-                    note = "usage stale"
                 if note:
                     p.setPen(col)
                     p.setFont(Fonts.tiny())
@@ -176,7 +195,8 @@ class ClaudeCard(QWidget):
             elif kind == "window":
                 self._paint_window(p, op[2], x, y, w)
             elif kind == "message":
-                if d and d.stale:
+                st = getattr(d, "usage_status", "unavailable") if d else "unavailable"
+                if st == "expired":
                     msg = "Open Claude Code to refresh usage"
                 elif d and d.error:
                     msg = d.error

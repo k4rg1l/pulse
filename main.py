@@ -188,6 +188,20 @@ class OpenRouterPulse(QObject):
         # models since launch.  It's a slow-changing list so we don't
         # do this every minute, only on manual refresh.
         self.trigger.fetch_models.emit()
+        # Peer sources (Claude/GPU/System) too — a manual refresh should
+        # refetch everything, not just OpenRouter. force_refresh() lets a
+        # source (e.g. Claude) break its usage-endpoint backoff and retry now.
+        self._refresh_sources()
+
+    def _refresh_sources(self):
+        if getattr(self, "source_trigger", None) is None:
+            return
+        for src in getattr(self, "sources", None) or []:
+            try:
+                src.force_refresh()
+            except Exception:
+                pass
+            self.source_trigger.poll.emit(src.source_id)
 
     def _fetch_all_endpoints(self):
         """Kick off an endpoints fetch for every pinned model."""
