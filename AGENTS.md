@@ -2,6 +2,8 @@
 
 For anyone (or anything) editing this repo. Read this before you start. The invariants below exist because we hit each one the hard way; honoring them saves you from re-discovering bugs that took real time to find.
 
+> **New agent? Read [HANDOFF.md](HANDOFF.md) first** for current state + next steps, then this file for how to work. AGENTS.md is the stable "how"; HANDOFF.md is the living "where we are."
+
 ## Run
 
 ```powershell
@@ -123,12 +125,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 
 ## Handoff: what the next agent should know
 
-**Current state:**
-- Tag `v0.5.0` is the current release on `main` (Claude usage source, first `pytest` suite, the GC-crash fix). Pulse.exe attached to the GitHub release.
-- The `feat/agnostic-sources` branch (PR #1) makes Pulse fully **source-agnostic** (neutral dashboard host; OpenRouter is a peer) and adds **GPU** + **System** sources and a **global hotkey**. See the Sources section above; review/merge that PR for the v0.6 feature set.
-- Code is stable. 11-point validation passes, plus the 9 additional Pinned-Models checks above.
-- The dashboard's three sections (Credit Balance, Usage, Burn Rate) and the Pinned Models section are the entire UI. Quick Links row at the bottom links to OpenRouter pages.
-- User's `%APPDATA%/Pulse/settings.json` has both an org-scoped `api_key` and an org-scoped `management_api_key`. The management key is there but unused by the code yet.
+> **Current state, what's in flight, and prioritized next steps live in [HANDOFF.md](HANDOFF.md) — read it first.** Keep live state THERE, not here, so this file stays stable. Below are only the *durable* rationale + rules.
 
 **Recent intentional decisions:**
 - Dropdown is an overlay child of the dashboard, not a top-level window. Tried both; child works more reliably.
@@ -136,15 +133,6 @@ from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 - Long model names elide rather than wrap. The user explicitly preferred this over alternatives.
 - Empty-state for "no pinned models" is one line. The picker right above already prompts the user on how to add some.
 - Validation discipline matters: the user has been burned by shipping without it. After any UI change, run the 20-point list above and present screenshots before committing.
-
-**What's likely to come next:**
-The user has expressed interest in (in rough order):
-1. Notifications (top-up triggered, balance-out, provider-outage on pinned, daily summary)
-2. Cost calculator widget
-3. Per-model spend via `/activity` once the management-key data accumulates
-4. Settings GUI dialog
-
-See `ROADMAP.md` for the longer view.
 
 **Don't:**
 - Add features the user hasn't asked for.
