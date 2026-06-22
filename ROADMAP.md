@@ -64,6 +64,19 @@ Direction (agreed): make Pulse a true multi-source monitor — the OpenRouter→
 (so no provider is privileged), then notifications/alert engine, daily-spend polish, GPU/system
 sources, and an MCP server. See `docs/RESEARCH-2026-06-21.md` for the full exploration.
 
+### v0.6 (in review — `feat/agnostic-sources`, PR #1)
+
+- **Source-agnostic dashboard.** OpenRouter is no longer the host — the dashboard
+  is a neutral ordered section host (`settings.source_order`), and OpenRouter,
+  Claude, GPU, and System render as peer section-groups. Adding a source is
+  uniform; no provider is privileged. (See AGENTS.md → "Sources".)
+- **NVIDIA GPU source** — utilization / VRAM / temperature / power via NVML
+  (`nvidia-ml-py`); auto-detected, hidden on non-NVIDIA machines.
+- **System vitals source** — CPU / RAM / network up-down via `psutil`.
+- **Global hotkey** — Win+Shift+O (configurable; `settings.hotkey`) summons the
+  dashboard, via Win32 `RegisterHotKey` (no AV-tripping low-level hook).
+- 82 unit tests; every new source's parser is unit-tested + its card render-tested.
+
 ## Next (v0.6 candidates)
 
 Pick whichever is most useful at the time:

@@ -9,6 +9,7 @@ Two jobs:
    (settings.json, state.json). `persistence.state_dir()` reads APPDATA
    fresh on each call, so patching the env var is sufficient and total.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -27,3 +28,12 @@ def isolate_appdata(tmp_path, monkeypatch):
     and settings.py never touches the user's real data."""
     monkeypatch.setenv("APPDATA", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """A headless (offscreen) QApplication for widget-logic tests. Session-
+    scoped — Qt allows only one QApplication per process."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
