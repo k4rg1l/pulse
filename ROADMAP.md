@@ -64,7 +64,7 @@ Direction (agreed): make Pulse a true multi-source monitor — the OpenRouter→
 (so no provider is privileged), then notifications/alert engine, daily-spend polish, GPU/system
 sources, and an MCP server. See `docs/RESEARCH-2026-06-21.md` for the full exploration.
 
-### v0.6 (in review — `feat/agnostic-sources`, PR #1)
+### v0.6
 
 - **Source-agnostic dashboard.** OpenRouter is no longer the host — the dashboard
   is a neutral ordered section host (`settings.source_order`), and OpenRouter,
