@@ -52,6 +52,10 @@ class Settings:
     # -- UI
     dismiss_on_focus_loss: bool = True  # close dashboard when user clicks elsewhere
 
+    # -- Sources (peers to OpenRouter). Auto-detected when their data is
+    # present; set the flag to False to hide a source you don't want shown.
+    show_claude: bool = True            # show the Claude card if ~/.claude creds exist
+
     @classmethod
     def load(cls) -> "Settings":
         path = settings_path()

@@ -370,8 +370,12 @@ class SectionHeader(QWidget):
         self._collapsed = False
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 0)
-        layout.setSpacing(6)
+        # Flush with the card border below: no left margin, no inter-item
+        # spacing. The chevron reserves zero width until set_collapsible()
+        # turns it on, so non-collapsible headers (Usage, Burn Rate, etc.)
+        # don't carry an empty chevron gap that pushes the title rightward.
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self.chevron = QLabel("")
         # Larger + bolder than the title text so the affordance reads
@@ -381,7 +385,9 @@ class SectionHeader(QWidget):
         chev_font.setWeight(QFont.Weight.Bold)
         self.chevron.setFont(chev_font)
         self.chevron.setStyleSheet("color: #a0a0c8;")
-        self.chevron.setFixedWidth(16)
+        # 0 until collapsible (see set_collapsible) so the title sits flush
+        # with the card border on non-collapsible headers.
+        self.chevron.setFixedWidth(0)
         # Don't grab clicks — let them bubble to SectionHeader.mousePressEvent
         self.chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.chevron)
@@ -402,10 +408,15 @@ class SectionHeader(QWidget):
         self._collapsible = collapsible
         if collapsible:
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            # Reserve room for the glyph (16) + a small gap (4) before the
+            # title. The chevron glyph itself renders flush at the card
+            # border; the title follows it.
+            self.chevron.setFixedWidth(20)
             self._refresh_chevron()
         else:
             self.unsetCursor()
             self.chevron.setText("")
+            self.chevron.setFixedWidth(0)
 
     def set_collapsed(self, collapsed: bool):
         if collapsed == self._collapsed:
@@ -1566,7 +1577,11 @@ class PinnedColumnHeader(QWidget):
         price_right = w - self.PAD_X
         up_right = price_right - self.PRICE_W - self.GAP
         lat_right = up_right - self.UPTIME_W - self.GAP
-        name_x = self.PAD_X + 14  # match the indent of card rows
+        # Flush-left with the card border / section titles / search bar, so
+        # the whole section shares one clean left edge. (The model rows sit
+        # further in to clear the ★ best-provider marker — the column label
+        # reading from the container edge looks intentional, not floating.)
+        name_x = 0
 
         painter.setPen(Colors.TEXT_MUTED)
         painter.setFont(Fonts.label())

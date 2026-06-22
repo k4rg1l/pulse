@@ -39,7 +39,32 @@ The app is called Pulse. The current releases support OpenRouter. The name leave
 - Header layout fixed so long model names elide cleanly without overlapping the ★ Provider chip
 - Tooltip rewrites: HTML, sectioned, less jargon
 
-## Next (v0.5 candidates)
+### v0.5
+- **Pulse is now multi-source.** New `sources/` architecture: each source (OpenRouter,
+  Claude, …) is a self-contained, pollable, self-rendering peer — `is_available()` /
+  `poll()` (worker thread) / `build_card()` (main thread) — so no single provider is
+  privileged. OpenRouter migrates onto this contract incrementally (the full card refactor).
+- **Claude source** (auto-detected when `~/.claude/.credentials.json` exists; hide with
+  `show_claude: false`):
+  - 5h / 7d / Sonnet usage utilisation with reset countdowns and severity colour, from the
+    consumer-plan `/api/oauth/usage` endpoint. **Strictly read-only** — Pulse never
+    refreshes or rotates the Claude token (Claude Code owns that lifecycle; rotating it
+    could log the user out). Expired/unreachable → degrades to a "stale" state.
+  - Local 7-day token accounting from `~/.claude/projects/**/*.jsonl` (total tokens, cache
+    efficiency, message count, per-model split), with a per-file mtime/size cache so large
+    transcripts aren't re-parsed each poll.
+- **Testing foundation:** a `pytest` suite for the pure logic (persistence, settings,
+  api_client, Claude parsers) plus **[docs/TESTING.md](docs/TESTING.md)** — the standard for
+  how to test (automated + Windows-MCP UI recipes + every automation gotcha). Read it before
+  validating; expand it when you ship a feature.
+- **Section-title alignment fix:** section headers and the pinned column labels now sit flush
+  with the card borders.
+
+Direction (agreed): make Pulse a true multi-source monitor — the OpenRouter→Source migration
+(so no provider is privileged), then notifications/alert engine, daily-spend polish, GPU/system
+sources, and an MCP server. See `docs/RESEARCH-2026-06-21.md` for the full exploration.
+
+## Next (v0.6 candidates)
 
 Pick whichever is most useful at the time:
 

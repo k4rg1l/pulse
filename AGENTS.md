@@ -12,7 +12,11 @@ python main.py
 
 ## Validate before merging
 
-Open the dashboard and check every item. Skip none. Take screenshots if a UI change is involved.
+**Full testing guide: [docs/TESTING.md](docs/TESTING.md).** It is the source of truth for *how* to test — the `pytest` layer for pure logic, the Windows-MCP recipes for driving the live UI, every automation gotcha, and a per-feature recipe table. Read it before validating; expand it whenever you ship a feature. The 20-point checklist below is the *what*; TESTING.md is the *how*.
+
+Run the automated tests first: `pip install -r requirements-dev.txt && python -m pytest -q` (all green, sub-second).
+
+Then open the dashboard and check every item. Skip none. Take screenshots if a UI change is involved.
 
 1. App starts with no exceptions (`python main.py`, watch stderr).
 2. Tray icon visible, tooltip shows the balance.
@@ -43,6 +47,8 @@ If your change touches Pinned Models, also verify:
 These exist because we hit them the hard way. Breaking any one corrupts behavior in non-obvious ways.
 
 **`OpenRouterPulse` must inherit `QObject`.** Cross-thread signals from the worker only marshal into the main event loop when the receiver is a `QObject`. A plain Python class corrupts the GUI heap. `super().__init__()` must run after `QApplication` exists.
+
+**Automatic cyclic GC is disabled; collection runs only on the main thread.** `OpenRouterPulse.__init__` calls `gc.disable()` and runs `gc.collect()` on a main-thread `QTimer` (`_collect_garbage`). DO NOT re-enable automatic GC. With worker threads doing heavy parsing (JSON catalog, Claude JSONL), the cyclic collector would otherwise fire *on a worker thread* and, because Qt's C++ paint releases the GIL, race a live `paintEvent` on the main thread — deterministically reproduced as an **access violation** (`get_*_info` → GC concurrent with `BurnRateBar`/`TimelineChart` paint). Refcount cleanup is unaffected; only cycle collection moves to the main thread, where it can't race a paint. (The benign `0x8001010d` COM dumps faulthandler sometimes logs at `app.exec()` are *not* this crash — the app survives those.)
 
 **Never `setWindowTitle()` on the dashboard.** Setting a title produces a brief ghost window with a native frame before Qt applies `FramelessWindowHint`. Leave the title unset; Qt uses `QApplication.applicationName`.
 

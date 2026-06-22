@@ -6,6 +6,7 @@ import sys
 import os
 import ctypes
 import faulthandler
+import gc
 import time
 from pathlib import Path
 
@@ -53,6 +54,8 @@ from tray_icon import TrayIcon
 from dashboard import Dashboard
 from persistence import History, Snapshot
 from settings import Settings
+from sources.worker import SourceWorker, SourceTrigger
+from sources.claude.source import ClaudeSource
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +91,24 @@ class OpenRouterPulse(QObject):
         self.app.setOrganizationName(APP_ORG)
         self.app.setQuitOnLastWindowClosed(False)
         self.app.setStyleSheet(STYLESHEET)
+
+        # -- Cyclic-GC safety (prevents a hard crash) --
+        # PySide6 + worker threads can segfault if the cyclic garbage
+        # collector runs ON a worker thread (deleting/finalizing a Qt
+        # wrapper) WHILE the main thread is inside a paintEvent — Qt's C++
+        # paint releases the GIL, a worker thread runs, its allocations
+        # trip cyclic GC, and the collection races the live paint. Heavy
+        # worker-thread allocation (JSON/JSONL parsing) makes GC fire on
+        # those threads often enough to hit it reliably (reproduced as an
+        # access violation: api-worker GC during get_*_info concurrent with
+        # BurnRateBar/TimelineChart paint). Fix: turn off automatic cyclic
+        # GC and run collection only on the MAIN thread via a timer, where
+        # it cannot race a paint. Refcount cleanup is unaffected; only cycle
+        # collection moves to the main thread.
+        gc.disable()
+        self._gc_timer = QTimer(self)
+        self._gc_timer.timeout.connect(self._collect_garbage)
+        self._gc_timer.start(5000)
 
         self.history = History.load()
         self.settings = Settings.load()
@@ -136,6 +157,9 @@ class OpenRouterPulse(QObject):
         # Fetch the full model catalog once on startup so the picker is
         # ready as soon as the user clicks the search bar.
         QTimer.singleShot(800, lambda: self.trigger.fetch_models.emit())
+
+        # -- Pluggable sources (Claude, …): peers to OpenRouter --
+        self._setup_sources()
 
         # If no API key is set, surface it immediately
         if not API_KEY:
@@ -200,6 +224,66 @@ class OpenRouterPulse(QObject):
         self.dashboard.show_error(msg)
         self.tray.set_error(msg)
 
+    # ------------------------------------------------------------------
+    #  Pluggable sources (Claude, …)
+    # ------------------------------------------------------------------
+    _SOURCE_CLASSES = (ClaudeSource,)
+
+    def _setup_sources(self):
+        """Instantiate available sources, mount a card per source, and start
+        a dedicated worker thread that polls them on their own intervals.
+        Each step is guarded so a misbehaving source can't break startup."""
+        self.sources = []
+        self._source_timers = []
+        self.source_thread = None
+
+        for cls in self._SOURCE_CLASSES:
+            try:
+                src = cls(self.settings)
+                if not src.is_available():
+                    continue
+                card = src.build_card()
+            except Exception as e:
+                print(f"[sources] {cls.__name__} setup failed: {e}")
+                continue
+            self.dashboard.mount_source(src.source_id, src.display_name, card)
+            self.sources.append(src)
+
+        if not self.sources:
+            return
+
+        self.source_thread = QThread()
+        self.source_worker = SourceWorker(self.sources)
+        self.source_worker.moveToThread(self.source_thread)
+        self.source_trigger = SourceTrigger()
+        self.source_trigger.poll.connect(self.source_worker.poll)
+        self.source_worker.polled.connect(self._on_source_polled)
+        self.source_thread.start()
+
+        for src in self.sources:
+            interval = max(15, int(getattr(src, "poll_interval", 60)))
+            timer = QTimer(self)
+            timer.timeout.connect(
+                lambda sid=src.source_id: self.source_trigger.poll.emit(sid)
+            )
+            timer.start(interval * 1000)
+            self._source_timers.append(timer)
+            # Kick an initial poll shortly after startup.
+            QTimer.singleShot(
+                1200, lambda sid=src.source_id: self.source_trigger.poll.emit(sid)
+            )
+
+    @Slot(str, object)
+    def _on_source_polled(self, source_id, data):
+        if data is not None:
+            self.dashboard.update_source(source_id, data)
+
+    @Slot()
+    def _collect_garbage(self):
+        """Run cyclic GC on the MAIN thread only (automatic GC is disabled).
+        Keeps cycle collection from racing a paintEvent on a worker thread."""
+        gc.collect()
+
     def run(self):
         if API_KEY:
             self.tray.showMessage(
@@ -211,6 +295,9 @@ class OpenRouterPulse(QObject):
         code = self.app.exec()
         self.api_thread.quit()
         self.api_thread.wait(3000)
+        if getattr(self, "source_thread", None) is not None:
+            self.source_thread.quit()
+            self.source_thread.wait(3000)
         try:
             self.history.save()
         except Exception:

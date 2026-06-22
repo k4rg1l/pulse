@@ -216,6 +216,7 @@ class Dashboard(QWidget):
         self._build_usage_section()
         self._build_burn_rate()
         self._build_pinned_models()
+        self._build_sources()
         self._build_quick_links()
 
         self._content.addStretch()
@@ -531,6 +532,35 @@ class Dashboard(QWidget):
             int(global_anchor.y()),
         )
         self._popup_model_id = model_id
+
+    # ------------------------------------------------------------------
+    #  Pluggable source sections (Claude, …) — peers to the OpenRouter
+    #  sections above. The controller mounts one card per available source.
+    # ------------------------------------------------------------------
+
+    def _build_sources(self):
+        self._sources_container = QWidget()
+        self._sources_container.setStyleSheet("background: transparent;")
+        self._sources_layout = QVBoxLayout(self._sources_container)
+        self._sources_layout.setContentsMargins(0, 0, 0, 0)
+        self._sources_layout.setSpacing(10)
+        self._sources_container.setVisible(False)  # shown when a source mounts
+        self._content.addWidget(self._sources_container)
+        self._source_cards = {}
+
+    def mount_source(self, source_id, title, card):
+        """Add a source's section (header + card). Called once per available
+        source from the controller, on the main thread."""
+        self._sources_layout.addWidget(SectionHeader(title))
+        self._sources_layout.addWidget(card)
+        self._source_cards[source_id] = card
+        self._sources_container.setVisible(True)
+
+    def update_source(self, source_id, data):
+        """Deliver fresh poll data to a source's card (main thread)."""
+        card = self._source_cards.get(source_id)
+        if card is not None:
+            card.render(data)
 
     def _build_quick_links(self):
         self._content.addWidget(SectionHeader("Quick Links"))

@@ -104,6 +104,8 @@ Issues and PRs welcome. If you want to take a roadmap item, open an issue first 
 
 **Read [AGENTS.md](AGENTS.md) before touching tray, focus, window, or popup code.** It lists the invariants, the validation checklist, and the API gotchas. Several of those entries exist because they bit us during development; honoring them saves you from re-discovering the same bugs.
 
+**Testing:** [docs/TESTING.md](docs/TESTING.md) is the full guide — `pytest` for pure logic (`pip install -r requirements-dev.txt && python -m pytest -q`) and Windows-MCP recipes for validating the live UI. Read it before validating, and add to it when you ship a feature.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
