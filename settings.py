@@ -56,9 +56,10 @@ class Settings:
     # provider is privileged. `source_order` is the top-to-bottom order
     # (unknown/unlisted sources fall to the bottom). Auto-detected sources
     # appear when their data is present; set their flag False to hide them.
-    source_order: list = field(default_factory=lambda: ["openrouter", "claude", "gpu"])
+    source_order: list = field(default_factory=lambda: ["openrouter", "claude", "gpu", "system"])
     show_claude: bool = True            # show the Claude card if ~/.claude creds exist
     show_gpu: bool = True               # show the GPU card if an NVIDIA GPU is present
+    show_system: bool = True            # show the System card (CPU/RAM/network)
 
     @classmethod
     def load(cls) -> "Settings":
