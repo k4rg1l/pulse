@@ -212,13 +212,21 @@ class Dashboard(QWidget):
 
         self._build_header()
         self._build_error_banner()
-        self._build_gauge_section()
-        self._build_usage_section()
-        self._build_burn_rate()
-        self._build_pinned_models()
-        self._build_sources()
-        self._build_quick_links()
 
+        # Neutral source host: each source mounts a section group here, ordered
+        # by settings.source_order. OpenRouter is a source like any other — no
+        # provider is privileged ("Pulse", not "OpenRouter").
+        self._source_host = QVBoxLayout()
+        self._source_host.setContentsMargins(0, 0, 0, 0)
+        self._source_host.setSpacing(16)
+        self._content.addLayout(self._source_host)
+        self._source_widgets = {}   # source_id -> group container widget
+        self._source_cards = {}     # source_id -> card with render() (for update_source)
+
+        # OpenRouter's own sections live in a group, mounted like any source.
+        self.mount_source("openrouter", "OpenRouter", self._build_openrouter_group())
+
+        self._build_quick_links()
         self._content.addStretch()
 
         scroll.setWidget(content_widget)
@@ -264,19 +272,19 @@ class Dashboard(QWidget):
         self._content.addWidget(self.error_banner)
 
     def _build_gauge_section(self):
-        self._content.addWidget(SectionHeader("Credit Balance"))
+        self._or_layout.addWidget(SectionHeader("Credit Balance"))
 
         gauge_row = QHBoxLayout()
         gauge_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gauge = ArcGauge(self)
         gauge_row.addWidget(self.gauge)
-        self._content.addLayout(gauge_row)
+        self._or_layout.addLayout(gauge_row)
 
         self._autotopup_label = QLabel("")
         self._autotopup_label.setFont(Fonts.tiny())
         self._autotopup_label.setStyleSheet("color: #00d2ff;")
         self._autotopup_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._content.addWidget(self._autotopup_label)
+        self._or_layout.addWidget(self._autotopup_label)
         self._update_autotopup_label()
 
     def _update_autotopup_label(self):
@@ -291,12 +299,12 @@ class Dashboard(QWidget):
             self._autotopup_label.setVisible(False)
 
     def _build_usage_section(self):
-        self._content.addWidget(SectionHeader("Usage"))
+        self._or_layout.addWidget(SectionHeader("Usage"))
 
         self.timeline = TimelineChart(self)
         topup_thr = self._settings.auto_topup_threshold if self._settings else 0.0
         self.timeline.set_data([], [], topup_thr, "last 24h")
-        self._content.addWidget(self.timeline)
+        self._or_layout.addWidget(self.timeline)
 
         grid = QGridLayout()
         grid.setSpacing(8)
@@ -304,10 +312,10 @@ class Dashboard(QWidget):
         self.kpi_monthly = StatCard("Projected / mo")
         grid.addWidget(self.kpi_today, 0, 0)
         grid.addWidget(self.kpi_monthly, 0, 1)
-        self._content.addLayout(grid)
+        self._or_layout.addLayout(grid)
 
     def _build_burn_rate(self):
-        self._content.addWidget(SectionHeader("Burn Rate"))
+        self._or_layout.addWidget(SectionHeader("Burn Rate"))
 
         burn_card = CardFrame(self)
         burn_card.setFixedHeight(60)
@@ -317,7 +325,7 @@ class Dashboard(QWidget):
         self.burn_rate_bar = BurnRateBar(self)
         burn_layout.addWidget(self.burn_rate_bar)
 
-        self._content.addWidget(burn_card)
+        self._or_layout.addWidget(burn_card)
 
     def _build_pinned_models(self):
         self._pinned_header = SectionHeader("Pinned Models")
@@ -325,20 +333,22 @@ class Dashboard(QWidget):
         self._pinned_header.clicked.connect(self._toggle_pinned_collapsed)
         self._pinned_count_label = self._pinned_header.right_label
         self._pinned_collapsed = False
-        self._content.addWidget(self._pinned_header)
+        self._or_layout.addWidget(self._pinned_header)
 
         # Search bar + picker dropdown
         self.model_picker = ModelPicker(self)
         self.model_picker.pin_toggled.connect(self._on_pin_toggled)
         self.model_picker.open_changed.connect(self._on_picker_open_changed)
-        self._content.addWidget(self.model_picker)
+        self._or_layout.addWidget(self.model_picker)
         # Reparent the dropdown to the dashboard so it overlays the cards
-        # area instead of pushing them down within the layout.
+        # area instead of pushing them down within the layout. (Overlay is
+        # positioned by the search bar's GLOBAL coords, so nesting the pinned
+        # section inside a source group doesn't affect it.)
         self.model_picker.attach_overlay_to(self)
 
         # Column header (PROVIDER / LATENCY / UPTIME / PRICE) above cards
         self._pinned_col_header = PinnedColumnHeader(self)
-        self._content.addWidget(self._pinned_col_header)
+        self._or_layout.addWidget(self._pinned_col_header)
 
         # Container that holds the per-model cards
         self._pinned_container = QWidget()
@@ -346,7 +356,7 @@ class Dashboard(QWidget):
         self._pinned_layout = QVBoxLayout(self._pinned_container)
         self._pinned_layout.setContentsMargins(0, 0, 0, 0)
         self._pinned_layout.setSpacing(8)
-        self._content.addWidget(self._pinned_container)
+        self._or_layout.addWidget(self._pinned_container)
 
         # model_id -> PinnedModelCard
         self._pinned_cards = {}
@@ -534,27 +544,66 @@ class Dashboard(QWidget):
         self._popup_model_id = model_id
 
     # ------------------------------------------------------------------
-    #  Pluggable source sections (Claude, …) — peers to the OpenRouter
-    #  sections above. The controller mounts one card per available source.
+    #  Pluggable source section-groups (OpenRouter, Claude, …) — peers.
+    #  Each source mounts a titled group into the neutral source host,
+    #  positioned by settings.source_order. OpenRouter mounts at build time;
+    #  the controller mounts the rest (Claude, …). No provider is privileged.
     # ------------------------------------------------------------------
 
-    def _build_sources(self):
-        self._sources_container = QWidget()
-        self._sources_container.setStyleSheet("background: transparent;")
-        self._sources_layout = QVBoxLayout(self._sources_container)
-        self._sources_layout.setContentsMargins(0, 0, 0, 0)
-        self._sources_layout.setSpacing(10)
-        self._sources_container.setVisible(False)  # shown when a source mounts
-        self._content.addWidget(self._sources_container)
-        self._source_cards = {}
+    def _build_openrouter_group(self):
+        """Build OpenRouter's sections (gauge, usage, burn rate, pinned
+        models) into one group widget so it can be ordered as a peer."""
+        group = QWidget()
+        group.setStyleSheet("background: transparent;")
+        self._or_layout = QVBoxLayout(group)
+        self._or_layout.setContentsMargins(0, 0, 0, 0)
+        self._or_layout.setSpacing(10)
+        self._build_gauge_section()
+        self._build_usage_section()
+        self._build_burn_rate()
+        self._build_pinned_models()
+        return group
 
-    def mount_source(self, source_id, title, card):
-        """Add a source's section (header + card). Called once per available
-        source from the controller, on the main thread."""
-        self._sources_layout.addWidget(SectionHeader(title))
-        self._sources_layout.addWidget(card)
-        self._source_cards[source_id] = card
-        self._sources_container.setVisible(True)
+    def _source_order(self):
+        default = ["openrouter", "claude"]
+        if self._settings is not None:
+            return list(getattr(self._settings, "source_order", None) or default)
+        return default
+
+    def _make_source_header(self, title):
+        """Source-identity header — accent-coloured so it reads as a peer
+        source, distinct from the muted sub-section headers beneath it."""
+        lbl = QLabel(title.upper())
+        lbl.setFont(Fonts.subheading())
+        lbl.setStyleSheet("color: #00d2ff; padding-top: 2px;")
+        return lbl
+
+    def mount_source(self, source_id, title, content_widget):
+        """Mount a source as a titled peer section group, inserted at the
+        position dictated by settings.source_order. Main thread only."""
+        group = QWidget()
+        group.setStyleSheet("background: transparent;")
+        gl = QVBoxLayout(group)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(10)
+        gl.addWidget(self._make_source_header(title))
+        gl.addWidget(content_widget)
+        self._source_widgets[source_id] = group
+        if hasattr(content_widget, "render"):   # source card (Claude/GPU/…)
+            self._source_cards[source_id] = content_widget
+
+        # Insert at the index dictated by source_order (unknown -> bottom).
+        order = self._source_order()
+        my_rank = order.index(source_id) if source_id in order else len(order)
+        insert_at = self._source_host.count()
+        for i in range(self._source_host.count()):
+            w = self._source_host.itemAt(i).widget()
+            sid = next((k for k, v in self._source_widgets.items() if v is w), None)
+            rank = order.index(sid) if (sid in order) else len(order)
+            if rank > my_rank:
+                insert_at = i
+                break
+        self._source_host.insertWidget(insert_at, group)
 
     def update_source(self, source_id, data):
         """Deliver fresh poll data to a source's card (main thread)."""
