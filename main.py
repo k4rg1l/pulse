@@ -56,6 +56,7 @@ from persistence import History, Snapshot
 from settings import Settings
 from sources.worker import SourceWorker, SourceTrigger
 from sources.claude.source import ClaudeSource
+from sources.gpu.source import GpuSource
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +228,7 @@ class OpenRouterPulse(QObject):
     # ------------------------------------------------------------------
     #  Pluggable sources (Claude, …)
     # ------------------------------------------------------------------
-    _SOURCE_CLASSES = (ClaudeSource,)
+    _SOURCE_CLASSES = (ClaudeSource, GpuSource)
 
     def _setup_sources(self):
         """Instantiate available sources, mount a card per source, and start
