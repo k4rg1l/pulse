@@ -201,6 +201,8 @@ class Dashboard(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Stash so _on_dashboard_scrolled can be wired after sections are built
+        self._scroll_area = scroll
 
         content_widget = QWidget()
         content_widget.setStyleSheet("background: transparent;")
@@ -222,6 +224,13 @@ class Dashboard(QWidget):
         inner.addWidget(scroll)
 
         root.addWidget(self._container)
+
+        # Any vertical scroll while the picker dropdown or info popup is
+        # open should dismiss them — otherwise they float untethered as
+        # the search bar / card slides out from under them.
+        scroll.verticalScrollBar().valueChanged.connect(
+            self._on_dashboard_scrolled
+        )
 
     def _build_header(self):
         row = QHBoxLayout()
@@ -322,6 +331,9 @@ class Dashboard(QWidget):
         self.model_picker.pin_toggled.connect(self._on_pin_toggled)
         self.model_picker.open_changed.connect(self._on_picker_open_changed)
         self._content.addWidget(self.model_picker)
+        # Reparent the dropdown to the dashboard so it overlays the cards
+        # area instead of pushing them down within the layout.
+        self.model_picker.attach_overlay_to(self)
 
         # Column header (PROVIDER / LATENCY / UPTIME / PRICE) above cards
         self._pinned_col_header = PinnedColumnHeader(self)
@@ -428,12 +440,22 @@ class Dashboard(QWidget):
             self.refresh_endpoint_requested.emit(model_id)
 
     def _on_picker_open_changed(self, is_open):
-        """Hide the cards + column header while the picker dropdown is open
-        so the user isn't visually overwhelmed."""
-        self._pinned_col_header.setVisible(
-            (not is_open) and len(self._pinned_cards) > 0
-        )
-        self._pinned_container.setVisible(not is_open)
+        """No-op: the dropdown is now a top-level floating window that
+        overlays the cards, so cards stay visible underneath. Kept as a
+        connection point for future state changes if needed."""
+        pass
+
+    def _on_dashboard_scrolled(self):
+        """Close any floating child (picker dropdown, info popup) when
+        the dashboard scrolls. Otherwise they stay pinned to their
+        original spot while the anchor moves underneath them."""
+        try:
+            if self.model_picker.is_open():
+                self.model_picker.search.clearFocus()
+                self.model_picker._close()
+        except Exception:
+            pass
+        self._hide_provider_popup()
 
     # ---- Section collapse ----
 
@@ -493,7 +515,21 @@ class Dashboard(QWidget):
         card = self._pinned_cards.get(model_id)
         if card is None:
             return
-        popup.show_for(card.provider_html(), global_anchor)
+        # Anchor against the dashboard's screen rect so the popup sits
+        # entirely OUTSIDE the dashboard (left side by default). Without
+        # this it overlaps the cards.
+        dash_rect = self.frameGeometry()
+        dash_global_topleft = self.mapToGlobal(QPoint(0, 0))
+        from PySide6.QtCore import QRect
+        dash_global_rect = QRect(
+            dash_global_topleft.x(), dash_global_topleft.y(),
+            dash_rect.width(), dash_rect.height(),
+        )
+        popup.show_beside(
+            card.provider_html(),
+            dash_global_rect,
+            int(global_anchor.y()),
+        )
         self._popup_model_id = model_id
 
     def _build_quick_links(self):
@@ -713,6 +749,13 @@ class Dashboard(QWidget):
         self._tray_icon = tray_icon
 
     def show_near_tray(self):
+        # Always start at the top — users expect a fresh view of the
+        # gauge + balance on every open, not wherever they last left off.
+        try:
+            self._scroll_area.verticalScrollBar().setValue(0)
+        except Exception:
+            pass
+
         screen = QApplication.primaryScreen()
         if not screen:
             self._show_no_activate()
@@ -831,9 +874,14 @@ class Dashboard(QWidget):
         self.refresh_requested.emit()
 
     def hideEvent(self, event):
-        # If the provider popup is floating, hide it when the dashboard
-        # closes so it doesn't get orphaned.
+        # When dashboard hides, dismiss any floating children
+        # (info popup + picker dropdown) so they don't get orphaned.
         self._hide_provider_popup()
+        try:
+            if self.model_picker.is_open():
+                self.model_picker._close()
+        except Exception:
+            pass
         super().hideEvent(event)
 
     def paintEvent(self, event):

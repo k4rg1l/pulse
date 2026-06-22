@@ -50,3 +50,6 @@ _capture.py
 .tip.png
 .final.png
 *.png.bak
+
+docs/v41-*.png
+docs/_*.png

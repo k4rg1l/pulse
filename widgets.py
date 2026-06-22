@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QCursor
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, Property, QEasingCurve,
-    QRectF, QPointF, Signal, QSize, QEvent,
+    QRectF, QPointF, QPoint, QRect, Signal, QSize, QEvent,
 )
 from PySide6.QtGui import (
     QPainter, QPen, QBrush, QColor, QConicalGradient,
@@ -374,9 +374,16 @@ class SectionHeader(QWidget):
         layout.setSpacing(6)
 
         self.chevron = QLabel("")
-        self.chevron.setFont(Fonts.tiny())
-        self.chevron.setStyleSheet("color: #64648c;")
-        self.chevron.setFixedWidth(10)
+        # Larger + bolder than the title text so the affordance reads
+        # clearly. Letter-spaced label font garbles geometry glyphs, so
+        # use a plain Segoe UI here.
+        chev_font = QFont("Segoe UI", 11)
+        chev_font.setWeight(QFont.Weight.Bold)
+        self.chevron.setFont(chev_font)
+        self.chevron.setStyleSheet("color: #a0a0c8;")
+        self.chevron.setFixedWidth(16)
+        # Don't grab clicks — let them bubble to SectionHeader.mousePressEvent
+        self.chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.chevron)
 
         left = QLabel(title.upper())
@@ -666,39 +673,70 @@ class ProviderPopup(QWidget):
 
         root.addWidget(self._frame)
 
-        self.setFixedWidth(340)
+        # Let the popup size to its content (the table is wider than a
+        # fixed 340px). Bounded so it doesn't grow huge on a wide screen.
+        self.setMinimumWidth(360)
+        self.setMaximumWidth(560)
+        self.label.setMinimumWidth(320)
 
         # App-wide event filter so any mouse press outside us dismisses.
         # Installed lazily on first show to avoid touching QApplication
         # during construction.
         self._filter_installed = False
 
-    def show_for(self, html: str, anchor_global_pos: QPointF):
-        """Render `html` and position so the popup's right edge sits to
-        the left of `anchor_global_pos`. Falls back to the right side or
-        clamps to screen if there's no room."""
+    def show_beside(self, html: str, dashboard_rect, anchor_y: int):
+        """Render `html` and position the popup OUTSIDE the dashboard
+        window. Preferred: to the LEFT of the dashboard, with the popup's
+        right edge at dashboard_rect.left() - GAP, vertically centered on
+        anchor_y. Fallbacks: right of dashboard if no room on left; clamp
+        to screen if neither fits.
+
+        Args:
+            html: rich-text content to render
+            dashboard_rect: QRect of the dashboard window in global coords
+            anchor_y: global y to center the popup on (usually icon's y)
+        """
         self.label.setText(html)
+        # adjustSize alone GROWS the widget for bigger content but never
+        # shrinks it when content gets smaller (Qt caches the larger
+        # minimum from the previous layout). Force-reset the inner label
+        # and frame to their content's true sizeHint so a tall popup
+        # collapses back down when the next model has fewer providers.
+        self.label.adjustSize()
+        self.label.resize(self.label.sizeHint())
+        self._frame.adjustSize()
+        self._frame.resize(self._frame.sizeHint())
         self.adjustSize()
+        self.resize(self.sizeHint())
         size = self.size()
 
-        screen = QApplication.screenAt(anchor_global_pos.toPoint())
+        GAP = 12
+
+        # Find the screen containing the dashboard
+        center_pt = dashboard_rect.center()
+        screen = QApplication.screenAt(center_pt)
         avail = screen.availableGeometry() if screen else None
 
-        # Preferred: place popup to the LEFT of the anchor, vertically
-        # centered on the icon.
-        x = int(anchor_global_pos.x()) - size.width() - 8
-        y = int(anchor_global_pos.y()) - size.height() // 2
+        # Preferred: popup's right edge sits at dashboard.left - GAP
+        x_left_of_dash = dashboard_rect.left() - GAP - size.width()
+        # Fallback: popup's left edge sits at dashboard.right + GAP
+        x_right_of_dash = dashboard_rect.right() + GAP
+
+        if avail is not None and x_left_of_dash >= avail.left() + 4:
+            x = x_left_of_dash
+        elif avail is not None and x_right_of_dash + size.width() <= avail.right() - 4:
+            x = x_right_of_dash
+        else:
+            # Neither side fits — clamp to whichever edge has more room
+            x = x_left_of_dash if x_left_of_dash > 0 else x_right_of_dash
+
+        y = anchor_y - size.height() // 2
 
         if avail is not None:
-            # Fallback: if it would go off the left edge, place to right
-            if x < avail.left() + 4:
-                x = int(anchor_global_pos.x()) + 24
-            # Clamp horizontally
             x = max(avail.left() + 4, min(x, avail.right() - size.width() - 4))
-            # Clamp vertically
             y = max(avail.top() + 4, min(y, avail.bottom() - size.height() - 4))
 
-        self.move(x, y)
+        self.move(int(x), int(y))
 
         if not self._filter_installed:
             QApplication.instance().installEventFilter(self)
@@ -811,43 +849,49 @@ class PinnedModelCard(QWidget):
                 return f"{ep.context_length // 1_000_000}M"
             return f"{ep.context_length // 1000}k"
 
+        # Use nowrap on provider name so long region tags
+        # (e.g. "Amazon Bedrock · eu-west-1") don't wrap and break row alignment.
+        # Tight cell padding keeps rows visually compact.
         rows = []
         for ep in self._endpoints.endpoints:
             region = ""
             if ep.tag and "/" in ep.tag:
                 region = ep.tag.split("/", 1)[1]
             name = ep.provider_name + (f" · {region}" if region else "")
-            row_color = "#00d2ff" if ep is self._best else "#f0f0ff"
+            is_best = ep is self._best
+            row_color = "#00d2ff" if is_best else "#f0f0ff"
+            star = "★ " if is_best else ""
             rows.append(
                 f"<tr style='color:{row_color};'>"
-                f"<td>{name}</td>"
-                f"<td align='right' style='padding-left:18px;'>{lat_cell(ep)}</td>"
-                f"<td align='right' style='padding-left:14px;'>{up_cell(ep)}</td>"
-                f"<td align='right' style='padding-left:14px;'>{tp_cell(ep)}</td>"
-                f"<td align='right' style='padding-left:14px;'>{ctx_cell(ep)}</td>"
+                f"<td style='padding:3px 18px 3px 0;white-space:nowrap;'>{star}{name}</td>"
+                f"<td align='right' style='padding:3px 12px;white-space:nowrap;'>{lat_cell(ep)}</td>"
+                f"<td align='right' style='padding:3px 12px;white-space:nowrap;'>{up_cell(ep)}</td>"
+                f"<td align='right' style='padding:3px 12px;white-space:nowrap;'>{tp_cell(ep)}</td>"
+                f"<td align='right' style='padding:3px 0 3px 12px;white-space:nowrap;'>{ctx_cell(ep)}</td>"
                 f"</tr>"
             )
 
         recommendation = ""
         if self._best is not None:
             recommendation = (
-                f"<br><span style='color:#00d2ff;'>★ Recommended: "
-                f"{self._best.provider_name}</span> "
+                f"<div style='margin-top:8px;color:#00d2ff;'>"
+                f"★ Recommended: {self._best.provider_name} "
                 f"<span style='color:#64648c;'>(fastest with ≥99% uptime)</span>"
+                f"</div>"
             )
 
         model_name = self._display_model_name()
         return (
-            f"<b>{model_name}</b><br>"
-            f"<span style='color:#a0a0c8;'>Live from openrouter.ai · refreshed every 5 min</span><br>"
-            f"<br>"
-            f"<table cellpadding='3' cellspacing='0'>"
-            f"<tr style='color:#64648c;'>"
-            f"<td>PROVIDER</td>"
-            f"<td align='right' style='padding-left:18px;'>LAT</td>"
-            f"<td align='right' style='padding-left:14px;'>UPTIME</td>"
-            f"<td align='right' style='padding-left:14px;'>SPEED</td>"
-            f"<td align='right' style='padding-left:14px;'>CTX</td>"
+            f"<div style='font-size:10pt;font-weight:bold;'>{model_name}</div>"
+            f"<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+            f"Live from openrouter.ai · refreshed every 5 min</div>"
+            f"<table cellspacing='0' style='border-spacing:0;'>"
+            f"<tr style='color:#64648c;font-size:8pt;'>"
+            f"<th align='left' style='padding:3px 18px 6px 0;font-weight:600;'>PROVIDER</th>"
+            f"<th align='right' style='padding:3px 12px 6px 12px;font-weight:600;'>LAT</th>"
+            f"<th align='right' style='padding:3px 12px 6px 12px;font-weight:600;'>UPTIME</th>"
+            f"<th align='right' style='padding:3px 12px 6px 12px;font-weight:600;'>SPEED</th>"
+            f"<th align='right' style='padding:3px 0 6px 12px;font-weight:600;'>CTX</th>"
             f"</tr>"
             f"{''.join(rows)}"
             f"</table>"
@@ -894,7 +938,14 @@ class PinnedModelCard(QWidget):
         painter.setPen(QPen(Colors.BORDER, 1))
         painter.drawPath(path)
 
-        # Reserve space on the right of the header for the (i) icon.
+        # === Header layout: name (elided) · best chip · (i) icon ===
+        # Reserve space right-to-left so the name never overlaps the chip
+        # or the icon, no matter how long the name is.
+
+        GAP_CHIP_TO_ICON = 10
+        GAP_NAME_TO_CHIP = 12
+
+        # Icon at the far right
         icon_right = w - self.PAD_X
         icon_x = icon_right - self.ICON_VISIBLE
         icon_y = self.PAD_Y + (self.HEADER_H - self.ICON_VISIBLE) / 2
@@ -904,26 +955,39 @@ class PinnedModelCard(QWidget):
             self.ICON_HIT, self.ICON_HIT,
         )
 
-        # Header: model name (left) · best provider chip (right, before icon)
+        # Chip width via real font metrics
+        chip_text = f"★ {self._best.provider_name}" if self._best is not None else ""
+        chip_font = Fonts.tiny()
+        chip_fm = QFontMetrics(chip_font)
+        chip_w = chip_fm.horizontalAdvance(chip_text) if chip_text else 0
+
+        # Chip placed left of icon
+        chip_right = icon_x - GAP_CHIP_TO_ICON
+        chip_left = chip_right - chip_w
+        if not chip_text:
+            chip_left = chip_right  # collapse to zero-width
+
+        # Name fills from PAD_X up to chip_left - gap, with eliding
         name = self._display_model_name()
+        name_fm = QFontMetrics(Fonts.subheading())
+        name_max_w = max(40, int(chip_left - GAP_NAME_TO_CHIP - self.PAD_X))
+        elided_name = name_fm.elidedText(name, Qt.TextElideMode.ElideRight, name_max_w)
+
         painter.setPen(Colors.TEXT_PRIMARY)
         painter.setFont(Fonts.subheading())
         painter.drawText(
-            QRectF(self.PAD_X, self.PAD_Y, w - 2 * self.PAD_X - self.ICON_HIT - 4, self.HEADER_H),
+            QRectF(self.PAD_X, self.PAD_Y, name_max_w, self.HEADER_H),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            name,
+            elided_name,
         )
 
-        if self._best is not None:
-            chip_text = f"★ {self._best.provider_name}"
+        # Chip (only if we have a best provider)
+        if chip_text:
             painter.setPen(Colors.CYAN)
-            painter.setFont(Fonts.tiny())
+            painter.setFont(chip_font)
             painter.drawText(
-                QRectF(
-                    self.PAD_X, self.PAD_Y,
-                    w - 2 * self.PAD_X - self.ICON_HIT - 4, self.HEADER_H,
-                ),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                QRectF(chip_left, self.PAD_Y, chip_w, self.HEADER_H),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                 chip_text,
             )
 
@@ -1238,13 +1302,20 @@ class ModelPicker(QWidget):
         self.search.focusOutEvent = self._wrap_focus_out
         layout.addWidget(self.search)
 
-        # List card (rounded dark container)
-        self.list_card = QFrame(self)
+        # Dropdown is a sibling widget held outside the layout flow.
+        # The dashboard reparents it to itself (via attach_overlay_to)
+        # so it can be positioned with .move() and raised over the cards.
+        # Top-level Tool windows hit weird interactions with the dashboard's
+        # BypassWindowManagerHint and don't render reliably — overlay child
+        # is the simpler, more robust pattern.
+        self.list_card = QFrame()
+        self.list_card.setObjectName("ModelPickerDropdown")
         self.list_card.setStyleSheet(
-            "QFrame { background: #1c1c32; border: 1px solid #323250; "
-            "border-radius: 8px; }"
+            "QFrame#ModelPickerDropdown { background: #1c1c32; "
+            "border: 1px solid #323250; border-radius: 8px; }"
         )
         self.list_card.setFixedHeight(self.LIST_H)
+
         list_inner = QVBoxLayout(self.list_card)
         list_inner.setContentsMargins(0, 0, 0, 0)
         list_inner.setSpacing(0)
@@ -1263,8 +1334,10 @@ class ModelPicker(QWidget):
 
         self.scroll.setWidget(self.list_content)
         list_inner.addWidget(self.scroll)
-        layout.addWidget(self.list_card)
         self.list_card.hide()
+
+        # App-wide event filter so any click outside the dropdown closes it
+        self._dropdown_filter_installed = False
 
         # Debounce rebuilds while typing
         self._rebuild_timer = QTimer(self)
@@ -1317,13 +1390,63 @@ class ModelPicker(QWidget):
         if self._is_open:
             self._rebuild_timer.start(120)
 
+    def attach_overlay_to(self, overlay_parent):
+        """Move list_card to be a child of `overlay_parent` so it can be
+        absolutely positioned over arbitrary sibling widgets in the
+        dashboard layout. Call this once from the dashboard during build."""
+        self.list_card.setParent(overlay_parent)
+        self.list_card.hide()
+
     def _open(self):
         if self._is_open:
             return
         self._is_open = True
+        self._position_dropdown()
         self.list_card.show()
+        self.list_card.raise_()
         self._rebuild_list()
+        if not self._dropdown_filter_installed:
+            QApplication.instance().installEventFilter(self)
+            self._dropdown_filter_installed = True
         self.open_changed.emit(True)
+
+    def _position_dropdown(self):
+        """Place the dropdown under the search bar if there's room,
+        otherwise above it. Width matches the search bar. The dropdown
+        is clipped to the parent (dashboard) so we have to actually fit
+        within those bounds.
+        """
+        parent = self.list_card.parent()
+        if parent is None:
+            return
+
+        gap = 4
+        search_w = self.search.width()
+        search_h = self.search.height()
+        search_top_g = self.search.mapToGlobal(QPoint(0, 0))
+        search_bot_g = self.search.mapToGlobal(QPoint(0, search_h))
+        parent_top_g = parent.mapToGlobal(QPoint(0, 0))
+        parent_bot_g = parent.mapToGlobal(QPoint(0, parent.height()))
+
+        space_below = parent_bot_g.y() - search_bot_g.y() - gap - 4
+        space_above = search_top_g.y() - parent_top_g.y() - gap - 4
+
+        if space_below >= self.LIST_H:
+            target_y_g = search_bot_g.y() + gap
+            h = self.LIST_H
+        elif space_above >= self.LIST_H:
+            target_y_g = search_top_g.y() - gap - self.LIST_H
+            h = self.LIST_H
+        elif space_above >= space_below:
+            h = max(100, space_above)
+            target_y_g = search_top_g.y() - gap - h
+        else:
+            h = max(100, space_below)
+            target_y_g = search_bot_g.y() + gap
+
+        local = parent.mapFromGlobal(QPoint(search_top_g.x(), target_y_g))
+        self.list_card.move(local.x(), local.y())
+        self.list_card.resize(search_w, h)
 
     def _close(self):
         if not self._is_open:
@@ -1334,6 +1457,26 @@ class ModelPicker(QWidget):
         # with the same filter applied. Use the built-in X button on the
         # line edit to clear.
         self.open_changed.emit(False)
+
+    def eventFilter(self, obj, event):
+        """Close the dropdown on any mouse press outside the search bar
+        AND outside the dropdown. Geometry comparisons must be in GLOBAL
+        coords because list_card/search return their geometry in parent
+        coords by default."""
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and self._is_open):
+            try:
+                gp = event.globalPosition().toPoint()
+            except AttributeError:
+                gp = event.globalPos()
+            from PySide6.QtCore import QRect
+            dd_tl = self.list_card.mapToGlobal(QPoint(0, 0))
+            dd_rect = QRect(dd_tl, self.list_card.size())
+            s_tl = self.search.mapToGlobal(QPoint(0, 0))
+            s_rect = QRect(s_tl, self.search.size())
+            if not dd_rect.contains(gp) and not s_rect.contains(gp):
+                self._close()
+        return False
 
     def _rebuild_list(self):
         # Tear down

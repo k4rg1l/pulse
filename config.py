@@ -63,7 +63,7 @@ DASHBOARD_MAX_HEIGHT = 900
 
 # -- App Info --
 APP_NAME = "Pulse"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 APP_ORG = "Pulse"
 
 # -- Startup Registry --
