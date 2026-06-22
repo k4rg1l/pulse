@@ -2,7 +2,7 @@
 
 What's coming after the current release. Order is rough, not strict. Each item links back to why it's worth doing.
 
-The app is called Pulse. The current releases support OpenRouter. The name leaves room to add more providers and aggregators later (Anthropic console, OpenAI usage, AWS Bedrock spend, etc.) without a rename. Cross-provider unification is a long-term goal, not a near-term promise.
+Pulse is a **source-agnostic** monitor. As of v0.6 it shows OpenRouter, Claude, GPU, and System as **peer** sources (no provider is privileged); more can be added on the same contract — see AGENTS.md → "Sources". (The on-disk folder is still named `OpenRouterPulse` from before the rename/migration — cosmetic only; the app and repo are "Pulse".)
 
 ## Shipped
 
@@ -77,7 +77,7 @@ sources, and an MCP server. See `docs/RESEARCH-2026-06-21.md` for the full explo
   dashboard, via Win32 `RegisterHotKey` (no AV-tripping low-level hook).
 - 82 unit tests; every new source's parser is unit-tested + its card render-tested.
 
-## Next (v0.6 candidates)
+## Next (v0.7 candidates)
 
 Pick whichever is most useful at the time:
 
@@ -100,11 +100,7 @@ Pick whichever is most useful at the time:
 - Replace JSON editing for the common cases (top-up threshold/amount, refresh intervals, warning thresholds)
 - Power users still get settings.json
 
-**Global hotkey**
-- Default Win+Shift+O to open the dashboard
-- Configurable in settings.json
-
-## Soon (v0.6+)
+## Soon (v0.7+)
 
 **Per-model and per-provider spend.** OpenRouter's `/api/v1/activity` is locked behind management keys. When the user has a management key set (`management_api_key` in settings.json) and has accumulated enough org-scoped usage, unlock:
 

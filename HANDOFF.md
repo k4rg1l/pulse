@@ -11,7 +11,7 @@
 ## Status
 - **Released: `v0.6.0`** on `main` (tagged; GitHub release with `Pulse.exe`).
 - **Green:** `pip install -r requirements-dev.txt && python -m pytest -q` → 82 passed.
-- **Nothing in flight.** `main` is the source of truth (PR #1, the v0.6 work, is merged).
+- **Nothing in flight.** `main` is the source of truth (PR #1, the v0.6 work, is merged). HEAD sits a commit or two past the `v0.6.0` tag — those are docs/handoff commits only, not unreleased features.
 
 ## What Pulse is now
 A **source-agnostic** Windows tray monitor. The dashboard is a *neutral host* that renders peer "source" section-groups in `settings.source_order` — no provider is privileged. Live sources:
