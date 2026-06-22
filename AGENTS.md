@@ -20,6 +20,31 @@ Run the automated tests first: `pip install -r requirements-dev.txt && python -m
 
 Then open the dashboard and check every item. Skip none. Take screenshots if a UI change is involved.
 
+### MANDATORY: `/security-review` before every commit
+
+Before **any** `git commit`, review the staged diff and resolve findings. This is
+not optional and is enforced mechanically — a PreToolUse hook
+(`.claude/settings.json` → `tools/secreview_gate.py`) **blocks `git commit`**
+unless an approval marker matches exactly what is staged. The ritual:
+
+1. `git add -A` — stage exactly what you intend to commit (the gate refuses
+   `git commit -a/--all`, so staging is explicit and the review is honest).
+2. **Security review — run it on Sonnet, not Opus.** Review the staged diff for
+   security issues; resolve findings; re-stage fixes. The bundled
+   `/security-review` skill diffs against `origin/HEAD` (a PR/remote base) and
+   does NOT work on this local, no-remote, commit-to-`main` repo pre-commit —
+   instead run the review with a **Sonnet** reviewer agent (`Agent` tool,
+   `model: "sonnet"`) over `git diff --staged`. Cheaper, and plenty for a diff.
+3. `python tools/secreview_approve.py` — records the SHA-256 of the staged diff.
+4. **Ask the user**, then `git commit`.
+
+The marker is bound to the staged diff, so re-staging anything after approval
+forces a re-review. The gate **fails closed** by design. Do **not** work around
+it (no hand-editing/deleting the marker, no `--no-verify`). The hook activates
+at session start — if you just added it, it takes effect after a restart, but
+the rule applies regardless. Combined with the discipline below, the order is:
+**validate → /security-review → ASK → commit.**
+
 1. App starts with no exceptions (`python main.py`, watch stderr).
 2. Tray icon visible, tooltip shows the balance.
 3. Left-click the tray opens the dashboard.
@@ -136,7 +161,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 
 **Don't:**
 - Add features the user hasn't asked for.
-- Touch `git` without explicit approval. Validate first, ASK, then commit.
+- Touch `git` without explicit approval. Validate first, **run `/security-review`** (see the mandatory rule above), ASK, then commit.
 - Bring back QToolTip on pinned cards. The click-to-toggle popup is intentional.
 - Hide the cards when the picker opens. They overlay; cards stay visible.
 - Add a source for a provider with no real programmatic usage API, or one that doesn't degrade gracefully when its data/credentials are absent. Multi-source is now built (Claude/GPU/System) — keep every new source honest, optional, and self-hiding (`is_available()` + a `show_*` setting).

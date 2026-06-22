@@ -35,6 +35,11 @@ _local_secrets.py
 settings.json
 state.json
 
+# Claude Code: track the shared security-review hook config; ignore local-only
+# overrides. The bare `settings.json` pattern above would otherwise swallow it.
+!.claude/settings.json
+.claude/settings.local.json
+
 # Scratch / capture files used during development
 .run.err
 .run.log
