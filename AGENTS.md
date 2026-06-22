@@ -83,6 +83,22 @@ These exist because we hit them the hard way. Breaking any one corrupts behavior
 - `/api/v1/models/{slug}/endpoints` returns `latency_last_30m` as a dict `{p50, p75, p90, p99}`, not a single number. Extract `p50` for the headline metric. Same shape for `throughput_last_30m`. See `EndpointInfo` + `_percentile` in `api_client.py`.
 - The dashboard URL field on each provider in `/api/v1/providers` is mostly unused by us today, but the data is there if a future feature wants per-provider status-page deep links.
 
+## Sources (the agnostic architecture)
+
+Pulse is **not** OpenRouter — it's a monitor that shows many sources side by side. The dashboard is a neutral host: it renders an ordered list of **source section-groups** (`settings.source_order`); no provider is privileged. OpenRouter, Claude, GPU, and System are all peers.
+
+A **Source** (`sources/base.py`) is a self-contained unit:
+- `source_id` / `display_name` / `poll_interval` (seconds).
+- `is_available() -> bool` — MAIN thread, cheap. Should this source show at all? (e.g. creds present, GPU detected, not hidden by a `show_*` setting.)
+- `poll() -> data` — **WORKER thread**. Does all I/O, returns a plain data object, **must not touch Qt and must not raise** (return data carrying an error instead).
+- `build_card(parent) -> QWidget` — MAIN thread. Returns a widget with `render(data)`.
+
+The controller (`main.py`) polls each available source on a dedicated `source_thread` (a `SourceWorker` + `SourceTrigger`, mirroring the OpenRouter `APIWorker`/`FetchTrigger`), then marshals the result to `card.render(data)` on the main thread via the `polled` signal. OpenRouter keeps its bespoke multi-cadence worker but mounts as a peer group via `Dashboard.mount_source`.
+
+**To add a source** (e.g. GitHub, FX): create `sources/<name>/` with a pure parser (unit-tested against a captured sample — never the live endpoint), a `<Name>Card(QWidget)` whose geometry is **font-metric-driven** (see `sources/gpu/card.py` — share one `_build_ops()` between `paintEvent` and height so nothing clips), and a `<Name>Source(Source)`. Add it to `OpenRouterPulse._SOURCE_CLASSES`, add a `show_<name>` setting + its id to `source_order`'s default. That's it — no dashboard changes.
+
+**Source threading rules:** `poll()` is the only place a source does I/O, and it's Qt-free. The card lives on the main thread. Heavy parsing in `poll()` is fine (it's off the main thread) — but remember automatic GC is disabled (see the invariant above), so cyclic collection won't race a paint.
+
 ## Safe restart during development
 
 ```powershell
@@ -107,8 +123,9 @@ from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 
 ## Handoff: what the next agent should know
 
-**Current state (as of the last commit on `main`):**
-- Tag `v0.4.1` is the current release. Pulse.exe attached.
+**Current state:**
+- Tag `v0.5.0` is the current release on `main` (Claude usage source, first `pytest` suite, the GC-crash fix). Pulse.exe attached to the GitHub release.
+- The `feat/agnostic-sources` branch (PR #1) makes Pulse fully **source-agnostic** (neutral dashboard host; OpenRouter is a peer) and adds **GPU** + **System** sources and a **global hotkey**. See the Sources section above; review/merge that PR for the v0.6 feature set.
 - Code is stable. 11-point validation passes, plus the 9 additional Pinned-Models checks above.
 - The dashboard's three sections (Credit Balance, Usage, Burn Rate) and the Pinned Models section are the entire UI. Quick Links row at the bottom links to OpenRouter pages.
 - User's `%APPDATA%/Pulse/settings.json` has both an org-scoped `api_key` and an org-scoped `management_api_key`. The management key is there but unused by the code yet.
@@ -134,7 +151,8 @@ See `ROADMAP.md` for the longer view.
 - Touch `git` without explicit approval. Validate first, ASK, then commit.
 - Bring back QToolTip on pinned cards. The click-to-toggle popup is intentional.
 - Hide the cards when the picker opens. They overlay; cards stay visible.
-- Promise multi-provider abstraction (Claude, OpenAI, etc.) until OpenRouter integration is more mature AND the other providers expose programmatic usage APIs.
+- Add a source for a provider with no real programmatic usage API, or one that doesn't degrade gracefully when its data/credentials are absent. Multi-source is now built (Claude/GPU/System) — keep every new source honest, optional, and self-hiding (`is_available()` + a `show_*` setting).
+- Refresh/rotate the Claude OAuth token. Pulse reads it strictly read-only; rotating it could log the user out of Claude Code. See `sources/claude/credentials.py`.
 
 **Useful coordinates for visual testing (single-monitor 3440-wide setup):**
 - Tray icon: ~(3229, 1416)
