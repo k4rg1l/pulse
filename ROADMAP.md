@@ -1,11 +1,12 @@
 # Roadmap
 
-What's coming after v0.1. Order is rough, not strict. Each item links back to why it's worth doing.
+What's coming after the current release. Order is rough, not strict. Each item links back to why it's worth doing.
 
-The app is called Pulse. v0.1 supports OpenRouter. The name leaves room to add more providers and aggregators later (Anthropic console, OpenAI usage, AWS Bedrock spend, etc.) without a rename. Cross-provider unification is a long-term goal, not a v0.2 promise.
+The app is called Pulse. The current releases support OpenRouter. The name leaves room to add more providers and aggregators later (Anthropic console, OpenAI usage, AWS Bedrock spend, etc.) without a rename. Cross-provider unification is a long-term goal, not a near-term promise.
 
-## Now (v0.1, shipped)
+## Shipped
 
+### v0.1
 - Tray icon with live balance gauge and rich tooltip
 - Frameless dark dashboard popup anchored to the tray
 - Auto top-up aware burn rate forecast with explanation tooltip
@@ -16,78 +17,80 @@ The app is called Pulse. v0.1 supports OpenRouter. The name leaves room to add m
 - Persistence: snapshots, 90 day retention, top-up event detection
 - Single instance lock, click-outside dismiss, no taskbar entry
 
-## Next (v0.2, building now)
+### v0.2
+- Pinned Models section with per-provider health
+- Per provider: live p50 latency, 30-min uptime, prompt/completion price
+- Best provider auto-highlighted (lowest latency among uptime ≥99%)
+- 5-minute refresh cadence
+- Column headers above cards (PROVIDER / LAT / UP% / $/M IN·OUT)
 
-**Pinned models with per-provider health.** Uses `/api/v1/models/{author}/{slug}/endpoints` (untapped today). For each model you pin in settings, show every provider serving it with p50 latency, 30-min uptime, and price side by side. Mark the best-overall provider per model. 5-minute background refresh. Replaces the deleted Service Status section with something actionable.
+### v0.3
+- Dynamic model picker inside the Pinned Models section. Search bar opens a list of every model in OpenRouter's catalog; click a star to toggle pin. Saves to settings.json instantly.
+- X clear button on the search bar; search text persists across close+reopen
+- PyInstaller .exe attached to GitHub Releases. No Python install needed.
+- Crash-log redirect for windowed PyInstaller builds (`%APPDATA%/Pulse/pulse.log`)
 
-- New `tracked_models` field in settings.json (list of OpenRouter model IDs)
-- New PINNED MODELS section in the dashboard
-- Per-provider rows with metric pills and best-of indicator
-- Tooltip on each row with full numbers (throughput, p90 latency, quantization)
-- Auto-refresh every 5 min; manual refresh on dashboard refresh
+### v0.4
+- Collapsible Pinned Models section (▾/▸ chevron)
+- Click-to-toggle provider info popup with (i) icon on each card. Floats outside the dashboard so it doesn't cover the cards.
+- Picker dropdown now overlays the cards instead of replacing them. Cards stay visible underneath.
+- Dashboard always opens at the top (auto-resets scroll on show)
+- Picker and info popup auto-dismiss when the dashboard scrolls
+- Header layout fixed so long model names elide cleanly without overlapping the ★ Provider chip
+- Tooltip rewrites: HTML, sectioned, less jargon
 
-## Soon (v0.3)
+## Next (v0.5 candidates)
 
-**Per-model and per-provider spend** via the management key in settings. Currently blocked by `/api/v1/activity` only seeing activity from org-scoped keys. Once enough org-scoped usage accumulates:
+Pick whichever is most useful at the time:
+
+**Notifications, done right**
+- Top-up triggered (when we detect a balance jump)
+- Running out (already have warning and critical thresholds)
+- Provider outage on a pinned model
+- Daily summary toast on first open of a new day, summarizing the previous day's spend
+
+**Cost calculator widget**
+- Pick a model, enter prompt token count and completion token count, get a cost in dollars
+- Show the cost across all providers serving that model (data we already fetch for Pinned Models)
+- Sticky inside the Pinned Models section or its own section
+
+**Top-up history view**
+- Surface every detected top-up from snapshot history
+- Total auto-top-ups this month as a small KPI tile
+
+**Settings GUI dialog**
+- Replace JSON editing for the common cases (top-up threshold/amount, refresh intervals, warning thresholds)
+- Power users still get settings.json
+
+**Global hotkey**
+- Default Win+Shift+O to open the dashboard
+- Configurable in settings.json
+
+## Soon (v0.6+)
+
+**Per-model and per-provider spend.** OpenRouter's `/api/v1/activity` is locked behind management keys. When the user has a management key set (`management_api_key` in settings.json) and has accumulated enough org-scoped usage, unlock:
 
 - Spend by model (this month, this week, today)
 - Spend by provider
 - Top N models by cost
 - Last N generations feed (timestamp, model, cost, latency)
 
-**Cleanup that didn't make v0.1**
-
-- Settings GUI dialog (right now you edit JSON in Notepad)
-- Move API key out of plain text in settings.json into Windows Credential Manager
-- Pre-built `.exe` distributed through GitHub Releases (PyInstaller)
-
-## Distribution
-
-- Pre-built `.exe` via PyInstaller, attached to each GitHub Release. Removes the Python + pip + git clone install step entirely. Tracked separately because PyInstaller builds need iteration to get clean (no false positives from Windows Defender, bundled Qt plugins).
-
-## Later (v0.4 and on)
-
-**Notifications, done right**
-
-- Top-up triggered (when we detect a balance jump)
-- Running out (already have warning and critical thresholds)
-- Provider outage on a pinned model
-- Daily summary toast on first open of a new day, summarizing the previous day's spend
-
-**Top-up history view**
-
-- Surface every detected top-up from snapshot history
-- Total auto-top-ups this month as a small KPI tile
-
-**Cost calculator**
-
-- Pick a model, enter prompt token count and completion token count, get a cost in dollars with the cheapest provider highlighted
-- Quick "what would this prompt cost across my pinned models" comparison
-
-**Smart picks card**
-
-- "cheapest in chat", "cheapest in vision", "best uptime today" auto-derived from the live `/endpoints` data
-
-**UX polish**
-
-- Global hotkey to open the dashboard (default Win+Shift+O, configurable)
-- Drag to reposition the dashboard anywhere on screen
-- Theme variants: current dark, minimal, OLED black
-- Compact mode (gauge plus burn rate only, hide everything else)
-
-**Open source plumbing**
-
-- PyPI package so `pipx install openrouter-pulse` and `pulse` works
-- GitHub Actions for lint on every push
-- Issue templates for bug reports and feature requests
-- Contributor guide
+The schema is reverse-engineered; the activity endpoint just needs real data to show up. Current blocker is that the user's day-to-day OpenRouter usage hasn't been routed through the org long enough for `/activity` to return populated rows.
 
 ## Watching
 
 Things we'd love to add but the platform doesn't expose what we'd need yet.
 
 - **Claude Max subscription tracking.** Flat-rate consumer plan, no programmatic usage API today. If Anthropic ever exposes Max usage via the Console API, this becomes a second tab with the same shape as the OpenRouter one. Until then, no integration path that doesn't involve fragile auth-cookie scraping.
-- **Anthropic Console / OpenAI / Bedrock spend tabs.** All require admin-scoped credentials that change the UX significantly. Worth doing when we have the abstraction shape proven out by v0.3's per-model spend work.
+- **Anthropic Console / OpenAI / Bedrock spend tabs.** All require admin-scoped credentials that change the UX significantly. Worth doing when we have the abstraction shape proven out by per-model spend work above.
+
+## Distribution
+
+- ✅ Pre-built `.exe` via PyInstaller, attached to each GitHub Release. (Shipped in v0.3.)
+- PyPI package so `pipx install pulse-tray` and `pulse` works
+- GitHub Actions for lint on every push
+- Issue templates for bug reports and feature requests
+- Contributor guide
 
 ## Maybe
 
@@ -100,7 +103,7 @@ Ideas that need a clear use case before they're worth building.
 
 ## Not doing
 
-- Browsing the full 340 model catalog. openrouter.ai/models already does this better.
-- Service health summary as 3 generic dots. Useless without per-provider granularity.
-- "Updated 35s ago" label. Nobody is watching the clock.
+- Browsing the full 340 model catalog in a giant grid. openrouter.ai/models already does this better. The dynamic picker covers the find-and-pin use case.
+- Service health summary as 3 generic dots. Useless without per-provider granularity. (Removed in v0.1.)
+- "Updated 35s ago" label. Nobody is watching the clock. (Removed in v0.1.)
 - Web view or Electron. Native PySide6 stays.

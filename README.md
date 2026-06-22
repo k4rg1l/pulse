@@ -1,14 +1,16 @@
 # Pulse
 
-A Windows tray app for monitoring your OpenRouter subscription. Live balance, auto top-up aware forecast, 24h balance timeline, and threshold notifications. Dark themed, frameless, stays out of your way.
+A Windows tray app for monitoring your OpenRouter subscription. Live balance, auto top-up aware forecast, 24h balance timeline, pinned models with per-provider health, and threshold notifications. Dark themed, frameless, stays out of your way.
 
 More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
 
-![dashboard](docs/dashboard.png)
+![dashboard top](docs/dashboard.png)
 
 ![pinned models](docs/dashboard-pinned.png)
 
 ![model picker](docs/dashboard-picker.png)
+
+![provider info popup](docs/dashboard-popup.png)
 
 ![dashboard in context](docs/desktop.jpg)
 
@@ -21,6 +23,9 @@ More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
 - Hourly and daily burn rate computed from your own history, persisted across restarts.
 - Toast notifications when balance crosses your warning or critical threshold.
 - **Pinned models with per-provider health.** Pick the models you actually use, see live p50 latency, 30-min uptime, and price for every provider serving each one. Best provider per model is highlighted. Refreshes every 5 minutes.
+- **Dynamic model picker.** Click the search bar in the Pinned Models section to browse every model in OpenRouter's catalog. Click a star to pin or unpin. Changes save immediately. Type to filter.
+- **Click-to-toggle info popup.** Each pinned model has an (i) icon that opens a detailed table of every provider (latency, uptime, throughput, context length). Anchored to the side of the dashboard so it doesn't cover the cards.
+- **Collapsible sections.** Click the chevron in the Pinned Models header to fold the whole section away for a compact view.
 - Right-click menu for quick links to OpenRouter's dashboard, credits page, and models page.
 - Single instance lock so double-launching is a no-op.
 
@@ -32,7 +37,7 @@ Grab `Pulse.exe` from the [latest release](https://github.com/k4rg1l/pulse/relea
 
 Configure your API key once: right-click the tray icon → **Open Settings File...** Add your key in the `api_key` field. Restart Pulse.
 
-The .exe is a self-contained PyInstaller bundle (~50 MB). Some antivirus flags PyInstaller binaries as suspicious on first run — that's a known false positive, you can verify the build is from this repo via the release page.
+The .exe is a self-contained PyInstaller bundle (~50 MB). Some antivirus flags PyInstaller binaries as suspicious on first run. That's a known false positive, you can verify the build is from this repo via the release page.
 
 ### Option B: from source (Python 3.10+)
 
@@ -83,25 +88,21 @@ All settings live in `%APPDATA%\Pulse\settings.json`:
 }
 ```
 
-`tracked_models` is the list of OpenRouter model IDs shown in the "Pinned Models" section. Add or remove freely; the dashboard updates on the next refresh. IDs are the same as the model slugs on openrouter.ai/models.
+`tracked_models` is the list of OpenRouter model IDs shown in the Pinned Models section. You can also pin or unpin from the search bar inside the section, which updates this file automatically.
 
 Set `auto_topup_threshold` and `auto_topup_amount` to whatever you've configured on openrouter.ai. With them set, the forecast switches from "depletes in N days" to "next top-up in N hours" and the gauge shows an indicator.
 
-`management_api_key` is reserved for v0.2 (per-model and per-provider spend). Leave it empty for now.
-
-## What's not in v0.1
-
-This is intentionally minimal. The first release ships the things every OpenRouter user wants on day one. Per-model spend, per-provider health, pinned model watchlists, a cost calculator, daily summary toasts, a global hotkey, and a settings GUI are all planned. See [ROADMAP.md](ROADMAP.md).
+`management_api_key` is reserved for a planned per-model spend feature (needs an OpenRouter management key). Leave it empty for now.
 
 ## Tech
 
-PySide6, Python 3.10+, requests. About 1.5k lines across 7 files. Pure Qt, no web view, no Electron.
+PySide6, Python 3.10+, requests. About 2k lines across 8 files. Pure Qt, no web view, no Electron.
 
 ## Contributing
 
 Issues and PRs welcome. If you want to take a roadmap item, open an issue first so we don't duplicate work.
 
-Read [AGENTS.md](AGENTS.md) before touching tray, focus, or window code. It lists the invariants, the validation checklist, and the API gotchas.
+**Read [AGENTS.md](AGENTS.md) before touching tray, focus, window, or popup code.** It lists the invariants, the validation checklist, and the API gotchas. Several of those entries exist because they bit us during development; honoring them saves you from re-discovering the same bugs.
 
 ## License
 
