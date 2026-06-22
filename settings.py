@@ -51,6 +51,7 @@ class Settings:
 
     # -- UI
     dismiss_on_focus_loss: bool = True  # close dashboard when user clicks elsewhere
+    hotkey: str = "win+shift+o"         # global summon hotkey (empty string disables)
 
     # -- Sources. Pulse renders an ordered list of source section-groups; no
     # provider is privileged. `source_order` is the top-to-bottom order

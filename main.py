@@ -58,6 +58,7 @@ from sources.worker import SourceWorker, SourceTrigger
 from sources.claude.source import ClaudeSource
 from sources.gpu.source import GpuSource
 from sources.system.source import SystemSource
+from hotkey import HotkeyListener
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +163,11 @@ class OpenRouterPulse(QObject):
 
         # -- Pluggable sources (Claude, …): peers to OpenRouter --
         self._setup_sources()
+
+        # -- Global hotkey to summon the dashboard (Win32 RegisterHotKey) --
+        self.hotkey = HotkeyListener(getattr(self.settings, "hotkey", "win+shift+o"))
+        self.hotkey.summon.connect(self.dashboard.toggle)
+        self.hotkey.start()
 
         # If no API key is set, surface it immediately
         if not API_KEY:
@@ -295,6 +301,8 @@ class OpenRouterPulse(QObject):
                 3000,
             )
         code = self.app.exec()
+        if getattr(self, "hotkey", None) is not None:
+            self.hotkey.stop()
         self.api_thread.quit()
         self.api_thread.wait(3000)
         if getattr(self, "source_thread", None) is not None:
