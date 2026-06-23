@@ -73,7 +73,7 @@ def logo_path(source_id: str) -> str:
 
 # -- App Info --
 APP_NAME = "Pulse"
-APP_VERSION = "0.7.0"  # nav-rail command-center UI overhaul + Settings tab
+APP_VERSION = "0.6.0"
 APP_ORG = "Pulse"
 
 # -- Startup Registry --

@@ -4,12 +4,12 @@
 - **New agent?** Read THIS first, then [AGENTS.md](AGENTS.md), then continue. That's the whole onboarding.
 - **Outgoing agent?** Update this as your *last act*: Status, what you changed, what's next, any new decision/gotcha. Keep it short and current. When something here becomes a permanent rule, move it into AGENTS.md and delete it here.
 
-**Last updated:** 2026-06-22 · by the agent that shipped the v0.7.0 command-center UI overhaul + Settings tab.
+**Last updated:** 2026-06-22 · command-center UI overhaul + Settings tab landed on `main` (UNRELEASED — version stays 0.6.0, no tag/push, until the next deliberate release).
 
 ---
 
 ## Status
-- **Shipped on `main`:** the **nav-rail "command center" UI overhaul** — a left icon rail of equal-peer source tabs (OpenRouter / Claude / GPU / System) plus a Pulse-cyan **Settings tab**, each with its own brand logo, accent identity, themed panel + hued background, live status dots, and animated tab transitions. **UI-only — the same per-source data as before.** Also shipped earlier: the mandatory `/security-review` commit gate and the rate-limit-resilient Claude usage fix (cache + backoff + recency stamp).
+- **On `main` (committed, UNRELEASED — not tagged, not pushed):** the **nav-rail "command center" UI overhaul** — a left icon rail of equal-peer source tabs (OpenRouter / Claude / GPU / System) plus a Pulse-cyan **Settings tab**, each with its own brand logo, accent identity, themed panel + hued background, live status dots, and animated tab transitions. **UI-only — the same per-source data as before.** Also shipped earlier: the mandatory `/security-review` commit gate and the rate-limit-resilient Claude usage fix (cache + backoff + recency stamp).
 - **Green:** `pip install -r requirements-dev.txt && python -m pytest -q` → 112 passed.
 - **Next (the real prize):** go **DEEPER per source** — the data was intentionally left unchanged during the UI overhaul. The roomy panels now have space for it (Claude active-sessions / model breakdown, OpenRouter provider health board, GPU clocks/fan, System per-core/disk/uptime, History heatmaps). See Next steps.
 

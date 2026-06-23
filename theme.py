@@ -84,7 +84,7 @@ class Colors:
 SOURCE_ACCENTS = {
     "openrouter": {"base": "#7C83FF", "bright": "#9AA0FF"},
     "claude":     {"base": "#D97757", "bright": "#E8916F"},
-    "gpu":        {"base": "#76B900", "bright": "#9BD22B"},
+    "gpu":        {"base": "#66A22B", "bright": "#83BF3D"},
     "system":     {"base": "#2DD4BF", "bright": "#5FE6D4"},
     # Settings is the app's own panel (not a source) — Pulse brand cyan.
     "settings":   {"base": "#00D2FF", "bright": "#5BE3FF"},

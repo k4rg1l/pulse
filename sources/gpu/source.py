@@ -13,7 +13,7 @@ from sources.gpu.nvml import NvmlReader
 class GpuSource(Source):
     source_id = "gpu"
     display_name = "GPU"
-    accent = "#76B900"
+    accent = "#66A22B"
     poll_interval = 3  # live stats; cheap NVML reads
 
     def __init__(self, settings=None):
