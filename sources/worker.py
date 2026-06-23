@@ -9,7 +9,11 @@ thread.
 """
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QObject, Signal, Slot
+
+log = logging.getLogger("pulse.sources")
 
 
 class SourceTrigger(QObject):
@@ -32,7 +36,7 @@ class SourceWorker(QObject):
             return
         try:
             data = src.poll()
-        except Exception as e:  # defensive: poll() shouldn't raise, but never crash the thread
-            print(f"[source:{source_id}] poll crashed: {e}")
+        except Exception:  # defensive: poll() shouldn't raise, but never crash the thread
+            log.exception("source %r poll crashed", source_id)
             data = None
         self.polled.emit(source_id, data)

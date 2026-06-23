@@ -4,7 +4,16 @@
 - **New agent?** Read THIS first, then [AGENTS.md](AGENTS.md), then continue. That's the whole onboarding.
 - **Outgoing agent?** Update this as your *last act*: Status, what you changed, what's next, any new decision/gotcha. Keep it short and current. When something here becomes a permanent rule, move it into AGENTS.md and delete it here.
 
-**Last updated:** 2026-06-22 · **v0.7.0 RELEASED** — command-center UI overhaul + Settings tab pushed to `origin/main` (github.com/k4rg1l/pulse), tagged `v0.7.0`, GitHub release published.
+**Last updated:** 2026-06-23 · **Housekeeping: structured logging added** (uncommitted, in working tree). v0.7.0 is the last release.
+
+## 2026-06-23 session — logging + OpenRouter "all clear"
+- **OpenRouter is healthy.** A "stopped working" report (API Error banner + full-red tray gauge, stuck) could NOT be reproduced — API 200s, key valid ($5.54/$10), 112 tests pass, pinned models return data, renders fine after a clean restart. Concluded a **transient API/network failure that got stuck** in the long-running process; cleared by restart. Root cause unconfirmed (self-resolved).
+- **NEW: production-grade logging** (`logging_setup.py`, called first in `main`). Structured **JSON-lines** → `%APPDATA%/Pulse/logs/pulse.jsonl` (rotating, searchable, OpenSearch-ingestable later) + `pulse-crash.log` for faulthandler. All `print()` → `logging`; uncaught exceptions (main+worker), Qt messages, warnings captured; third-party noise tamed; benign `0x8001010d` isolated to the crash file (searchable log stays clean). Heartbeat (`key_info ok …`) lets us see if polling recovers after an error. Docs: **docs/LOGGING.md**. **Rebuilt `dist/Pulse.exe`** and verified the frozen build logs live.
+- **Uncommitted.** Needs the `/security-review` gate + user approval before commit (AGENTS.md). Next planned (user's order): finish housekeeping → deeper OpenRouter panel → nav-rail active-accent brightness → deeper Claude → deeper GPU/System.
+
+---
+
+**Prior:** 2026-06-22 · **v0.7.0 RELEASED** — command-center UI overhaul + Settings tab pushed to `origin/main` (github.com/k4rg1l/pulse), tagged `v0.7.0`, GitHub release published.
 
 ---
 

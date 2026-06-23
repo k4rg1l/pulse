@@ -15,11 +15,14 @@ under a millisecond at this volume.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
+
+log = logging.getLogger("pulse.persistence")
 
 RETENTION_DAYS = 90
 MAX_SNAPSHOTS = 20_000  # hard cap (~2 weeks at 60s cadence)
@@ -42,7 +45,7 @@ def state_dir() -> Path:
             import shutil
             shutil.copytree(legacy_dir, new_dir)
         except Exception as e:
-            print(f"[persistence] migrate from legacy dir failed: {e}")
+            log.warning("migrate from legacy dir failed: %s", e)
 
     new_dir.mkdir(parents=True, exist_ok=True)
     return new_dir
@@ -87,7 +90,7 @@ class History:
             return cls(snaps)
         except Exception as e:
             # Corrupt file — start fresh but don't crash
-            print(f"[persistence] load error: {e}; starting fresh")
+            log.warning("load error: %s; starting fresh", e)
             return cls()
 
     def save(self) -> None:

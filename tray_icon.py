@@ -5,6 +5,7 @@ Dynamic icon rendering, context menu, notifications.
 import os
 import sys
 import math
+import logging
 import subprocess
 import webbrowser
 import winreg
@@ -16,6 +17,8 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, Signal, QObject, QPoint, QPointF, QRectF
 
 from theme import Colors, Fonts
+
+log = logging.getLogger("pulse.tray")
 from config import (
     APP_NAME, OPENROUTER_DASHBOARD_URL, OPENROUTER_CREDITS_URL,
     OPENROUTER_SETTINGS_URL, OPENROUTER_MODELS_URL,
@@ -71,7 +74,7 @@ class TrayIcon(QSystemTrayIcon):
                     pass
             winreg.CloseKey(key)
         except Exception as e:
-            print(f"[tray] legacy startup migrate: {e}")
+            log.warning("legacy startup migrate: %s", e)
 
     # ------------------------------------------------------------------
     #  Dynamic icon drawing
@@ -227,8 +230,8 @@ class TrayIcon(QSystemTrayIcon):
             p = str(settings_path())
             # Prefer the user's default editor association
             os.startfile(p)
-        except Exception as e:
-            print(f"[Tray] open settings error: {e}")
+        except Exception:
+            log.exception("open settings error")
 
     # ------------------------------------------------------------------
     #  Public update methods
@@ -334,8 +337,8 @@ class TrayIcon(QSystemTrayIcon):
                 except FileNotFoundError:
                     pass
             winreg.CloseKey(key)
-        except Exception as e:
-            print(f"[Tray] Startup toggle error: {e}")
+        except Exception:
+            log.exception("startup toggle error")
 
     # ------------------------------------------------------------------
     #  Click handling

@@ -2,6 +2,7 @@
 OpenRouter Pulse - API Client
 Handles all communication with OpenRouter API endpoints.
 """
+import logging
 import requests
 import time
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ from config import (
     API_KEY, API_KEY_ENDPOINT, MODELS_ENDPOINT,
     MODELS_COUNT_ENDPOINT, STATUS_URL,
 )
+
+log = logging.getLogger("pulse.api")
 
 BASE_URL = "https://openrouter.ai"
 CREDITS_ENDPOINT = f"{BASE_URL}/api/v1/credits"
@@ -238,7 +241,7 @@ class APIClient:
                 for p in data
             ]
         except Exception as e:
-            print(f"[API] providers error: {e}")
+            log.warning("providers fetch failed: %s", e)
             return []
 
     def get_models(self) -> list:
@@ -272,7 +275,7 @@ class APIClient:
                 ))
             return models
         except Exception as e:
-            print(f"[API] Error fetching models: {e}")
+            log.warning("models fetch failed: %s", e)
             return []
 
     def get_model_count(self) -> int:
@@ -282,7 +285,7 @@ class APIClient:
             data = resp.json()
             return data.get("count", data.get("data", {}).get("count", 0))
         except Exception as e:
-            print(f"[API] Error fetching model count: {e}")
+            log.warning("model count fetch failed: %s", e)
             return 0
 
     def get_model_endpoints(self, model_id: str) -> Optional[ModelEndpoints]:
@@ -336,7 +339,7 @@ class APIClient:
                 endpoints=endpoints,
             )
         except Exception as e:
-            print(f"[API] endpoints({model_id}) error: {e}")
+            log.warning("endpoints(%s) fetch failed: %s", model_id, e)
             return None
 
     def get_service_status(self) -> ServiceStatus:
@@ -361,7 +364,7 @@ class APIClient:
                 status.homepage = "degraded"
             return status
         except Exception as e:
-            print(f"[API] Error fetching status: {e}")
+            log.warning("status fetch failed: %s", e)
             return ServiceStatus()
 
 
@@ -429,6 +432,6 @@ class APIWorker(QObject):
         try:
             ep = self.client.get_model_endpoints(model_id)
             self.endpoints_ready.emit(model_id, ep)
-        except Exception as e:
-            print(f"[worker] endpoints({model_id}) crashed: {e}")
+        except Exception:
+            log.exception("endpoints(%s) worker crashed", model_id)
             self.endpoints_ready.emit(model_id, None)

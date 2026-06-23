@@ -14,11 +14,14 @@ is no ctypes-trampoline lifetime hazard.
 from __future__ import annotations
 
 import ctypes
+import logging
 import threading
 from ctypes import wintypes
 from typing import Optional, Tuple
 
 from PySide6.QtCore import QObject, Signal
+
+log = logging.getLogger("pulse.hotkey")
 
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
@@ -86,7 +89,7 @@ class HotkeyListener(QObject):
         self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
         mods, vk = self._parsed
         if not user32.RegisterHotKey(None, 1, mods, vk):
-            print(f"[hotkey] RegisterHotKey failed for '{self._spec}' (already in use?)")
+            log.warning("RegisterHotKey failed for %r (already in use?)", self._spec)
             return
         self.active = True
         msg = wintypes.MSG()

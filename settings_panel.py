@@ -7,6 +7,8 @@ callbacks, while source-visibility changes note that they apply on next launch.
 """
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import (
     Qt, Signal, QPropertyAnimation, QEasingCurve, Property, QRectF, QPointF,
 )
@@ -19,6 +21,8 @@ from PySide6.QtWidgets import (
 
 import theme_controller
 from theme import Colors, Fonts
+
+log = logging.getLogger("pulse.settings_panel")
 
 
 def _lerp(a: QColor, b: QColor, t: float) -> QColor:
@@ -261,5 +265,5 @@ class SettingsPanel(QWidget):
     def _save(self):
         try:
             self._s.save()
-        except Exception as e:
-            print(f"[settings_panel] save failed: {e}")
+        except Exception:
+            log.exception("settings save failed")

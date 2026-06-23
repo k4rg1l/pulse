@@ -4,6 +4,7 @@ The main popup panel that appears from the system tray.
 """
 import ctypes
 import ctypes.wintypes as wintypes
+import logging
 import os
 import webbrowser
 import time
@@ -36,6 +37,8 @@ from widgets import (
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
+
+log = logging.getLogger("pulse.dashboard")
 
 
 def _fmt_duration(days):
@@ -519,8 +522,8 @@ class Dashboard(QWidget):
         self._settings.tracked_models = current
         try:
             self._settings.save()
-        except Exception as e:
-            print(f"[dashboard] settings.save failed: {e}")
+        except Exception:
+            log.exception("settings save failed")
         self.set_tracked_models(current)
         # Kick off an endpoints fetch for a newly-pinned model so the
         # user sees data without waiting for the 5-min polling cycle.

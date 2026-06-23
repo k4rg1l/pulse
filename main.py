@@ -5,44 +5,16 @@ System tray application for monitoring your OpenRouter subscription.
 import sys
 import os
 import ctypes
-import faulthandler
 import gc
 import time
-from pathlib import Path
+import logging
 
-
-def _redirect_streams_if_frozen():
-    """In a PyInstaller windowed build, sys.stdout and sys.stderr are
-    None — any call to faulthandler.enable() or print() would crash.
-    Redirect both to %APPDATA%/Pulse/pulse.log so we still get crash
-    tracebacks for debugging."""
-    if sys.stderr is not None and sys.stdout is not None:
-        return
-    try:
-        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
-        log_dir = Path(appdata) / "Pulse"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log = open(log_dir / "pulse.log", "a", encoding="utf-8", buffering=1)
-        if sys.stderr is None:
-            sys.stderr = log
-        if sys.stdout is None:
-            sys.stdout = log
-    except Exception:
-        # Last resort: a devnull-ish writable thing so prints don't crash
-        class _Null:
-            def write(self, *a, **kw): pass
-            def flush(self): pass
-        if sys.stderr is None:
-            sys.stderr = _Null()
-        if sys.stdout is None:
-            sys.stdout = _Null()
-
-
-_redirect_streams_if_frozen()
-try:
-    faulthandler.enable()
-except Exception:
-    pass
+# Configure structured logging + crash capture FIRST — before Qt is imported,
+# so the frozen-build stream redirect (sys.stderr is None in a windowed .exe)
+# happens up front and everything after logs through it. See logging_setup.py.
+from logging_setup import setup_logging
+setup_logging()
+log = logging.getLogger("pulse.main")
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread, QTimer, Qt, Slot, Signal, QObject
@@ -235,6 +207,8 @@ class OpenRouterPulse(QObject):
             if self.history.add(snap):
                 QTimer.singleShot(0, self._save_history)
 
+        log.debug("key_info ok: remaining=%s usage_daily=%s",
+                  key_info.remaining, key_info.usage_daily)
         self.dashboard.clear_error()
         self.tray.clear_error()
         self.tray.update_credit_info(key_info, self.history)
@@ -255,12 +229,12 @@ class OpenRouterPulse(QObject):
     def _save_history(self):
         try:
             self.history.save()
-        except Exception as e:
-            print(f"[history] save failed: {e}")
+        except Exception:
+            log.exception("history save failed")
 
     @Slot(str)
     def _on_error(self, msg):
-        print(f"[Pulse] API Error: {msg}")
+        log.error("OpenRouter API error: %s", msg)
         self.dashboard.show_error(msg)
         self.tray.set_error(msg)
 
@@ -284,8 +258,8 @@ class OpenRouterPulse(QObject):
                 if not src.is_available():
                     continue
                 card = src.build_card()
-            except Exception as e:
-                print(f"[sources] {cls.__name__} setup failed: {e}")
+            except Exception:
+                log.exception("source %s setup failed", cls.__name__)
                 continue
             self.dashboard.register_source_tab(
                 src.source_id, src.display_name, accent_for(src.source_id), card)

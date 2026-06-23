@@ -11,10 +11,13 @@ file is short and the user is technical.  A real dialog can come later.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 
 from persistence import state_dir
+
+log = logging.getLogger("pulse.settings")
 
 
 def settings_path() -> Path:
@@ -78,7 +81,7 @@ class Settings:
             # `Set-Content -Encoding utf8`); falls back to plain UTF-8.
             data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception as e:
-            print(f"[settings] load error: {e}; using defaults")
+            log.warning("load error: %s; using defaults", e)
             return cls()
         # Tolerate unknown / missing keys gracefully
         known = {f.name for f in fields(cls)}

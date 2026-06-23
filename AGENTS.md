@@ -97,7 +97,7 @@ These exist because we hit them the hard way. Breaking any one corrupts behavior
 
 **`html` rich text in QLabel: `white-space: nowrap` on EVERY cell, not just the first.** Otherwise short values like "170 t/s" can wrap mid-cell to "170 t/" + "s" when the column is just barely too narrow. Setting nowrap on the provider column alone doesn't help the metric columns.
 
-**PyInstaller windowed builds have `sys.stderr = None`.** Any call to `faulthandler.enable()`, `print()`, or any other stderr write crashes the frozen .exe. At module load, check `sys.stderr is None` and redirect both stdout and stderr to a log file (we use `%APPDATA%/Pulse/pulse.log`). See `main._redirect_streams_if_frozen`. This is the most common reason a `.exe` that runs fine in dev crashes on first launch.
+**PyInstaller windowed builds have `sys.stderr = None`.** Any call to `faulthandler.enable()`, `print()`, or any other stderr write crashes the frozen .exe. This is handled centrally in `logging_setup.setup_logging()` (called first thing in `main`), which redirects both streams to `%APPDATA%/Pulse/logs/pulse-crash.log` before anything else runs. Don't add module-load `print()`s that run before that — use a `logging.getLogger("pulse.<area>")` instead. This is the most common reason a `.exe` that runs fine in dev crashes on first launch.
 
 **PyInstaller .exe tray icons land in the hidden-icons overflow on first run.** Windows treats each unique exe path as a new application for tray-icon placement. The user has to drag the icon to the visible tray once. Don't try to "fix" this with shenanigans; just document it.
 
@@ -146,7 +146,11 @@ from PySide6.QtGui import QFontMetrics, QCursor
 from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 ```
 
-`QPoint`/`QRect`/`QFontMetrics` come up the moment you touch widget geometry. `QApplication` is needed any time you install an event filter. Errors from missing imports are obvious (`NameError`) but the windowed PyInstaller build hides them — if you're debugging a feature that "doesn't seem to do anything," check `%APPDATA%/Pulse/pulse.log` for the traceback.
+`QPoint`/`QRect`/`QFontMetrics` come up the moment you touch widget geometry. `QApplication` is needed any time you install an event filter. Errors from missing imports are obvious (`NameError`) but the windowed PyInstaller build hides them — search `%APPDATA%/Pulse/logs/pulse.jsonl` for the traceback (it's structured JSON-lines; `rg '"level":"ERROR"'`). See [docs/LOGGING.md](docs/LOGGING.md).
+
+## Logging
+
+All diagnostics go through `logging` (never `print()` in app code). Setup lives in `logging_setup.py`, called first thing in `main`. Use `log = logging.getLogger("pulse.<area>")` per module; use `log.exception(...)` inside `except` blocks to capture the traceback. Output is **structured JSON-lines** at `%APPDATA%/Pulse/logs/pulse.jsonl` (rotating, searchable now / OpenSearch-ingestable later) plus `pulse-crash.log` for faulthandler dumps. Full reference + search recipes: [docs/LOGGING.md](docs/LOGGING.md).
 
 ## Handoff: what the next agent should know
 
