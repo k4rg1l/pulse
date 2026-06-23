@@ -80,7 +80,7 @@ def logo_path(source_id: str) -> str:
 
 # -- App Info --
 APP_NAME = "Pulse"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 APP_ORG = "Pulse"
 
 # -- Startup Registry --

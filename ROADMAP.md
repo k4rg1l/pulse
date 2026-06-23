@@ -2,7 +2,7 @@
 
 What's coming after the current release. Order is rough, not strict. Each item links back to why it's worth doing.
 
-Pulse is a **source-agnostic** monitor. As of v0.6 it shows OpenRouter, Claude, GPU, and System as **peer** sources (no provider is privileged); more can be added on the same contract — see AGENTS.md → "Sources". (The on-disk folder is still named `OpenRouterPulse` from before the rename/migration — cosmetic only; the app and repo are "Pulse".)
+Pulse is a **source-agnostic** monitor. It shows OpenRouter, Claude, GPU, and System as **peer** sources (no provider is privileged); more can be added on the same contract — see AGENTS.md → "Sources".
 
 ## Shipped
 
@@ -77,28 +77,26 @@ sources, and an MCP server. See `docs/RESEARCH-2026-06-21.md` for the full explo
   dashboard, via Win32 `RegisterHotKey` (no AV-tripping low-level hook).
 - 82 unit tests; every new source's parser is unit-tested + its card render-tested.
 
-## Next (v0.7 candidates)
+### v0.7
 
-Pick whichever is most useful at the time:
+- **Nav-rail command center.** The dashboard became a left icon rail of equal-peer source tabs (OpenRouter / Claude / GPU / System) plus a Settings tab — each with its own brand logo, accent identity, themed panel, live status dots, and animated transitions.
+- **Settings tab** — toggle sources, pick the default panel, and set animation / click-away behavior without editing JSON.
+- Rate-limit-resilient Claude usage (cache + backoff + "as of …" recency) and a mandatory pre-commit `/security-review` gate.
 
-**Notifications, done right**
-- Top-up triggered (when we detect a balance jump)
-- Running out (already have warning and critical thresholds)
-- Provider outage on a pinned model
-- Daily summary toast on first open of a new day, summarizing the previous day's spend
+### v0.8
 
-**Cost calculator widget**
-- Pick a model, enter prompt token count and completion token count, get a cost in dollars
-- Show the cost across all providers serving that model (data we already fetch for Pinned Models)
-- Sticky inside the Pinned Models section or its own section
+- **The Arena.** Pinned models gain a competitive rank crest from their DesignArena ELO (Bronze → Champion) with globally-computed ranks, plus a click-through Fighter Card (Artificial Analysis intelligence/coding/agentic indices, lifetime tournament medals, full category ladder). Built on `/api/v1/benchmarks`.
+- **Structured logging** — JSON-lines to `%APPDATA%/Pulse/logs/` (searchable, rotating) with uncaught-exception and Qt-message capture, plus a separate crash log. See [docs/LOGGING.md](docs/LOGGING.md).
+- Fixes: Settings toggle position bug; OpenRouter error path now logs full HTTP detail.
 
-**Top-up history view**
-- Surface every detected top-up from snapshot history
-- Total auto-top-ups this month as a small KPI tile
+## Next
 
-**Settings GUI dialog**
-- Replace JSON editing for the common cases (top-up threshold/amount, refresh intervals, warning thresholds)
-- Power users still get settings.json
+The near-term focus is **going deeper per source**, starting with OpenRouter. A full reverse-engineering of its API and a curated, deduped build order live in **[docs/OPENROUTER-ROADMAP.md](docs/OPENROUTER-ROADMAP.md)** (backed by [docs/OPENROUTER-RESEARCH.md](docs/OPENROUTER-RESEARCH.md)) — real per-model / per-provider spend attribution, cheapest-provider routing, quality-per-dollar, uptime history, and provider privacy badges.
+
+Standing candidates, any time:
+
+- **Notifications, done right** — top-up triggered, running low, provider outage on a pinned model, a daily-summary toast.
+- **Cost calculator** — pick a model, enter token counts, get the cost across every provider serving it (data already fetched for the health board).
 
 ## Soon (v0.7+)
 

@@ -1,45 +1,54 @@
 # Pulse
 
-A Windows tray app for monitoring your OpenRouter subscription. Live balance, auto top-up aware forecast, 24h balance timeline, pinned models with per-provider health, and threshold notifications. Dark themed, frameless, stays out of your way.
+A lightweight Windows tray monitor for the things a developer watches all day — AI spend, usage limits, and machine vitals — in one frameless, dark, keyboard-summonable panel.
 
-More providers and aggregators planned. See [ROADMAP.md](ROADMAP.md).
+Pulse is **source-agnostic**: OpenRouter, Claude, GPU, and System are equal peers on a left nav-rail command center. Each has its own themed panel; no provider is privileged. Adding a new source follows a single contract.
 
-![dashboard top](docs/dashboard.png)
+![Pulse on the desktop](docs/desktop.jpg)
 
-![pinned models](docs/dashboard-pinned.png)
+## Sources
 
-![model picker](docs/dashboard-picker.png)
+### OpenRouter
+Live credit balance as a circular gauge, an auto-top-up-aware burn-rate forecast, a 24-hour balance timeline, today's spend and a 30-day projection — all computed from your own history and persisted across restarts. Pin the models you use to get a **per-provider health board**: live p50 latency, uptime, throughput, and price for every provider serving each model, with the best one highlighted.
 
-![provider info popup](docs/dashboard-popup.png)
+**The Arena.** Each pinned model wears a competitive **rank crest** derived from its DesignArena ELO — Bronze through Champion — showing its best category and the global rank Pulse computes across the field. Click a crest for the **Fighter Card**: Artificial Analysis intelligence / coding / agentic indices, a lifetime tournament medal haul, and the full category ladder with ELO bars.
 
-![dashboard in context](docs/desktop.jpg)
+![OpenRouter panel](docs/dashboard.png)
+![The Arena — rank crests on pinned models](docs/arena.png)
+![Fighter Card](docs/fightcard.png)
 
-## What it does
+### Claude
+5-hour, 7-day, and Sonnet usage limits with reset countdowns, plus 7-day local token accounting (total tokens, cache efficiency, message count, per-model split) parsed from Claude Code's session logs. Read-only — Pulse never refreshes or rotates the Claude token.
 
-- Live balance shown as a circular gauge in the tray icon and a full panel on click.
-- Auto top-up aware forecast: tells you when your next top-up will trigger based on your actual burn rate.
-- 24 hour balance timeline with top-up jumps marked.
-- Today's spend and a 30 day projection.
-- Hourly and daily burn rate computed from your own history, persisted across restarts.
-- Toast notifications when balance crosses your warning or critical threshold.
-- **Pinned models with per-provider health.** Pick the models you actually use, see live p50 latency, 30-min uptime, and price for every provider serving each one. Best provider per model is highlighted. Refreshes every 5 minutes.
-- **Dynamic model picker.** Click the search bar in the Pinned Models section to browse every model in OpenRouter's catalog. Click a star to pin or unpin. Changes save immediately. Type to filter.
-- **Click-to-toggle info popup.** Each pinned model has an (i) icon that opens a detailed table of every provider (latency, uptime, throughput, context length). Anchored to the side of the dashboard so it doesn't cover the cards.
-- **Collapsible sections.** Click the chevron in the Pinned Models header to fold the whole section away for a compact view.
-- Right-click menu for quick links to OpenRouter's dashboard, credits page, and models page.
-- Single instance lock so double-launching is a no-op.
+![Claude panel](docs/claude.png)
+
+### GPU & System
+NVIDIA utilization, VRAM, temperature, and power via NVML; CPU, RAM, and network throughput via `psutil`. Both auto-detect and hide gracefully when unavailable.
+
+![GPU panel](docs/gpu.png)
+![System panel](docs/system.png)
+
+## Highlights
+
+- **Nav-rail command center** — switch sources with one click; each panel carries its own accent identity and live status dots.
+- **Global hotkey** — `Win+Shift+O` (configurable) summons the panel from anywhere.
+- **Settings tab** — toggle sources, pick the default panel, set behavior; power users can still edit the JSON directly.
+- **Structured logging** — JSON-lines to `%APPDATA%\Pulse\logs\` for easy debugging.
+- **Stays out of the way** — frameless, never steals focus, no taskbar entry, single-instance, dismiss-on-click-away.
+
+![Settings](docs/settings.png)
 
 ## Install
 
-### Option A: pre-built .exe (no Python needed)
+### Pre-built `.exe` (no Python required)
 
-Grab `Pulse.exe` from the [latest release](https://github.com/k4rg1l/pulse/releases/latest), double-click. That's it. First launch puts the tray icon in the hidden-icons area; drag it to the visible tray so it's always there.
+Download `Pulse.exe` from the [latest release](https://github.com/k4rg1l/pulse/releases/latest) and run it. The first launch places the tray icon in the hidden-icons overflow — drag it to the visible tray.
 
-Configure your API key once: right-click the tray icon → **Open Settings File...** Add your key in the `api_key` field. Restart Pulse.
+Set your API key once: right-click the tray icon → **Open Settings File…**, fill in `api_key`, and restart.
 
-The .exe is a self-contained PyInstaller bundle (~50 MB). Some antivirus flags PyInstaller binaries as suspicious on first run. That's a known false positive, you can verify the build is from this repo via the release page.
+The binary is a self-contained PyInstaller bundle (~50 MB). Some antivirus engines flag unsigned PyInstaller builds as a false positive on first run; you can verify the build against this repository via the release page.
 
-### Option B: from source (Python 3.10+)
+### From source (Python 3.10+)
 
 ```powershell
 git clone https://github.com/k4rg1l/pulse.git
@@ -49,63 +58,56 @@ $env:OPENROUTER_API_KEY = "sk-or-v1-..."
 python main.py
 ```
 
-Tray icon appears in the bottom right. Left click opens the dashboard, right click opens the menu.
+Left-click the tray icon to open the panel; right-click for the menu. To run on login, right-click the tray icon and enable **Start with Windows**.
 
-If you'd rather not use the env var, run the app once to generate `%APPDATA%\Pulse\settings.json`, then put your key in the `api_key` field there. The tray menu has an "Open Settings File..." entry that opens it in your default editor.
-
-### Option C: build your own .exe
+### Build your own `.exe`
 
 ```powershell
 pip install pyinstaller
-python -m PyInstaller pulse.spec --clean --noconfirm
-# Output: dist\Pulse.exe
+python -m PyInstaller pulse.spec --clean --noconfirm   # -> dist\Pulse.exe
 ```
-
-## Run on startup
-
-Right-click the tray icon and tick "Start with Windows". This adds a registry entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` that points at your current Python and main.py.
 
 ## Configure
 
-All settings live in `%APPDATA%\Pulse\settings.json`:
+Settings live in `%APPDATA%\Pulse\settings.json` (created on first run; also editable via the Settings tab):
 
 ```json
 {
   "api_key": "sk-or-v1-...",
   "management_api_key": "",
+  "tracked_models": ["anthropic/claude-opus-4.8", "z-ai/glm-5.2"],
   "auto_topup_threshold": 2,
   "auto_topup_amount": 25,
   "balance_warning": 5,
   "balance_critical": 1,
   "key_refresh_seconds": 60,
-  "dismiss_on_focus_loss": true,
-  "tracked_models": [
-    "anthropic/claude-sonnet-4.5",
-    "openai/gpt-5",
-    "deepseek/deepseek-chat-v3.1",
-    "google/gemini-2.5-flash"
-  ]
+  "hotkey": "win+shift+o",
+  "default_source": "openrouter",
+  "show_claude": true,
+  "show_gpu": true,
+  "show_system": true,
+  "show_arena": true
 }
 ```
 
-`tracked_models` is the list of OpenRouter model IDs shown in the Pinned Models section. You can also pin or unpin from the search bar inside the section, which updates this file automatically.
-
-Set `auto_topup_threshold` and `auto_topup_amount` to whatever you've configured on openrouter.ai. With them set, the forecast switches from "depletes in N days" to "next top-up in N hours" and the gauge shows an indicator.
-
-`management_api_key` is reserved for a planned per-model spend feature (needs an OpenRouter management key). Leave it empty for now.
+- `tracked_models` — OpenRouter model IDs shown in the pinned health board. Pin and unpin live from the search bar; the file updates automatically.
+- `auto_topup_threshold` / `auto_topup_amount` — match what you've configured on OpenRouter; the forecast then reads "next top-up in N hours" and the gauge shows an indicator.
+- `management_api_key` — an org-scoped OpenRouter management key, reserved for per-model spend analytics. Optional.
 
 ## Tech
 
-PySide6, Python 3.10+, requests. About 2k lines across 8 files. Pure Qt, no web view, no Electron.
+Pure PySide6 (Qt) — no web view, no Electron. `requests` for HTTP, `nvidia-ml-py` and `psutil` for vitals (both optional). Python 3.10+.
+
+## Documentation
+
+- **[ROADMAP.md](ROADMAP.md)** — shipped features and what's next.
+- **[AGENTS.md](AGENTS.md)** — contributor guide: architecture, the Qt/Win32 invariants, the source contract, and the validation checklist. Read it before touching tray, focus, window, or popup code.
+- **[docs/TESTING.md](docs/TESTING.md)** — how to validate: `pytest` for pure logic, UI recipes for the live app.
 
 ## Contributing
 
-Issues and PRs welcome. If you want to take a roadmap item, open an issue first so we don't duplicate work.
-
-**Agents/contributors: start at [HANDOFF.md](HANDOFF.md)** (current state + next steps), then **[AGENTS.md](AGENTS.md) before touching tray, focus, window, or popup code.** It lists the invariants, the validation checklist, and the API gotchas. Several of those entries exist because they bit us during development; honoring them saves you from re-discovering the same bugs.
-
-**Testing:** [docs/TESTING.md](docs/TESTING.md) is the full guide — `pytest` for pure logic (`pip install -r requirements-dev.txt && python -m pytest -q`) and Windows-MCP recipes for validating the live UI. Read it before validating, and add to it when you ship a feature.
+Issues and pull requests are welcome. If you'd like to take a roadmap item, open an issue first so work isn't duplicated.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
