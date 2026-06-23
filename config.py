@@ -11,6 +11,7 @@ once to generate the settings file, then edit it via the tray menu
 (Open Settings File...).
 """
 import os
+import sys
 import json
 from pathlib import Path
 
@@ -63,7 +64,13 @@ DASHBOARD_MAX_HEIGHT = 920
 NAV_RAIL_WIDTH = 64
 
 # -- Bundled assets (logos, etc.) --
-ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+# In a PyInstaller onefile build, bundled data is extracted to sys._MEIPASS.
+if getattr(sys, "frozen", False):
+    ASSETS_DIR = os.path.join(
+        getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets"
+    )
+else:
+    ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 
 def logo_path(source_id: str) -> str:
