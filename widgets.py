@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 )
 
 from theme import Colors, Fonts
+import theme_controller
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,15 @@ class ArcGauge(QWidget):
         self._anim = QPropertyAnimation(self, b"display_percent")
         self._anim.setDuration(800)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # "credit" = severity color (balance danger stays visible);
+        # "accent" = the active source accent (for usage/util rings).
+        self._ring_mode = "credit"
+        theme_controller.changed.connect(self.update)
+
+    def set_ring_mode(self, mode):
+        self._ring_mode = mode
+        self.update()
 
     def get_display_percent(self):
         return self._display_percent
@@ -88,8 +98,12 @@ class ArcGauge(QWidget):
         painter.setPen(bg_pen)
         painter.drawArc(rect, start_angle, span_angle)
 
-        # Foreground arc (value)
-        color = Colors.credit_color(self._display_percent)
+        # Foreground arc (value): severity color for credit balance (danger
+        # stays visible), or the active source accent for usage/util rings.
+        if self._ring_mode == "accent":
+            color = theme_controller.accent()
+        else:
+            color = Colors.credit_color(self._display_percent)
         value_span = int(-270 * 16 * self._display_percent)
 
         # Glow effect
@@ -451,6 +465,7 @@ class BurnRateBar(QWidget):
         self._rate_text = ""
         self.setFixedHeight(50)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        theme_controller.changed.connect(self.update)
 
     def set_data(self, percent_used, days_text, rate_text):
         self._percent_used = max(0.0, min(1.0, percent_used))
@@ -497,7 +512,7 @@ class BurnRateBar(QWidget):
 
         color = Colors.credit_color(1.0 - self._percent_used)
         grad = QLinearGradient(pad, 0, pad + fill_w, 0)
-        grad.setColorAt(0, Colors.CYAN)
+        grad.setColorAt(0, theme_controller.accent())
         grad.setColorAt(1, color)
         painter.fillPath(fill_path, QBrush(grad))
 
@@ -520,16 +535,17 @@ class GradientStrip(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(3)
+        self.setFixedHeight(4)
         self._offset = 0.0
-        self._status_color = Colors.CYAN
+        self._ok = True
+        theme_controller.changed.connect(self.update)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(100)
 
     def set_status(self, ok=True):
-        self._status_color = Colors.CYAN if ok else Colors.RED
+        self._ok = ok
 
     def _tick(self):
         if not self.isVisible():
@@ -556,12 +572,14 @@ class GradientStrip(QWidget):
         painter.setClipPath(clip)
 
         grad = QLinearGradient(0, 0, w, 0)
-        c1 = Colors.CYAN
-        c2 = Colors.MAGENTA
+        base = Colors.RED if not self._ok else theme_controller.accent()
+        bright = base.lighter(160)
         o = self._offset
-        grad.setColorAt(0, c1 if o < 0.5 else c2)
-        grad.setColorAt(o, c2 if o < 0.5 else c1)
-        grad.setColorAt(1.0, c1 if o < 0.5 else c2)
+        # Solid accent across the whole top with a bright sheen sweeping over
+        # it — fully covered (no dim gaps), just a moving highlight.
+        grad.setColorAt(0.0, base)
+        grad.setColorAt(o, bright)
+        grad.setColorAt(1.0, base)
 
         painter.fillRect(0, 0, w, h, QBrush(grad))
         painter.end()
@@ -1693,6 +1711,7 @@ class TimelineChart(QWidget):
         self.setMinimumHeight(110)
         self.setMaximumHeight(110)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        theme_controller.changed.connect(self.update)
 
     def set_data(self, series, topups, topup_threshold=0.0, window_label=""):
         self._series = list(series)
@@ -1792,17 +1811,18 @@ class TimelineChart(QWidget):
         fill.lineTo(points[-1].x(), pad_top + chart_h)
         fill.lineTo(points[0].x(), pad_top + chart_h)
         fill.closeSubpath()
+        accent = theme_controller.accent()
         grad = QLinearGradient(0, pad_top, 0, pad_top + chart_h)
-        c_top = QColor(Colors.CYAN)
+        c_top = QColor(accent)
         c_top.setAlpha(80)
-        c_bot = QColor(Colors.CYAN)
+        c_bot = QColor(accent)
         c_bot.setAlpha(4)
         grad.setColorAt(0, c_top)
         grad.setColorAt(1, c_bot)
         painter.fillPath(fill, QBrush(grad))
 
         # Line on top
-        painter.setPen(QPen(Colors.CYAN, 1.8, Qt.PenStyle.SolidLine,
+        painter.setPen(QPen(accent, 1.8, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPath(line_path)
 
@@ -1822,7 +1842,7 @@ class TimelineChart(QWidget):
 
         # Current value bubble at the right
         last_p = points[-1]
-        painter.setBrush(QBrush(Colors.CYAN))
+        painter.setBrush(QBrush(theme_controller.accent()))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(last_p, 3.5, 3.5)
 

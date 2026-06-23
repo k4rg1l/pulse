@@ -57,9 +57,19 @@ CREDIT_DANGER_PERCENT = 0.20
 CREDIT_CRITICAL_PERCENT = 0.05
 
 # -- Window Settings --
-DASHBOARD_WIDTH = 420
-DASHBOARD_MIN_HEIGHT = 680
-DASHBOARD_MAX_HEIGHT = 900
+DASHBOARD_WIDTH = 560
+DASHBOARD_MIN_HEIGHT = 760
+DASHBOARD_MAX_HEIGHT = 920
+NAV_RAIL_WIDTH = 64
+
+# -- Bundled assets (logos, etc.) --
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+def logo_path(source_id: str) -> str:
+    """Path to a source's bundled SVG logo. May not exist yet; callers fall
+    back to a painted monogram when the file is missing."""
+    return os.path.join(ASSETS_DIR, "logos", f"{source_id}.svg")
 
 # -- App Info --
 APP_NAME = "Pulse"

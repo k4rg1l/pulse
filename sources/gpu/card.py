@@ -11,6 +11,7 @@ from PySide6.QtGui import QBrush, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from theme import Colors, Fonts
+import theme_controller
 
 
 def _temp_color(t: int):
@@ -35,6 +36,7 @@ class GpuCard(QWidget):
         self._stats = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(96)
+        theme_controller.changed.connect(self.update)
 
     def render(self, stats):
         self._stats = stats
@@ -92,11 +94,11 @@ class GpuCard(QWidget):
                            "No NVIDIA GPU detected")
             elif kind == "util":
                 self._bar_row(p, x, y, w, "Utilization", f"{s.util}%",
-                              s.util / 100.0, Colors.CYAN)
+                              s.util / 100.0, theme_controller.accent())
             elif kind == "vram":
                 self._bar_row(p, x, y, w, "VRAM",
                               f"{s.mem_used_gb:.1f} / {s.mem_total_gb:.1f} GB",
-                              s.mem_percent / 100.0, Colors.PURPLE)
+                              s.mem_percent / 100.0, theme_controller.accent())
             elif kind == "foot":
                 p.setFont(Fonts.body())
                 p.setPen(_temp_color(s.temp))

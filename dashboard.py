@@ -10,21 +10,23 @@ import time
 from datetime import datetime, timedelta
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
-    QFrame, QPushButton, QGraphicsDropShadowEffect,
-    QSizePolicy, QApplication, QGridLayout,
+    QFrame, QPushButton, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+    QSizePolicy, QApplication, QGridLayout, QStackedWidget,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QEasingCurve, QPoint, QSize, Signal, QRectF, QEvent,
+    QPropertyAnimation,
 )
 from PySide6.QtGui import (
     QPainter, QColor, QBrush, QPen, QPainterPath, QCursor,
     QLinearGradient, QIcon, QPixmap, QImage,
 )
 
-from theme import Colors, Fonts, STYLESHEET
+import theme_controller
+from theme import Colors, Fonts, STYLESHEET, accent_for
 from config import (
     DASHBOARD_WIDTH, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT,
-    APP_NAME, APP_VERSION,
+    APP_NAME, APP_VERSION, NAV_RAIL_WIDTH, logo_path,
     OPENROUTER_DASHBOARD_URL, OPENROUTER_CREDITS_URL, OPENROUTER_MODELS_URL,
 )
 from widgets import (
@@ -32,6 +34,8 @@ from widgets import (
     ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
     ModelPicker, ProviderPopup,
 )
+from nav_rail import NavRail
+from source_panel import SourcePanel
 
 
 def _fmt_duration(days):
@@ -190,86 +194,159 @@ class Dashboard(QWidget):
         self._container.setGraphicsEffect(shadow)
 
         inner = QVBoxLayout(self._container)
-        inner.setContentsMargins(0, 0, 0, 12)
+        inner.setContentsMargins(0, 0, 0, 0)
         inner.setSpacing(0)
 
         self.gradient_strip = GradientStrip(self._container)
         inner.addWidget(self.gradient_strip)
 
-        scroll = QScrollArea(self._container)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        # Stash so _on_dashboard_scrolled can be wired after sections are built
-        self._scroll_area = scroll
+        # Command center: left nav-rail + switchable panel stack. Each source
+        # is an equal peer on the rail with its own full panel in the stack.
+        self._active_id = None
+        self._panels = {}        # source_id -> SourcePanel
+        self._source_cards = {}  # source_id -> card with render() (for update_source)
+        self._tab_specs = []     # registration order: {id, name, accent, logo}
 
-        content_widget = QWidget()
-        content_widget.setStyleSheet("background: transparent;")
-        self._content = QVBoxLayout(content_widget)
-        self._content.setContentsMargins(16, 8, 16, 8)
-        self._content.setSpacing(10)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
 
-        self._build_header()
-        self._build_error_banner()
+        self.nav_rail = NavRail(self._container)
+        self.nav_rail.source_selected.connect(self.set_active_source)
+        self.nav_rail.refresh_clicked.connect(self._on_refresh)
+        body.addWidget(self.nav_rail)
 
-        # Neutral source host: each source mounts a section group here, ordered
-        # by settings.source_order. OpenRouter is a source like any other — no
-        # provider is privileged ("Pulse", not "OpenRouter").
-        self._source_host = QVBoxLayout()
-        self._source_host.setContentsMargins(0, 0, 0, 0)
-        self._source_host.setSpacing(16)
-        self._content.addLayout(self._source_host)
-        self._source_widgets = {}   # source_id -> group container widget
-        self._source_cards = {}     # source_id -> card with render() (for update_source)
-
-        # OpenRouter's own sections live in a group, mounted like any source.
-        self.mount_source("openrouter", "OpenRouter", self._build_openrouter_group())
-
-        self._build_quick_links()
-        self._content.addStretch()
-
-        scroll.setWidget(content_widget)
-        inner.addWidget(scroll)
+        self._stack = QStackedWidget(self._container)
+        body.addWidget(self._stack, 1)
+        inner.addLayout(body, 1)
 
         root.addWidget(self._container)
 
-        # Any vertical scroll while the picker dropdown or info popup is
-        # open should dismiss them — otherwise they float untethered as
-        # the search bar / card slides out from under them.
-        scroll.verticalScrollBar().valueChanged.connect(
-            self._on_dashboard_scrolled
-        )
+        # OpenRouter is registered like any source (no privilege).
+        self._register_openrouter()
 
-    def _build_header(self):
-        row = QHBoxLayout()
-        row.setSpacing(8)
+    # ------------------------------------------------------------------
+    #  Tab registration + switching
+    # ------------------------------------------------------------------
 
-        title = QLabel(APP_NAME)
-        title.setFont(Fonts.heading())
-        title.setStyleSheet("color: #f0f0ff;")
-        row.addWidget(title)
+    def _register_openrouter(self):
+        body = self._build_openrouter_group()
+        accent = accent_for("openrouter")
+        panel = SourcePanel("openrouter", "OpenRouter", accent,
+                            logo_path("openrouter"), body, scrollable=True, parent=self)
+        panel.refresh_clicked.connect(self._on_refresh)
+        panel.close_clicked.connect(self.hide)
+        panel.scrolled.connect(self._on_dashboard_scrolled)
+        self._panels["openrouter"] = panel
+        self._stack.addWidget(panel)
+        self._tab_specs.append({"id": "openrouter", "name": "OpenRouter",
+                                "accent": accent, "logo": logo_path("openrouter")})
+        self._sync_rail()
 
-        ver = QLabel(f"v{APP_VERSION}")
-        ver.setFont(Fonts.tiny())
-        ver.setStyleSheet("color: #64648c;")
-        row.addWidget(ver)
+    def register_source_tab(self, source_id, display_name, accent, card):
+        """Add a peer source (Claude/GPU/System) as a tab. Main thread only."""
+        panel = SourcePanel(source_id, display_name, accent,
+                            logo_path(source_id), card, scrollable=False, parent=self)
+        panel.refresh_clicked.connect(self._on_refresh)
+        panel.close_clicked.connect(self.hide)
+        self._panels[source_id] = panel
+        self._source_cards[source_id] = card
+        self._stack.addWidget(panel)
+        self._tab_specs.append({"id": source_id, "name": display_name,
+                                "accent": accent, "logo": logo_path(source_id)})
+        self._sync_rail()
 
-        row.addStretch()
+    def register_settings_tab(self):
+        """Register Pulse's own Settings tab (the rail's bottom gear). Call
+        after all source tabs exist so the default-tab picker is complete."""
+        if "settings" in self._panels:
+            return
+        from settings_panel import SettingsPanel
+        tab_options = [(s["id"], s["name"]) for s in self._tab_specs]
+        handlers = {
+            "animations": self._on_set_animations,
+            "dismiss": self._on_set_dismiss,
+            "default_source": lambda v: None,  # persisted; applies on next open
+            "open_json": self._open_settings_file,
+        }
+        body = SettingsPanel(self._settings, tab_options, handlers, self)
+        accent = accent_for("settings")
+        panel = SourcePanel("settings", "Settings", accent,
+                            logo_path("settings"), body, scrollable=True, parent=self)
+        panel.refresh_clicked.connect(self._on_refresh)
+        panel.close_clicked.connect(self.hide)
+        self._panels["settings"] = panel
+        self._stack.addWidget(panel)
+        self.nav_rail._settings_accent = accent
 
-        self._refresh_btn = IconButton("↻", "Refresh now", self)
-        self._refresh_btn.clicked.connect(self._on_refresh)
-        row.addWidget(self._refresh_btn)
+    def _on_set_animations(self, value):
+        import anim
+        anim.set_enabled(bool(value))
 
-        self._close_btn = IconButton("✕", "Close", self)
-        self._close_btn.clicked.connect(self.hide)
-        row.addWidget(self._close_btn)
+    def _on_set_dismiss(self, value):
+        self._dismiss_enabled = bool(value)
 
-        self._content.addLayout(row)
+    def _sync_rail(self):
+        order = self._source_order()
+        by_id = {s["id"]: s for s in self._tab_specs}
+        ordered = [by_id[i] for i in order if i in by_id]
+        ordered += [s for s in self._tab_specs if s["id"] not in order]
+        self.nav_rail.set_sources(ordered)
+        if self._active_id is None and ordered:
+            self.set_active_source(ordered[0]["id"], animate=False)
 
-    def _build_error_banner(self):
-        self.error_banner = ErrorBanner(self)
-        self._content.addWidget(self.error_banner)
+    def set_active_source(self, source_id, animate=True):
+        panel = self._panels.get(source_id)
+        if panel is None:
+            return
+        changed = (self._active_id != source_id)
+        self._active_id = source_id
+        self._stack.setCurrentWidget(panel)
+        self.nav_rail.set_active(source_id, animate=animate)
+        theme_controller.set_accent(accent_for(source_id), animate=animate)
+        # leaving a panel: dismiss any OpenRouter overlays
+        self._hide_provider_popup()
+        try:
+            if self.model_picker.is_open():
+                self.model_picker._close()
+        except Exception:
+            pass
+        if source_id == "openrouter":
+            panel.reset_scroll()
+        if animate and changed:
+            self._animate_panel_in(panel)
+
+    def _animate_panel_in(self, panel):
+        from anim import ANIMATIONS_ON
+        if not ANIMATIONS_ON:
+            return
+        try:
+            eff = QGraphicsOpacityEffect(panel)
+            panel.setGraphicsEffect(eff)
+            a = QPropertyAnimation(eff, b"opacity", self)
+            a.setDuration(190)
+            a.setStartValue(0.0)
+            a.setEndValue(1.0)
+            a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            a.finished.connect(lambda: panel.setGraphicsEffect(None))
+            a.start()
+            self._panel_anim = a  # keep a reference so it isn't GC'd mid-run
+        except Exception:
+            pass
+
+    def set_source_status(self, source_id, severity):
+        if getattr(self, "nav_rail", None) is not None:
+            self.nav_rail.set_status(source_id, severity)
+
+    def _open_settings_file(self):
+        from settings import settings_path
+        try:
+            os.startfile(str(settings_path()))
+        except Exception:
+            try:
+                webbrowser.open(str(settings_path()))
+            except Exception:
+                pass
 
     def _build_gauge_section(self):
         self._or_layout.addWidget(SectionHeader("Credit Balance"))
@@ -544,66 +621,32 @@ class Dashboard(QWidget):
         self._popup_model_id = model_id
 
     # ------------------------------------------------------------------
-    #  Pluggable source section-groups (OpenRouter, Claude, …) — peers.
-    #  Each source mounts a titled group into the neutral source host,
-    #  positioned by settings.source_order. OpenRouter mounts at build time;
-    #  the controller mounts the rest (Claude, …). No provider is privileged.
+    #  Source TABS (OpenRouter, Claude, …) — equal peers on the nav-rail;
+    #  each gets a full SourcePanel in the stack. No provider is privileged.
     # ------------------------------------------------------------------
 
     def _build_openrouter_group(self):
-        """Build OpenRouter's sections (gauge, usage, burn rate, pinned
-        models) into one group widget so it can be ordered as a peer."""
+        """Build OpenRouter's content (error banner, gauge, usage, burn rate,
+        pinned models, quick links) as the OpenRouter panel body."""
         group = QWidget()
         group.setStyleSheet("background: transparent;")
         self._or_layout = QVBoxLayout(group)
         self._or_layout.setContentsMargins(0, 0, 0, 0)
-        self._or_layout.setSpacing(10)
+        self._or_layout.setSpacing(12)
+        self.error_banner = ErrorBanner(self)
+        self._or_layout.addWidget(self.error_banner)
         self._build_gauge_section()
         self._build_usage_section()
         self._build_burn_rate()
         self._build_pinned_models()
+        self._build_quick_links()
         return group
 
     def _source_order(self):
-        default = ["openrouter", "claude"]
+        default = ["openrouter", "claude", "gpu", "system"]
         if self._settings is not None:
             return list(getattr(self._settings, "source_order", None) or default)
         return default
-
-    def _make_source_header(self, title):
-        """Source-identity header — accent-coloured so it reads as a peer
-        source, distinct from the muted sub-section headers beneath it."""
-        lbl = QLabel(title.upper())
-        lbl.setFont(Fonts.subheading())
-        lbl.setStyleSheet("color: #00d2ff; padding-top: 2px;")
-        return lbl
-
-    def mount_source(self, source_id, title, content_widget):
-        """Mount a source as a titled peer section group, inserted at the
-        position dictated by settings.source_order. Main thread only."""
-        group = QWidget()
-        group.setStyleSheet("background: transparent;")
-        gl = QVBoxLayout(group)
-        gl.setContentsMargins(0, 0, 0, 0)
-        gl.setSpacing(10)
-        gl.addWidget(self._make_source_header(title))
-        gl.addWidget(content_widget)
-        self._source_widgets[source_id] = group
-        if hasattr(content_widget, "render"):   # source card (Claude/GPU/…)
-            self._source_cards[source_id] = content_widget
-
-        # Insert at the index dictated by source_order (unknown -> bottom).
-        order = self._source_order()
-        my_rank = order.index(source_id) if source_id in order else len(order)
-        insert_at = self._source_host.count()
-        for i in range(self._source_host.count()):
-            w = self._source_host.itemAt(i).widget()
-            sid = next((k for k, v in self._source_widgets.items() if v is w), None)
-            rank = order.index(sid) if (sid in order) else len(order)
-            if rank > my_rank:
-                insert_at = i
-                break
-        self._source_host.insertWidget(insert_at, group)
 
     def update_source(self, source_id, data):
         """Deliver fresh poll data to a source's card (main thread)."""
@@ -612,14 +655,14 @@ class Dashboard(QWidget):
             card.render(data)
 
     def _build_quick_links(self):
-        self._content.addWidget(SectionHeader("Quick Links"))
+        self._or_layout.addWidget(SectionHeader("Quick Links"))
 
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(LinkButton("Dashboard", OPENROUTER_DASHBOARD_URL))
         row.addWidget(LinkButton("Add Credits", OPENROUTER_CREDITS_URL))
         row.addWidget(LinkButton("Models", OPENROUTER_MODELS_URL))
-        self._content.addLayout(row)
+        self._or_layout.addLayout(row)
 
     # ------------------------------------------------------------------
     #  Data updates
@@ -646,6 +689,10 @@ class Dashboard(QWidget):
         self.gauge.set_value(percent, amount_text, total_text, forecast)
 
         self._update_autotopup_label()
+
+        orp = self._panels.get("openrouter")
+        if orp is not None:
+            orp.set_meta(forecast if (forecast and forecast != "--") else "")
 
         tip = self._build_forecast_tooltip(
             key_info, rate_hourly, rate_daily, monthly_proj, rate_source
@@ -828,12 +875,15 @@ class Dashboard(QWidget):
         self._tray_icon = tray_icon
 
     def show_near_tray(self):
-        # Always start at the top — users expect a fresh view of the
-        # gauge + balance on every open, not wherever they last left off.
-        try:
-            self._scroll_area.verticalScrollBar().setValue(0)
-        except Exception:
-            pass
+        # Open to the configured default tab, scrolled to the top — a fresh,
+        # predictable view on every open rather than wherever you last left off.
+        default = "openrouter"
+        if self._settings is not None:
+            default = getattr(self._settings, "default_source", "openrouter")
+        if default not in self._panels:
+            default = self._active_id or (
+                self._tab_specs[0]["id"] if self._tab_specs else "openrouter")
+        self.set_active_source(default, animate=False)
 
         screen = QApplication.primaryScreen()
         if not screen:

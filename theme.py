@@ -39,6 +39,16 @@ class Colors:
     OVERLAY = QColor(0, 0, 0, 120)
     SHADOW = QColor(0, 0, 0, 80)
 
+    # -- Command-center neutrals (UI overhaul) --
+    WINDOW = QColor(14, 14, 22)         # #0E0E16 base fill (under acrylic)
+    RAIL_BG = QColor(10, 10, 18)        # #0A0A12 nav-rail
+    PANEL_BG = QColor(18, 18, 30)       # #12121E panel area
+    SURFACE = QColor(22, 22, 42)        # #16162A raised card
+    ELEVATED = QColor(30, 30, 56)       # #1E1E38
+    HAIRLINE = QColor(32, 32, 58)       # #20203A
+    BORDER_SUBTLE = QColor(38, 38, 63)  # #26263F
+    TEXT_BRIGHT = QColor(236, 236, 247) # #ECECF7
+
     @staticmethod
     def credit_color(percent):
         if percent > 0.5:
@@ -58,6 +68,32 @@ class Colors:
             return Colors.YELLOW_DIM
         else:
             return Colors.RED_DIM
+
+    @staticmethod
+    def severity_color(severity: str):
+        """Map a "normal"|"warning"|"critical" severity to its dot/flag color."""
+        if severity == "critical":
+            return Colors.RED
+        if severity == "warning":
+            return Colors.YELLOW
+        return Colors.GREEN
+
+
+# Per-source accent identities (UI overhaul). base = primary stroke/text on
+# dark; bright = a more legible fill/glow variant on dark.
+SOURCE_ACCENTS = {
+    "openrouter": {"base": "#7C83FF", "bright": "#9AA0FF"},
+    "claude":     {"base": "#D97757", "bright": "#E8916F"},
+    "gpu":        {"base": "#76B900", "bright": "#9BD22B"},
+    "system":     {"base": "#2DD4BF", "bright": "#5FE6D4"},
+    # Settings is the app's own panel (not a source) — Pulse brand cyan.
+    "settings":   {"base": "#00D2FF", "bright": "#5BE3FF"},
+}
+
+
+def accent_for(source_id: str, variant: str = "base") -> str:
+    a = SOURCE_ACCENTS.get(source_id) or SOURCE_ACCENTS["openrouter"]
+    return a.get(variant, a["base"])
 
 
 class Fonts:
@@ -103,6 +139,29 @@ class Fonts:
         f.setWeight(QFont.Weight.DemiBold)
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
         return f
+
+    # -- Command-center type scale (UI overhaul) --
+    @staticmethod
+    def panel_title():
+        f = QFont("Segoe UI", 13)
+        f.setWeight(QFont.Weight.Medium)
+        return f
+
+    @staticmethod
+    def hero_number():
+        f = QFont("Cascadia Code", 22)
+        f.setWeight(QFont.Weight.DemiBold)
+        return f
+
+    @staticmethod
+    def metric():
+        f = QFont("Cascadia Code", 11)
+        f.setWeight(QFont.Weight.DemiBold)
+        return f
+
+    @staticmethod
+    def meta():
+        return QFont("Segoe UI", 10)
 
 
 STYLESHEET = """

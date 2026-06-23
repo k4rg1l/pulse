@@ -62,6 +62,10 @@ class Settings:
     show_gpu: bool = True               # show the GPU card if an NVIDIA GPU is present
     show_system: bool = True            # show the System card (CPU/RAM/network)
 
+    # -- UI overhaul (nav-rail command center) --
+    default_source: str = "openrouter"  # which tab opens when the dashboard is shown
+    enable_animations: bool = True      # tab transitions / count-ups / pulses (off = instant)
+
     @classmethod
     def load(cls) -> "Settings":
         path = settings_path()

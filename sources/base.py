@@ -52,3 +52,14 @@ class Source(ABC):
         cooldown/backoff may override this to attempt a fetch on the next
         poll() regardless of its schedule. Default: no-op."""
         return None
+
+    # -- UI metadata (the nav-rail / panel chrome read these; NOT new data) --
+
+    #: per-source accent hex for UI identity (rail, header, themed chrome).
+    accent: str = "#7C83FF"
+
+    def severity(self, data) -> str:
+        """The at-a-glance health for this source's rail status dot, derived
+        from the latest poll `data`: "normal" | "warning" | "critical".
+        Default: always normal. Overridden per source."""
+        return "normal"

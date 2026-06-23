@@ -18,6 +18,7 @@ from PySide6.QtGui import QBrush, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from theme import Colors, Fonts
+import theme_controller
 
 
 def _fmt_tokens(n) -> str:
@@ -74,12 +75,13 @@ def _fmt_age(seconds) -> str:
 
 
 def _sev_color(sev: str):
-    """Map a usage severity to its bar/text colour."""
+    """Map a usage severity to its bar/text colour. Normal reads in the active
+    source accent (identity); severity still wins for warning/critical."""
     if sev == "critical":
         return Colors.RED
     if sev == "warning":
         return Colors.YELLOW
-    return Colors.CYAN
+    return theme_controller.accent()
 
 
 class ClaudeCard(QWidget):
@@ -99,6 +101,7 @@ class ClaudeCard(QWidget):
         self._data = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(96)
+        theme_controller.changed.connect(self.update)
 
     def render(self, data):
         self._data = data

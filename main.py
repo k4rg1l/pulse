@@ -47,8 +47,11 @@ except Exception:
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread, QTimer, Qt, Slot, Signal, QObject
 
-from config import APP_NAME, APP_ORG, API_KEY, ENDPOINTS_REFRESH_INTERVAL
-from theme import STYLESHEET
+from config import (
+    APP_NAME, APP_ORG, API_KEY, ENDPOINTS_REFRESH_INTERVAL,
+    CREDIT_WARNING_THRESHOLD, CREDIT_CRITICAL_THRESHOLD,
+)
+from theme import STYLESHEET, accent_for
 from api_client import APIWorker
 from tray_icon import TrayIcon
 from dashboard import Dashboard
@@ -115,6 +118,9 @@ class OpenRouterPulse(QObject):
 
         self.history = History.load()
         self.settings = Settings.load()
+
+        import anim
+        anim.set_enabled(getattr(self.settings, "enable_animations", True))
 
         # -- API worker thread --
         self.api_thread = QThread()
@@ -233,6 +239,18 @@ class OpenRouterPulse(QObject):
         self.tray.clear_error()
         self.tray.update_credit_info(key_info, self.history)
         self.dashboard.update_key_info(key_info)
+        self.dashboard.set_source_status(
+            "openrouter", self._openrouter_severity(key_info))
+
+    def _openrouter_severity(self, key_info):
+        rem = key_info.remaining
+        if rem is None:
+            return "normal"
+        if rem <= CREDIT_CRITICAL_THRESHOLD:
+            return "critical"
+        if rem <= CREDIT_WARNING_THRESHOLD:
+            return "warning"
+        return "normal"
 
     def _save_history(self):
         try:
@@ -256,6 +274,7 @@ class OpenRouterPulse(QObject):
         a dedicated worker thread that polls them on their own intervals.
         Each step is guarded so a misbehaving source can't break startup."""
         self.sources = []
+        self._source_by_id = {}
         self._source_timers = []
         self.source_thread = None
 
@@ -268,8 +287,13 @@ class OpenRouterPulse(QObject):
             except Exception as e:
                 print(f"[sources] {cls.__name__} setup failed: {e}")
                 continue
-            self.dashboard.mount_source(src.source_id, src.display_name, card)
+            self.dashboard.register_source_tab(
+                src.source_id, src.display_name, accent_for(src.source_id), card)
             self.sources.append(src)
+            self._source_by_id[src.source_id] = src
+
+        # Pulse's own Settings tab (rail bottom gear), after all sources exist.
+        self.dashboard.register_settings_tab()
 
         if not self.sources:
             return
@@ -297,8 +321,15 @@ class OpenRouterPulse(QObject):
 
     @Slot(str, object)
     def _on_source_polled(self, source_id, data):
-        if data is not None:
-            self.dashboard.update_source(source_id, data)
+        if data is None:
+            return
+        self.dashboard.update_source(source_id, data)
+        src = self._source_by_id.get(source_id)
+        if src is not None:
+            try:
+                self.dashboard.set_source_status(source_id, src.severity(data))
+            except Exception:
+                pass
 
     @Slot()
     def _collect_garbage(self):

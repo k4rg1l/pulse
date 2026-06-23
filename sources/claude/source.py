@@ -52,6 +52,7 @@ class ClaudeCardData:
 class ClaudeSource(Source):
     source_id = "claude"
     display_name = "Claude"
+    accent = "#D97757"
     poll_interval = 60  # source wakes every 60s (cheap JSONL); usage is paced below
 
     def __init__(self, settings=None):
@@ -168,3 +169,17 @@ class ClaudeSource(Source):
         # Imported lazily so poll-side code stays Qt-free.
         from sources.claude.card import ClaudeCard
         return ClaudeCard(parent)
+
+    def severity(self, data) -> str:
+        if data is None:
+            return "normal"
+        if getattr(data, "usage_status", "") == "expired":
+            return "warning"
+        usage = getattr(data, "usage", None)
+        if usage and usage.windows:
+            sevs = [w.severity for w in usage.windows]
+            if "critical" in sevs:
+                return "critical"
+            if "warning" in sevs:
+                return "warning"
+        return "normal"

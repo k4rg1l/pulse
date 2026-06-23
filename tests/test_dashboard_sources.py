@@ -1,6 +1,6 @@
-"""Widget-logic tests for the neutral source host (the agnostic migration):
-OpenRouter and Claude mount as peer section-groups, ordered by source_order,
-and the pinned-models card list still rebuilds correctly.
+"""Widget-logic tests for the nav-rail command center (UI overhaul):
+OpenRouter and the peer sources register as tabs, the rail orders them by
+source_order, and the pinned-models card list still rebuilds correctly.
 
 Uses the offscreen `qapp` fixture (no real display). These complement the
 pure-logic tests; full UI behaviour is covered by docs/TESTING.md recipes.
@@ -12,39 +12,42 @@ from persistence import History
 from settings import Settings
 
 
-def _group_order(dash):
-    """The source_ids of the mounted group widgets, top to bottom."""
-    ids = []
-    for i in range(dash._source_host.count()):
-        w = dash._source_host.itemAt(i).widget()
-        sid = next((k for k, v in dash._source_widgets.items() if v is w), None)
-        ids.append(sid)
-    return ids
+def _rail_order(dash):
+    """The source_ids on the nav-rail, top to bottom."""
+    return [t["id"] for t in dash.nav_rail._tabs]
 
 
-def test_openrouter_is_mounted_as_a_source_group(qapp):
+def test_openrouter_is_registered_as_a_tab(qapp):
     d = Dashboard(History(), Settings())
-    assert "openrouter" in d._source_widgets
-    assert _group_order(d) == ["openrouter"]
+    assert "openrouter" in d._panels
+    assert _rail_order(d) == ["openrouter"]
 
 
 def test_default_order_places_claude_after_openrouter(qapp):
     d = Dashboard(History(), Settings())
-    d.mount_source("claude", "Claude", QLabel("claude card"))  # as the controller does
-    assert _group_order(d) == ["openrouter", "claude"]
+    d.register_source_tab("claude", "Claude", "#D97757", QLabel("claude card"))
+    assert _rail_order(d) == ["openrouter", "claude"]
 
 
 def test_source_order_setting_reorders_peers(qapp):
     d = Dashboard(History(), Settings(source_order=["claude", "openrouter"]))
-    d.mount_source("claude", "Claude", QLabel("claude card"))
-    assert _group_order(d) == ["claude", "openrouter"]  # claude now on top
+    d.register_source_tab("claude", "Claude", "#D97757", QLabel("claude card"))
+    assert _rail_order(d) == ["claude", "openrouter"]  # claude now on top
 
 
 def test_unknown_source_falls_to_the_bottom(qapp):
     d = Dashboard(History(), Settings(source_order=["openrouter", "claude"]))
-    d.mount_source("claude", "Claude", QLabel("c"))
-    d.mount_source("gpu", "GPU", QLabel("g"))  # not in source_order
-    assert _group_order(d) == ["openrouter", "claude", "gpu"]
+    d.register_source_tab("claude", "Claude", "#D97757", QLabel("c"))
+    d.register_source_tab("gpu", "GPU", "#76B900", QLabel("g"))  # not in order
+    assert _rail_order(d) == ["openrouter", "claude", "gpu"]
+
+
+def test_active_source_switches_the_stack(qapp):
+    d = Dashboard(History(), Settings())
+    d.register_source_tab("claude", "Claude", "#D97757", QLabel("claude card"))
+    d.set_active_source("claude", animate=False)
+    assert d._active_id == "claude"
+    assert d._stack.currentWidget() is d._panels["claude"]
 
 
 def test_pin_unpin_rebuilds_cards(qapp):
@@ -67,6 +70,6 @@ def test_render_card_for_a_source(qapp):
             self.rendered = data
 
     card = FakeCard()
-    d.mount_source("claude", "Claude", card)
+    d.register_source_tab("claude", "Claude", "#D97757", card)
     d.update_source("claude", {"x": 1})
     assert card.rendered == {"x": 1}

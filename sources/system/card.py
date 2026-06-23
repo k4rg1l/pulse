@@ -10,6 +10,7 @@ from PySide6.QtGui import QBrush, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from theme import Colors, Fonts
+import theme_controller
 
 
 def _fmt_rate(bps: float) -> str:
@@ -33,6 +34,7 @@ class SystemCard(QWidget):
         self._stats = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(96)
+        theme_controller.changed.connect(self.update)
 
     def render(self, stats):
         self._stats = stats
@@ -80,11 +82,12 @@ class SystemCard(QWidget):
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                            "System stats unavailable")
             elif kind == "cpu":
-                self._bar_row(p, x, y, w, "CPU", f"{s.cpu:.0f}%", s.cpu / 100.0, Colors.CYAN)
+                self._bar_row(p, x, y, w, "CPU", f"{s.cpu:.0f}%", s.cpu / 100.0,
+                              theme_controller.accent())
             elif kind == "ram":
                 self._bar_row(p, x, y, w, "RAM",
                               f"{s.ram_used_gb:.1f} / {s.ram_total_gb:.1f} GB",
-                              s.ram_percent / 100.0, Colors.TEAL)
+                              s.ram_percent / 100.0, theme_controller.accent())
             elif kind == "net":
                 p.setFont(Fonts.body())
                 p.setPen(Colors.GREEN)
