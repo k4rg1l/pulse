@@ -2,6 +2,7 @@
 OpenRouter Pulse - Custom Widgets
 Hand-drawn gauges, sparklines, stat cards, status badges.
 """
+import html
 import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
@@ -678,14 +679,8 @@ class ProviderPopup(QWidget):
 
         self._frame = QFrame(self)
         self._frame.setObjectName("ProviderPopupFrame")
-        self._frame.setStyleSheet(
-            "QFrame#ProviderPopupFrame {"
-            "  background: #1c1c32;"
-            "  border: 1px solid #00d2ff;"
-            "  border-radius: 10px;"
-            "}"
-            "QLabel { color: #f0f0ff; font-family: 'Segoe UI'; font-size: 9pt; }"
-        )
+        self._accent = "#00d2ff"
+        self._apply_frame_style()
         shadow = QGraphicsDropShadowEffect(self._frame)
         shadow.setBlurRadius(28)
         shadow.setColor(QColor(0, 0, 0, 180))
@@ -712,6 +707,22 @@ class ProviderPopup(QWidget):
         # Installed lazily on first show to avoid touching QApplication
         # during construction.
         self._filter_installed = False
+
+    def _apply_frame_style(self):
+        self._frame.setStyleSheet(
+            "QFrame#ProviderPopupFrame {"
+            "  background: #1c1c32;"
+            f"  border: 1px solid {self._accent};"
+            "  border-radius: 10px;"
+            "}"
+            "QLabel { color: #f0f0ff; font-family: 'Segoe UI'; font-size: 9pt; }"
+        )
+
+    def set_accent(self, hex_color: str):
+        """Recolor the popup border (e.g. to a model's Arena tier color)."""
+        if hex_color and hex_color != self._accent:
+            self._accent = hex_color
+            self._apply_frame_style()
 
     def show_beside(self, html: str, dashboard_rect, anchor_y: int):
         """Render `html` and position the popup OUTSIDE the dashboard
@@ -807,12 +818,14 @@ class PinnedModelCard(QWidget):
 
     ROW_H = 22
     HEADER_H = 28
+    CREST_H = 30        # the Arena rank-crest band (only when benchmark data)
     PAD_X = 14
     PAD_Y = 8
     ICON_VISIBLE = 16   # rendered glyph
     ICON_HIT = 22       # hit area (slightly bigger for usability)
 
-    info_clicked = Signal(str, QPointF)   # (model_id, global anchor pos)
+    info_clicked = Signal(str, QPointF)    # (model_id, global anchor pos)
+    arena_clicked = Signal(str, QPointF)   # crest band clicked -> Fighter Card
 
     def __init__(self, model_id, parent=None):
         super().__init__(parent)
@@ -823,14 +836,61 @@ class PinnedModelCard(QWidget):
         self._best = None
         self._icon_hit_rect = QRectF()  # set in paintEvent
         self._icon_hover = False
+        # Arena standings (BenchmarkEntry or None)
+        self._benchmark = None
+        self._crest_hit_rect = QRectF()
+        self._crest_hover = False
+        self._shimmer = 0.0
+        self._shimmer_on = False
+        self._shimmer_timer = QTimer(self)
+        self._shimmer_timer.setInterval(55)
+        self._shimmer_timer.timeout.connect(self._advance_shimmer)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
         self._update_height()
 
     def _update_height(self):
         rows = len(self._endpoints.endpoints) if self._endpoints else 1
-        h = self.HEADER_H + max(1, rows) * self.ROW_H + self.PAD_Y * 2
+        crest = self.CREST_H if self._benchmark is not None else 0
+        h = self.HEADER_H + crest + max(1, rows) * self.ROW_H + self.PAD_Y * 2
         self.setFixedHeight(h)
+
+    # ---- Arena (benchmark standings) ----
+
+    def set_benchmark(self, entry):
+        """entry: BenchmarkEntry or None. Adds/removes the crest band."""
+        had = self._benchmark is not None
+        self._benchmark = entry
+        self._shimmer_on = bool(entry is not None and entry.is_elite)
+        if self._shimmer_on and self.isVisible():
+            self._shimmer_timer.start()
+        elif not self._shimmer_on:
+            self._shimmer_timer.stop()
+        if (entry is not None) != had:
+            self._update_height()
+        self.update()
+
+    def has_benchmark(self) -> bool:
+        return self._benchmark is not None
+
+    def arena_accent(self) -> str:
+        return self._benchmark.tier[1] if self._benchmark else "#00d2ff"
+
+    def display_name(self) -> str:
+        return self._display_model_name()
+
+    def showEvent(self, event):
+        if self._shimmer_on:
+            self._shimmer_timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._shimmer_timer.stop()
+        super().hideEvent(event)
+
+    def _advance_shimmer(self):
+        self._shimmer = (self._shimmer + 0.045) % 1.0
+        self.update()
 
     def set_endpoints(self, model_endpoints):
         """ModelEndpoints or None (None means load failed)."""
@@ -886,7 +946,8 @@ class PinnedModelCard(QWidget):
             region = ""
             if ep.tag and "/" in ep.tag:
                 region = ep.tag.split("/", 1)[1]
-            name = ep.provider_name + (f" · {region}" if region else "")
+            name = html.escape(ep.provider_name) + (
+                f" · {html.escape(region)}" if region else "")
             is_best = ep is self._best
             row_color = "#00d2ff" if is_best else "#f0f0ff"
             star = "★ " if is_best else ""
@@ -909,7 +970,7 @@ class PinnedModelCard(QWidget):
                 f"</div>"
             )
 
-        model_name = self._display_model_name()
+        model_name = html.escape(self._display_model_name())
         return (
             f"<div style='font-size:10pt;font-weight:bold;'>{model_name}</div>"
             f"<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
@@ -931,26 +992,39 @@ class PinnedModelCard(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position()
-        new_hover = self._icon_hit_rect.contains(pos)
-        if new_hover != self._icon_hover:
-            self._icon_hover = new_hover
-            if new_hover:
+        icon_hover = self._icon_hit_rect.contains(pos)
+        crest_hover = self._benchmark is not None and self._crest_hit_rect.contains(pos)
+        changed = False
+        if icon_hover != self._icon_hover:
+            self._icon_hover = icon_hover
+            changed = True
+        if crest_hover != self._crest_hover:
+            self._crest_hover = crest_hover
+            changed = True
+        if changed:
+            if icon_hover or crest_hover:
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
                 self.unsetCursor()
             self.update()
 
     def leaveEvent(self, event):
-        if self._icon_hover:
+        if self._icon_hover or self._crest_hover:
             self._icon_hover = False
+            self._crest_hover = False
             self.unsetCursor()
             self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._icon_hit_rect.contains(event.position()):
-            center_local = self._icon_hit_rect.center()
-            global_pos = self.mapToGlobal(center_local.toPoint())
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.position()
+        if self._icon_hit_rect.contains(pos):
+            global_pos = self.mapToGlobal(self._icon_hit_rect.center().toPoint())
             self.info_clicked.emit(self.model_id, QPointF(global_pos))
+        elif self._benchmark is not None and self._crest_hit_rect.contains(pos):
+            global_pos = self.mapToGlobal(self._crest_hit_rect.center().toPoint())
+            self.arena_clicked.emit(self.model_id, QPointF(global_pos))
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -1040,6 +1114,13 @@ class PinnedModelCard(QWidget):
         )
 
         y = self.PAD_Y + self.HEADER_H
+
+        # Arena rank-crest band (between header and provider rows)
+        if self._benchmark is not None:
+            self._paint_crest(painter, y)
+            y += self.CREST_H
+        else:
+            self._crest_hit_rect = QRectF()
 
         if self._error:
             painter.setPen(Colors.RED)
@@ -1145,6 +1226,209 @@ class PinnedModelCard(QWidget):
             y += self.ROW_H
 
         painter.end()
+
+    # ---- Arena crest rendering ----
+
+    def _paint_crest(self, painter, y):
+        e = self._benchmark
+        tier_name, tier_hex = e.tier
+        tier = QColor(tier_hex)
+        band = QRectF(self.PAD_X - 2, y + 1,
+                      self.width() - 2 * (self.PAD_X - 2), self.CREST_H - 3)
+        self._crest_hit_rect = band
+
+        painter.save()
+        bg = QColor(tier)
+        bg.setAlpha(46 if self._crest_hover else 26)
+        bpath = QPainterPath()
+        bpath.addRoundedRect(band, 8, 8)
+        painter.fillPath(bpath, QBrush(bg))
+        bd = QColor(tier)
+        bd.setAlpha(110 if self._crest_hover else 55)
+        painter.setPen(QPen(bd, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(bpath)
+
+        EMB = 20
+        erect = QRectF(band.left() + 8, band.center().y() - EMB / 2, EMB, EMB)
+        self._paint_emblem(painter, erect, tier, e.is_elite)
+
+        # TIER  ·  #rank CATEGORY  ............  ELO  ›
+        tx = erect.right() + 9
+        tf = Fonts.tiny()
+        tf.setBold(True)
+        painter.setFont(tf)
+        painter.setPen(tier)
+        tfm = QFontMetrics(tf)
+        painter.drawText(QRectF(tx, band.top(), 160, band.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         tier_name)
+        cur = tx + tfm.horizontalAdvance(tier_name) + 9
+
+        sig = e.signature
+        if sig:
+            sf = Fonts.tiny()
+            painter.setFont(sf)
+            sfm = QFontMetrics(sf)
+            painter.setPen(QColor(96, 96, 130))
+            painter.drawText(QRectF(cur - 7, band.top(), 8, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "·")
+            rank_txt = f"#{sig.rank}"
+            painter.setPen(QColor(222, 222, 244))
+            painter.drawText(QRectF(cur, band.top(), 44, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, rank_txt)
+            cur += sfm.horizontalAdvance(rank_txt) + 5
+            painter.setPen(QColor(124, 124, 156))
+            painter.drawText(QRectF(cur, band.top(), 140, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             sig.category.upper())
+
+        # right edge: ELO + clickable chevron
+        chev_w = 12
+        chev_x = band.right() - 8 - chev_w
+        painter.setFont(Fonts.body())
+        painter.setPen(tier if self._crest_hover else QColor(120, 120, 150))
+        painter.drawText(QRectF(chev_x, band.top() - 1, chev_w, band.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter, "›")
+        if e.peak_elo:
+            ef = Fonts.mono_small()
+            painter.setFont(ef)
+            efm = QFontMetrics(ef)
+            elo_txt = str(e.peak_elo)
+            elo_w = efm.horizontalAdvance(elo_txt) + 2
+            painter.setPen(tier)
+            painter.drawText(QRectF(chev_x - 7 - elo_w, band.top(), elo_w, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, elo_txt)
+        painter.restore()
+
+    def _paint_emblem(self, painter, rect, color, elite):
+        """A small hexagonal rank crest with an inner gem, glow + shimmer for
+        elite tiers."""
+        cx, cy = rect.center().x(), rect.center().y()
+        r = rect.width() / 2.0
+
+        def hexagon(radius):
+            p = QPainterPath()
+            for i in range(6):
+                ang = math.radians(60 * i - 30)
+                px = cx + radius * math.cos(ang)
+                py = cy + radius * math.sin(ang)
+                p.moveTo(px, py) if i == 0 else p.lineTo(px, py)
+            p.closeSubpath()
+            return p
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        if elite:
+            for k, alpha in ((2.2, 46), (3.6, 22)):
+                gc = QColor(color)
+                gc.setAlpha(alpha)
+                painter.setPen(QPen(gc, 1.6))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(hexagon(r + k))
+
+        body = hexagon(r)
+        grad = QLinearGradient(cx, rect.top(), cx, rect.bottom())
+        grad.setColorAt(0.0, QColor(color).lighter(155))
+        grad.setColorAt(1.0, QColor(color).darker(135))
+        painter.setPen(QPen(QColor(color).lighter(165), 1.2))
+        painter.setBrush(QBrush(grad))
+        painter.drawPath(body)
+
+        # inner gem
+        g = r * 0.46
+        gem = QPainterPath()
+        gem.moveTo(cx, cy - g)
+        gem.lineTo(cx + g * 0.72, cy)
+        gem.lineTo(cx, cy + g)
+        gem.lineTo(cx - g * 0.72, cy)
+        gem.closeSubpath()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 165))
+        painter.drawPath(gem)
+
+        # shimmer sweep (clipped to the hexagon)
+        if elite:
+            painter.setClipPath(body)
+            reach = rect.width() + rect.height()
+            sx = rect.left() - rect.height() + self._shimmer * (reach + rect.height())
+            bw = 5.0
+            sweep = QPainterPath()
+            sweep.moveTo(sx, rect.bottom())
+            sweep.lineTo(sx + bw, rect.bottom())
+            sweep.lineTo(sx + bw + rect.height(), rect.top())
+            sweep.lineTo(sx + rect.height(), rect.top())
+            sweep.closeSubpath()
+            painter.setBrush(QColor(255, 255, 255, 95))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPath(sweep)
+        painter.restore()
+
+    def arena_html(self) -> str:
+        """Fighter Card content for the popup: base stats, lifetime medals,
+        and the full category ladder with ELO bars."""
+        e = self._benchmark
+        if e is None:
+            return ""
+        tier_name, tier_hex = e.tier
+        name = html.escape(self._display_model_name())
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+        sig = e.signature
+        if sig:
+            out.append(
+                f"<div style='color:{tier_hex};font-size:9pt;font-weight:bold;"
+                f"margin-bottom:2px;'>◆ {tier_name} &nbsp;·&nbsp; #{sig.rank} in "
+                f"{html.escape(sig.category).upper()} &nbsp;·&nbsp; {sig.elo} ELO</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:8px;'>"
+                   "DesignArena ranks · Artificial Analysis indices</div>")
+
+        stats = [(k, v) for k, v in (
+            ("Intelligence", e.intelligence), ("Coding", e.coding),
+            ("Agentic", e.agentic)) if v is not None]
+        if stats:
+            cells = "".join(
+                f"<td style='padding:2px 16px 2px 0;'>"
+                f"<span style='color:#64648c;font-size:8pt;'>{k}</span><br>"
+                f"<span style='color:#f0f0ff;font-size:11pt;font-weight:bold;'>{v:.1f}</span></td>"
+                for k, v in stats)
+            out.append(f"<table cellspacing='0' style='margin-bottom:8px;'><tr>{cells}</tr></table>")
+
+        if e.battles:
+            out.append(
+                f"<div style='font-size:9pt;margin-bottom:8px;'>"
+                f"<span style='color:#ffd23f;'>&#127942; {e.golds:,}</span> &nbsp; "
+                f"<span style='color:#c8c8e0;'>&#129352; {e.silvers:,}</span> &nbsp; "
+                f"<span style='color:#cd8d5a;'>&#129353; {e.bronzes:,}</span> &nbsp; "
+                f"<span style='color:#64648c;'>across {e.battles:,} duels</span></div>")
+
+        elos = [s.elo for s in e.standings] or [1]
+        lo, hi = min(elos), max(elos)
+        span = max(1, hi - lo)
+        rows = []
+        for s in e.standings:
+            nbars = 3 + int(15 * (s.elo - lo) / span)
+            bar = "&nbsp;" * nbars
+            medal = {1: "&#127942; ", 2: "&#129352; ", 3: "&#129353; "}.get(s.rank, "")
+            rows.append(
+                f"<tr>"
+                f"<td style='padding:2px 12px 2px 0;color:#e6e6ff;white-space:nowrap;'>{medal}{html.escape(s.category)}</td>"
+                f"<td style='padding:2px 10px;color:#a0a0c8;white-space:nowrap;' align='right'>"
+                f"#{s.rank}<span style='color:#5a5a78;'>/{s.field_size}</span></td>"
+                f"<td style='padding:2px 8px;'><span style='background-color:{tier_hex};"
+                f"color:{tier_hex};'>{bar}</span></td>"
+                f"<td style='padding:2px 0 2px 6px;color:{tier_hex};font-weight:bold;white-space:nowrap;' align='right'>{s.elo}</td>"
+                f"<td style='padding:2px 0 2px 12px;color:#64648c;white-space:nowrap;' align='right'>{s.win_rate:.0f}%</td>"
+                f"</tr>")
+        out.append(
+            f"<table cellspacing='0' style='border-spacing:0;'>"
+            f"<tr style='color:#64648c;font-size:8pt;'>"
+            f"<th align='left' style='padding:2px 12px 4px 0;'>CATEGORY</th>"
+            f"<th align='right' style='padding:2px 10px 4px;'>RANK</th><th></th>"
+            f"<th align='right' style='padding:2px 0 4px 6px;'>ELO</th>"
+            f"<th align='right' style='padding:2px 0 4px 12px;'>WIN</th></tr>"
+            f"{''.join(rows)}</table>")
+        return "".join(out)
 
     # ---- helpers ----
 

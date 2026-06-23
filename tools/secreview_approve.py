@@ -20,7 +20,10 @@ import time
 
 
 def _run_git(args):
-    return subprocess.run(["git", *args], capture_output=True, text=True)
+    # Force UTF-8: a diff with emoji/symbols would otherwise crash the default
+    # Windows cp1252 decode. Must match secreview_gate.py so the hashes agree.
+    return subprocess.run(["git", *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
 
 def main() -> int:

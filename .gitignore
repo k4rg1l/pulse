@@ -40,6 +40,9 @@ state.json
 !.claude/settings.json
 .claude/settings.local.json
 
+# Research probe output — contains real account usage/activity data, never commit
+tools/_probe_out/
+
 # Scratch / capture files used during development
 .run.err
 .run.log

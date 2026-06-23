@@ -64,6 +64,7 @@ class Settings:
     show_claude: bool = True            # show the Claude card if ~/.claude creds exist
     show_gpu: bool = True               # show the GPU card if an NVIDIA GPU is present
     show_system: bool = True            # show the System card (CPU/RAM/network)
+    show_arena: bool = True             # show the model Arena rank-crest on pinned cards
 
     # -- UI overhaul (nav-rail command center) --
     default_source: str = "openrouter"  # which tab opens when the dashboard is shown

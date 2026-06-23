@@ -167,6 +167,9 @@ class Dashboard(QWidget):
         self._popup_model_id = None
         self._popup_just_hidden_at = 0.0
 
+        # Arena (model benchmark standings), distributed to pinned cards
+        self._benchmark_board = None
+
         self._build_ui()
 
         # Click-outside-to-dismiss via foreground-window polling.  See
@@ -471,6 +474,7 @@ class Dashboard(QWidget):
             if mid not in self._pinned_cards:
                 card = PinnedModelCard(mid, self._pinned_container)
                 card.info_clicked.connect(self._on_info_clicked)
+                card.arena_clicked.connect(self._on_arena_clicked)
                 self._pinned_cards[mid] = card
                 self._pinned_layout.addWidget(card)
 
@@ -491,6 +495,22 @@ class Dashboard(QWidget):
             f"{len(wanted)} model{'' if len(wanted) == 1 else 's'}"
             if wanted else ""
         )
+        self._distribute_benchmarks()
+
+    def update_benchmarks(self, board):
+        """Worker fetched the Arena board (or None). Hand each pinned card its
+        own standings; cards keep their last-good crest if board is None."""
+        if board is not None:
+            self._benchmark_board = board
+        self._distribute_benchmarks()
+
+    def _distribute_benchmarks(self):
+        board = self._benchmark_board
+        if board is None:
+            return
+        for mid, card in self._pinned_cards.items():
+            entry = board.lookup(mid, card.display_name())
+            card.set_benchmark(entry)
 
     def update_endpoints(self, model_id, model_endpoints):
         """Worker reported new data (or None for failure) for one pinned model."""
@@ -607,21 +627,48 @@ class Dashboard(QWidget):
         if card is None:
             return
         # Anchor against the dashboard's screen rect so the popup sits
-        # entirely OUTSIDE the dashboard (left side by default). Without
-        # this it overlaps the cards.
-        dash_rect = self.frameGeometry()
-        dash_global_topleft = self.mapToGlobal(QPoint(0, 0))
-        from PySide6.QtCore import QRect
-        dash_global_rect = QRect(
-            dash_global_topleft.x(), dash_global_topleft.y(),
-            dash_rect.width(), dash_rect.height(),
-        )
+        # entirely OUTSIDE the dashboard (left side by default).
+        popup.set_accent("#00d2ff")
         popup.show_beside(
             card.provider_html(),
-            dash_global_rect,
+            self._dashboard_global_rect(),
             int(global_anchor.y()),
         )
         self._popup_model_id = model_id
+
+    def _dashboard_global_rect(self):
+        """The dashboard window's rect in global screen coords (for anchoring
+        floating popups entirely outside it)."""
+        from PySide6.QtCore import QRect
+        tl = self.mapToGlobal(QPoint(0, 0))
+        r = self.frameGeometry()
+        return QRect(tl.x(), tl.y(), r.width(), r.height())
+
+    def _on_arena_clicked(self, model_id, global_anchor):
+        """Crest band clicked -> show the model's Fighter Card (tier-accented)."""
+        card = self._pinned_cards.get(model_id)
+        if card is None or not card.has_benchmark():
+            return
+        popup = self._ensure_provider_popup()
+        key = "arena:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        popup.set_accent(card.arena_accent())
+        popup.show_beside(
+            card.arena_html(),
+            self._dashboard_global_rect(),
+            int(global_anchor.y()),
+        )
+        self._popup_model_id = key
 
     # ------------------------------------------------------------------
     #  Source TABS (OpenRouter, Claude, …) — equal peers on the nav-rail;

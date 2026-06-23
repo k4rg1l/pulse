@@ -3,8 +3,10 @@ OpenRouter Pulse - API Client
 Handles all communication with OpenRouter API endpoints.
 """
 import logging
+import re
 import requests
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 from PySide6.QtCore import QObject, Signal, Slot, QThread
@@ -19,6 +21,7 @@ log = logging.getLogger("pulse.api")
 BASE_URL = "https://openrouter.ai"
 CREDITS_ENDPOINT = f"{BASE_URL}/api/v1/credits"
 PROVIDERS_ENDPOINT = f"{BASE_URL}/api/v1/providers"
+BENCHMARKS_ENDPOINT = f"{BASE_URL}/api/v1/benchmarks"
 
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
@@ -177,6 +180,187 @@ class ModelEndpoints:
             return None
         candidates.sort(key=lambda e: (e.latency_p50, e.pricing_prompt))
         return candidates[0]
+
+
+# ---------------------------------------------------------------------------
+#  The Arena — model competitive standings from /api/v1/benchmarks
+#
+#  DesignArena rates models by ELO + head-to-head win-rate across creative-
+#  coding categories (svg, website, gamedev, asciiart, …) and tracks each
+#  model's lifetime tournament podium finishes. We turn that into a ranked-
+#  ladder "crest" per model: a global rank we compute ourselves (the API
+#  gives ELO, not rank), a tier derived from the model's best rank-percentile,
+#  and its lifetime medal haul. Artificial Analysis adds intelligence/coding/
+#  agentic indices as the model's "base stats".
+# ---------------------------------------------------------------------------
+
+# Tier ladder, best (lowest) rank-percentile first. (name, hex). CHAMPION is
+# the special case of an outright #1 finish in any category.
+ARENA_TIERS = [
+    (0.03, "GRANDMASTER", "#ff7ad9"),
+    (0.08, "MASTER",      "#b98cff"),
+    (0.15, "DIAMOND",     "#6ad0ff"),
+    (0.30, "PLATINUM",    "#39d0b4"),
+    (0.50, "GOLD",        "#e8b54a"),
+    (0.75, "SILVER",      "#b9c2d6"),
+    (2.00, "BRONZE",      "#c08552"),
+]
+ARENA_CHAMPION = ("CHAMPION", "#ffd23f")
+# Tiers that earn the animated shimmer on the crest (the "legendary" feel).
+ARENA_ELITE = {"CHAMPION", "GRANDMASTER", "MASTER", "DIAMOND"}
+
+
+def _tier_for(rank: int, field_size: int):
+    """(tier_name, hex_color) from a global rank within a field."""
+    if rank <= 1:
+        return ARENA_CHAMPION
+    pct = rank / max(1, field_size)
+    for thr, name, color in ARENA_TIERS:
+        if pct <= thr:
+            return name, color
+    return ARENA_TIERS[-1][1], ARENA_TIERS[-1][2]
+
+
+def _norm_model_name(name: str) -> str:
+    """Normalize a model name/slug to a match key: drop an 'Author: ' prefix,
+    lowercase, and reduce to space-separated alphanumerics. So 'Anthropic:
+    Claude Opus 4.8', 'Claude Opus 4.8', and the slug tail 'claude-opus-4.8'
+    all collapse to 'claude opus 4 8'."""
+    s = name.split(": ", 1)[-1].lower()
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+@dataclass
+class CategoryStanding:
+    """One model's standing in one DesignArena category."""
+    category: str
+    elo: int
+    win_rate: float          # 0..100
+    rank: int                # global rank we computed (1 = best)
+    field_size: int          # models rated in this category
+
+    @property
+    def percentile(self) -> float:
+        return self.rank / max(1, self.field_size)
+
+    @property
+    def tier(self):
+        return _tier_for(self.rank, self.field_size)
+
+
+@dataclass
+class BenchmarkEntry:
+    """A model's full Arena dossier."""
+    display_name: str
+    standings: list = field(default_factory=list)   # best-percentile first
+    intelligence: Optional[float] = None             # Artificial Analysis indices
+    coding: Optional[float] = None
+    agentic: Optional[float] = None
+    golds: int = 0                                    # lifetime tournament podiums
+    silvers: int = 0
+    bronzes: int = 0
+    battles: int = 0
+
+    @property
+    def signature(self) -> Optional[CategoryStanding]:
+        """The model's best showing — drives the crest."""
+        return self.standings[0] if self.standings else None
+
+    @property
+    def peak_elo(self) -> Optional[int]:
+        return max((s.elo for s in self.standings), default=None)
+
+    @property
+    def tier(self):
+        s = self.signature
+        return s.tier if s else ("UNRANKED", "#64648c")
+
+    @property
+    def is_elite(self) -> bool:
+        return self.tier[0] in ARENA_ELITE
+
+
+class BenchmarkBoard:
+    """Lookup of model -> BenchmarkEntry, matched by a normalized name key
+    derived from either the pinned model id or its display name."""
+
+    def __init__(self, entries: dict):
+        self._entries = entries  # norm_key -> BenchmarkEntry
+
+    def __len__(self):
+        return len(self._entries)
+
+    def lookup(self, model_id: str, display_name: Optional[str] = None) -> Optional[BenchmarkEntry]:
+        keys = []
+        if display_name:
+            keys.append(_norm_model_name(display_name))
+        keys.append(_norm_model_name(model_id.split("/")[-1]))
+        for k in keys:
+            if k in self._entries:
+                return self._entries[k]
+        return None
+
+
+def parse_benchmarks(da_rows: list, aa_rows: list) -> BenchmarkBoard:
+    """Build a BenchmarkBoard from DesignArena + Artificial Analysis rows.
+    Pure (no I/O) so it can be unit-tested against captured samples. The API
+    returns ELO but not rank, so we compute global ranks per category here."""
+    # Rank every model within each category by ELO (desc).
+    by_cat = defaultdict(list)
+    for r in da_rows:
+        by_cat[r.get("category", "")].append(r)
+    ranks = {}  # (display_name, category) -> (rank, field_size)
+    for cat, rows in by_cat.items():
+        ordered = sorted(rows, key=lambda x: -(x.get("elo") or 0))
+        n = len(ordered)
+        for i, r in enumerate(ordered, 1):
+            ranks[(r.get("display_name", ""), cat)] = (i, n)
+
+    entries = {}
+    for r in da_rows:
+        name = r.get("display_name", "")
+        if not name:
+            continue
+        key = _norm_model_name(name)
+        e = entries.get(key)
+        if e is None:
+            ts = r.get("tournament_stats") or {}
+            e = BenchmarkEntry(
+                display_name=name,
+                golds=int(ts.get("first_place") or 0),
+                silvers=int(ts.get("second_place") or 0),
+                bronzes=int(ts.get("third_place") or 0),
+                battles=int(ts.get("total") or 0),
+            )
+            entries[key] = e
+        rank, field_size = ranks.get((name, r.get("category", "")), (0, 0))
+        if rank:
+            e.standings.append(CategoryStanding(
+                category=r.get("category", ""),
+                elo=int(r.get("elo") or 0),
+                win_rate=float(r.get("win_rate") or 0.0),
+                rank=rank,
+                field_size=field_size,
+            ))
+
+    for e in entries.values():
+        e.standings.sort(key=lambda s: (s.percentile, s.rank))
+
+    # Attach Artificial Analysis base stats (its display names carry parenthetical
+    # variant suffixes — match on the part before " (").
+    aa_by = {}
+    for r in aa_rows:
+        base = (r.get("display_name", "") or "").split(" (")[0]
+        if base:
+            aa_by.setdefault(_norm_model_name(base), r)
+    for key, e in entries.items():
+        a = aa_by.get(key)
+        if a:
+            e.intelligence = a.get("intelligence_index")
+            e.coding = a.get("coding_index")
+            e.agentic = a.get("agentic_index")
+
+    return BenchmarkBoard(entries)
 
 
 class APIClient:
@@ -367,6 +551,27 @@ class APIClient:
             log.warning("status fetch failed: %s", e)
             return ServiceStatus()
 
+    def get_benchmarks(self) -> Optional[BenchmarkBoard]:
+        """Fetch DesignArena (+ Artificial Analysis) standings and build the
+        Arena board. Slow-moving data; poll infrequently."""
+        try:
+            da = self.session.get(
+                f"{BENCHMARKS_ENDPOINT}?source=design-arena", timeout=20)
+            da.raise_for_status()
+            da_rows = da.json().get("data", [])
+            aa_rows = []
+            try:
+                aa = self.session.get(
+                    f"{BENCHMARKS_ENDPOINT}?source=artificial-analysis", timeout=20)
+                if aa.status_code == 200:
+                    aa_rows = aa.json().get("data", [])
+            except Exception as e:
+                log.warning("benchmarks(AA) fetch failed: %s", e)
+            return parse_benchmarks(da_rows, aa_rows)
+        except Exception as e:
+            log.warning("benchmarks fetch failed: %s", e)
+            return None
+
 
 class APIWorker(QObject):
     """Background worker that fetches data and emits signals."""
@@ -376,6 +581,7 @@ class APIWorker(QObject):
     status_ready = Signal(object)
     providers_ready = Signal(object)
     endpoints_ready = Signal(str, object)   # (model_id, ModelEndpoints|None)
+    benchmarks_ready = Signal(object)       # BenchmarkBoard | None
     error = Signal(str)
 
     def __init__(self):
@@ -424,6 +630,17 @@ class APIWorker(QObject):
             self.providers_ready.emit(providers)
         except Exception as e:
             self.error.emit(str(e))
+
+    @Slot()
+    def fetch_benchmarks(self):
+        """Fetch the Arena board. Always emits (None on failure) so the cards
+        can clear/keep their last-good crest without blocking."""
+        try:
+            board = self.client.get_benchmarks()
+            self.benchmarks_ready.emit(board)
+        except Exception:
+            log.exception("benchmarks worker crashed")
+            self.benchmarks_ready.emit(None)
 
     @Slot(str)
     def fetch_endpoints(self, model_id: str):

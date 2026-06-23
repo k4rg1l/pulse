@@ -77,8 +77,12 @@ def _commit_segments(cmd: str):
 
 
 def _run_git(args, cwd):
+    # Force UTF-8: a diff with emoji/symbols would otherwise crash the default
+    # Windows cp1252 decode and (fail-closed) block the commit. Must match
+    # secreview_approve.py so the staged-diff hashes agree.
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True
+        ["git", *args], cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace"
     )
 
 

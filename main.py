@@ -56,6 +56,7 @@ class FetchTrigger(QObject):
     fetch_key = Signal()
     fetch_endpoints = Signal(str)   # model_id
     fetch_models = Signal()         # full catalog for the picker
+    fetch_benchmarks = Signal()     # Arena standings (slow cadence)
 
 
 class OpenRouterPulse(QObject):
@@ -103,9 +104,11 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_key.connect(self.api_worker.fetch_key_info)
         self.trigger.fetch_endpoints.connect(self.api_worker.fetch_endpoints)
         self.trigger.fetch_models.connect(self.api_worker.fetch_models)
+        self.trigger.fetch_benchmarks.connect(self.api_worker.fetch_benchmarks)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
         self.api_worker.models_ready.connect(self._on_models)
+        self.api_worker.benchmarks_ready.connect(self._on_benchmarks)
         self.api_worker.error.connect(self._on_error)
 
         self.api_thread.start()
@@ -138,6 +141,14 @@ class OpenRouterPulse(QObject):
         # Fetch the full model catalog once on startup so the picker is
         # ready as soon as the user clicks the search bar.
         QTimer.singleShot(800, lambda: self.trigger.fetch_models.emit())
+        # Arena standings: fetch once shortly after launch, then refresh on a
+        # slow cadence (benchmarks barely move day-to-day). Opt-out via setting.
+        if getattr(self.settings, "show_arena", True):
+            QTimer.singleShot(1200, lambda: self.trigger.fetch_benchmarks.emit())
+            self.benchmarks_timer = QTimer(self)
+            self.benchmarks_timer.timeout.connect(
+                lambda: self.trigger.fetch_benchmarks.emit())
+            self.benchmarks_timer.start(6 * 3600 * 1000)   # every 6 hours
 
         # -- Pluggable sources (Claude, …): peers to OpenRouter --
         self._setup_sources()
@@ -166,6 +177,8 @@ class OpenRouterPulse(QObject):
         # models since launch.  It's a slow-changing list so we don't
         # do this every minute, only on manual refresh.
         self.trigger.fetch_models.emit()
+        if getattr(self.settings, "show_arena", True):
+            self.trigger.fetch_benchmarks.emit()
         # Peer sources (Claude/GPU/System) too — a manual refresh should
         # refetch everything, not just OpenRouter. force_refresh() lets a
         # source (e.g. Claude) break its usage-endpoint backoff and retry now.
@@ -193,6 +206,10 @@ class OpenRouterPulse(QObject):
     @Slot(object)
     def _on_models(self, models):
         self.dashboard.update_model_catalog(models)
+
+    @Slot(object)
+    def _on_benchmarks(self, board):
+        self.dashboard.update_benchmarks(board)
 
     @Slot(object)
     def _on_key_info(self, key_info):
