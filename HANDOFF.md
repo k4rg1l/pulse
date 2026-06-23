@@ -4,7 +4,7 @@
 - **New agent?** Read THIS first, then [AGENTS.md](AGENTS.md), then continue. That's the whole onboarding.
 - **Outgoing agent?** Update this as your *last act*: Status, what you changed, what's next, any new decision/gotcha. Keep it short and current. When something here becomes a permanent rule, move it into AGENTS.md and delete it here.
 
-**Last updated:** 2026-06-22 · by the agent that shipped v0.6.0.
+**Last updated:** 2026-06-22 · by the agent that shipped the v0.7.0 command-center UI overhaul + Settings tab.
 
 ---
 
