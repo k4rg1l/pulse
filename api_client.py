@@ -400,14 +400,24 @@ class APIClient:
                 total_usage=total_usage,
                 raw=data,
             )
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.ConnectionError as e:
             self.last_error = "No network"
-        except requests.exceptions.Timeout:
+            log.warning("key_info: connection error: %s", e)
+        except requests.exceptions.Timeout as e:
             self.last_error = "Request timed out"
+            log.warning("key_info: timed out: %s", e)
         except requests.exceptions.HTTPError as e:
-            self.last_error = f"HTTP {e.response.status_code if e.response else '?'}"
+            resp = e.response
+            code = resp.status_code if resp is not None else None
+            self.last_error = f"HTTP {code}" if code else "HTTP error"
+            # Log the real detail so a future "HTTP ?" is debuggable from the
+            # log instead of a bare status. Body is truncated.
+            body = (resp.text[:300] if resp is not None else "")
+            log.warning("key_info: HTTP error status=%s url=%s body=%r",
+                        code, getattr(resp, "url", ""), body)
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
+            log.warning("key_info: unexpected failure", exc_info=True)
         return None
 
     def get_providers(self) -> list:

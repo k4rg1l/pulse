@@ -44,19 +44,23 @@ class ToggleSwitch(QWidget):
         self._pos = 1.0 if self._on else 0.0
         self.setFixedSize(42, 24)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._anim = QPropertyAnimation(self, b"pos")
+        # NOTE: the animated property MUST NOT be named "pos" — that collides
+        # with QWidget's built-in `pos` (geometry position) property, so the
+        # animation would drive the widget's POSITION to (0,0) instead of the
+        # knob, flinging the toggle to the row's top-left on every click.
+        self._anim = QPropertyAnimation(self, b"knob")
         self._anim.setDuration(150)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         theme_controller.changed.connect(self.update)
 
-    def get_pos(self):
+    def get_knob(self):
         return self._pos
 
-    def set_pos(self, v):
+    def set_knob(self, v):
         self._pos = v
         self.update()
 
-    pos = Property(float, get_pos, set_pos)
+    knob = Property(float, get_knob, set_knob)
 
     def isChecked(self):
         return self._on
