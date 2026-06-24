@@ -8871,6 +8871,21 @@ _METAL_SILVER = (QColor(0xC9, 0xCD, 0xD6), QColor(0x9A, 0xA0, 0xAD))  # mid
 _METAL_COPPER = (QColor(0xC0, 0x7A, 0x4E), QColor(0x9A, 0x5A, 0x36))  # low
 _GOLD_INK = QColor(0xE8, 0xC4, 0x6A)   # hallmark/× accent on dark; ink-shifted on gold
 
+# ---- #16 THE TITLE BELT — the CHAMPIONSHIP GOLD + dark LEATHER lane ---------
+# A lane no other Insights widget owns: a dark leather strap with stitching, a
+# gold escutcheon + side-plates, and ink engraving. Gold stays the belt identity;
+# the champion's spend hue appears ONLY as a thin keyline around the center plate.
+_BELT_STRAP_TOP = QColor(0x2A, 0x21, 0x18)     # leather strap gradient top
+_BELT_STRAP_BOT = QColor(0x1C, 0x16, 0x0F)     # leather strap gradient bottom
+_BELT_STITCH = QColor(0x6B, 0x55, 0x33)        # the dashed stitching thread
+_BELT_PLATE_TOP = QColor(0xF4, 0xC9, 0x5D)     # gold plate gradient top
+_BELT_PLATE_BOT = QColor(0xB8, 0x86, 0x0B)     # gold plate gradient bottom
+_BELT_PLATE_RIM = QColor(0x8A, 0x6D, 0x1F)     # the 2px plate rim
+_BELT_ENGRAVE = QColor(0x1A, 0x12, 0x05)       # engraved ink on gold (primary)
+_BELT_ENGRAVE_MUTE = QColor(0x4A, 0x3A, 0x12)  # engraved ink on gold (muted)
+_BELT_LOCKED_STRAP = QColor(0x24, 0x24, 0x2C)  # ghosted (keyless) strap
+_BELT_LOCKED_PLATE = QColor(0x3A, 0x3A, 0x46)  # ghosted (keyless) plate
+
 
 def _metal_for_rank(rank: int, n_assayable: int):
     """The two-stop sheen for a value rank: 0 -> gold; the worst -> copper; the
@@ -9533,3 +9548,743 @@ def assay_accent_hex(model) -> str:
     if model is not None:
         return spend_palette.model_color(model.model_id, model.spend_rank).name()
     return _GOLD_INK.name()
+
+
+# ===========================================================================
+#  #16 THE TITLE BELT — Model of the Week (the second Insights widget)
+# ===========================================================================
+def _fmt_tokens(n: int) -> str:
+    """Compact token magnitude for a side-plate ('6695148' -> '6.70M tok')."""
+    n = int(n or 0)
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.2f}B tok"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M tok"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K tok"
+    return f"{n} tok"
+
+
+class ModelOfWeekBelt(QWidget):
+    """#16 THE TITLE BELT — the week's CHAMPION engraved on a hand-painted
+    championship belt (the second widget in the Insights zone, under #15).
+
+    A dark leather strap (#2A2118 gradient + dashed stitching) carries a gold
+    center escutcheon — the champion's provider logo (or a monogram disc when no
+    tile is cached, decision D) + the humanized model name + the engraved share
+    ('100% OF THIS WEEK') — flanked by two gold side-plates (week spend $ + week
+    tokens). Under the escutcheon a challenger ribbon: a muted
+    'WEEK 1 · NO PRIOR ROUND' banner while only ONE week bucket exists (the honest
+    young-account state — NEVER a fabricated delta), upgrading to a green/red
+    momentum cartouche once a 2nd week's share delta is real (decision B).
+
+    set_data(ModelOfWeek) paints the belt; None keeps the last-good champion.
+    set_locked() paints a ghosted grey belt + padlock + 'Unlock to crown your
+    weekly model'. Clicking the belt emits week_clicked(anchor_y_global) -> the
+    dashboard's week-dossier popup.
+
+    Motion: ONE held QPropertyAnimation drives a distinct `glint` Property (NOT a
+    QWidget builtin — the widget never moves) sweeping a white-alpha highlight
+    across the gold plate ONCE when the champion CHANGES; a 15-min same-champion
+    re-poll repaints silently (the gate). Allocation-free paint: pens/brushes and
+    the measured geometry are built in set_data, never paintEvent."""
+
+    week_clicked = Signal(int)             # global anchor y for the dossier popup
+
+    # -- geometry constants (the measure pass derives everything from these) --
+    STRAP_RADIUS = 9
+    STITCH_INSET = 3
+    PAD = 8
+    SIDE_INSET = 14                        # side-plate x-inset from the strap ends
+    LOGO_PX = 26                           # champion logo / monogram diameter
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mow = None                   # model_of_week.ModelOfWeek | None
+        self._locked = False
+        self._glint = 1.0                  # 0..1 sheen sweep position (animated once)
+        self._last_champion = None         # champion-CHANGED gate (None == fresh)
+        self._logo_store = None            # shared LogoStore (decision D)
+        self._logo_pixmap_cache = None     # cached champion QPixmap (or None)
+        self._logo_slug_cached = None      # slug the cache was built for
+
+        # Cached from the measure pass (rebuilt in set_data/resize) — paint reads
+        # only these, never recomputes geometry:
+        self._strap_h = 0
+        self._strap_rect = None            # QRectF | None
+        self._plate_rect = None            # center escutcheon bounding rect
+        self._plate_path = None            # the shield QPainterPath
+        self._left_plate = None            # spend side-plate rect
+        self._right_plate = None           # tokens side-plate rect
+        self._ribbon_rect = None           # the ribbon / cartouche rect
+        self._logo_rect = None             # the logo/monogram disc rect
+
+        # Pre-built strokes (allocation-free paint).
+        self._rim_pen = QPen(_BELT_PLATE_RIM, 2)
+        self._stitch_pen = QPen(_BELT_STITCH, 1, Qt.PenStyle.DashLine)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        # ONE held animation (ArcGauge/Assay idiom) — never per-frame alloc.
+        self._anim = QPropertyAnimation(self, b"glint")
+        self._anim.setDuration(700)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()
+        theme_controller.changed.connect(self._on_theme_changed)
+
+    # -- the glint Property (DISTINCT name; NOT a QWidget builtin) --
+    def get_glint(self):
+        return self._glint
+
+    def set_glint(self, v):
+        self._glint = float(v)
+        self.update()
+
+    glint = Property(float, get_glint, set_glint)
+
+    def _on_theme_changed(self):
+        # the model_color keyline rides the live accent -> rebuild + repaint.
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_logo_store(self, store):
+        """Wire the shared logo cache (the SAME store the pinned cards use). The
+        belt requests the champion's provider logo and uses the cached tile if it
+        lands; otherwise it paints a monogram disc (decision D)."""
+        self._logo_store = store
+        self._logo_pixmap_cache = None
+        self._logo_slug_cached = None
+        if store is not None and self._mow is not None and not self._mow.is_empty:
+            try:
+                store.ready.connect(self._on_logo_ready)
+            except Exception:
+                pass
+            self._request_champion_logo()
+
+    def _on_logo_ready(self, slug):
+        # a tile we were waiting on cached -> drop the cache so the next paint
+        # (or this repaint) picks up the real logo in place of the monogram.
+        if self._mow is not None and slug == self._mow.provider:
+            self._logo_pixmap_cache = None
+            self._logo_slug_cached = None
+            self.update()
+
+    def set_data(self, mow):
+        """mow: a model_of_week.ModelOfWeek (or None). None => keep last-good (the
+        belt never blanks). The glint fires ONCE when the champion CHANGES; an
+        identical re-distribution (same champion id) repaints silently."""
+        if mow is None:
+            return
+        self._locked = False
+        self._mow = mow
+        champ = None if mow.is_empty else mow.champion_id
+        changed = (champ is not None and champ != self._last_champion)
+        self._last_champion = champ
+        # a new champion -> invalidate the logo cache + (re)request its tile.
+        self._logo_pixmap_cache = None
+        self._logo_slug_cached = None
+        self._request_champion_logo()
+        self._measure()
+        self._build_geometry()
+        if changed:
+            self._start_glint()
+        else:
+            self._glint = 1.0
+        self.update()
+
+    def set_locked(self):
+        """No management key: a ghosted grey belt silhouette + padlock + the
+        canonical unlock copy. The locked height MATCHES the populated height so
+        the section never jumps when a key is added. ZERO fake champion."""
+        self._locked = True
+        self._mow = None
+        self._last_champion = None
+        self._glint = 1.0
+        self._measure()
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  State predicates (read by paint + the tests)
+    # ------------------------------------------------------------------
+    def _is_week_one(self) -> bool:
+        return self._mow is not None and self._mow.is_week_one
+
+    def _has_momentum(self) -> bool:
+        """True when a real 2nd-week delta exists -> the green/red cartouche
+        (NEVER on a 1-bucket account)."""
+        return (self._mow is not None and not self._mow.is_empty
+                and self._mow.wow_delta is not None)
+
+    # ------------------------------------------------------------------
+    #  Logo / monogram (decision D)
+    # ------------------------------------------------------------------
+    def _request_champion_logo(self):
+        """Ask the shared store for the champion provider's logo (idempotent).
+        The champion usually isn't a pinned model, so this is best-effort — the
+        monogram disc is the expected fallback."""
+        store = self._logo_store
+        mow = self._mow
+        if store is None or mow is None or mow.is_empty or not mow.provider:
+            return
+        # The provider slug == the model-id prefix ('anthropic'); the pinned-card
+        # logos are keyed by the same provider slug. We have no icon URL here
+        # (the champion isn't a card), so we can only USE a tile already cached
+        # by a card — request with an empty URL is a safe no-op in the store.
+        try:
+            store.request(mow.provider, "")
+        except Exception:
+            pass
+
+    def _champion_pixmap(self):
+        """The cached champion logo QPixmap, or None (-> monogram). Loads the
+        tile file from the shared store's cache the first time and memoizes it."""
+        mow = self._mow
+        store = self._logo_store
+        if mow is None or mow.is_empty or store is None or not mow.provider:
+            return None
+        if self._logo_pixmap_cache is not None and \
+                self._logo_slug_cached == mow.provider:
+            return self._logo_pixmap_cache
+        try:
+            path = store.tile_path(mow.provider)
+        except Exception:
+            path = None
+        self._logo_slug_cached = mow.provider
+        if not path:
+            self._logo_pixmap_cache = None
+            return None
+        px = QPixmap(path)
+        self._logo_pixmap_cache = None if px.isNull() else px
+        return self._logo_pixmap_cache
+
+    def _monogram_letter(self) -> str:
+        mow = self._mow
+        if mow is None or mow.is_empty:
+            return "?"
+        src = mow.provider or mow.champion_name or mow.champion_id
+        return (src[:1] or "?").upper()
+
+    def _champion_accent(self) -> QColor:
+        """The champion's shared Spend hue — used ONLY as the thin keyline around
+        the center plate (gold stays the belt identity)."""
+        mow = self._mow
+        if mow is None or mow.is_empty:
+            return QColor(_BELT_PLATE_RIM)
+        # rank 0 == the champion (heaviest spender this week) -> the panel accent.
+        return spend_palette.model_color(mow.champion_id, 0)
+
+    # ------------------------------------------------------------------
+    #  Glint animation (one-time, champion-CHANGED gated)
+    # ------------------------------------------------------------------
+    def _start_glint(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on or not self.isVisible():
+            self._glint = 1.0
+            return
+        self._glint = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint and setFixedHeight — no clipping)
+    # ------------------------------------------------------------------
+    def _measure(self):
+        label_h = QFontMetrics(Fonts.label()).height()
+        tiny_h = QFontMetrics(Fonts.tiny()).height()
+        ribbon_h = tiny_h + 4
+        # strap height fits: logo + name + share engraving + ribbon + paddings.
+        strap_h = max(86, self.LOGO_PX + label_h + tiny_h + ribbon_h + 6 * self.PAD)
+        self._strap_h = int(strap_h)
+        self.setFixedHeight(self._strap_h)
+
+    def sizeHint(self) -> QSize:
+        return QSize(320, self._strap_h)
+
+    # ------------------------------------------------------------------
+    #  Geometry build (cache strap/plate/side-plate/ribbon rects + the shield
+    #  path). Runs in set_data/resize — NOT the paint hot path.
+    # ------------------------------------------------------------------
+    def _build_geometry(self):
+        w = max(1, self.width())
+        h = self._strap_h
+        self._strap_rect = QRectF(0, 0, w, h)
+
+        # CENTER escutcheon: a gold shield, width clamped to name + engrave-pad.
+        name = self._mow.champion_name if (self._mow and not self._mow.is_empty) else ""
+        name_w = QFontMetrics(Fonts.label()).horizontalAdvance(name) + 2 * 16
+        plate_w = max(140.0, min(name_w, w * 0.5))
+        plate_h = h - 12.0
+        plate_x = (w - plate_w) / 2.0
+        plate_y = 6.0
+        self._plate_rect = QRectF(plate_x, plate_y, plate_w, plate_h)
+        self._plate_path = self._shield_path(self._plate_rect)
+
+        # The logo/monogram disc, top-center inside the plate.
+        lp = float(self.LOGO_PX)
+        self._logo_rect = QRectF(plate_x + (plate_w - lp) / 2.0,
+                                 plate_y + self.PAD, lp, lp)
+
+        # TWO side-plates: width = '$0.00' advance + pad; centered vertically;
+        # x-inset SIDE_INSET from the strap ends.
+        sp_w = QFontMetrics(Fonts.mono_small()).horizontalAdvance("$00.00") + 22.0
+        sp_h = max(30.0, plate_h * 0.42)
+        sp_y = (h - sp_h) / 2.0
+        self._left_plate = QRectF(self.SIDE_INSET, sp_y, sp_w, sp_h)
+        self._right_plate = QRectF(w - self.SIDE_INSET - sp_w, sp_y, sp_w, sp_h)
+
+        # RIBBON / cartouche under the escutcheon (within the plate's lower band).
+        tiny_h = QFontMetrics(Fonts.tiny()).height()
+        ribbon_h = tiny_h + 4
+        ribbon_w = plate_w + 24.0
+        self._ribbon_rect = QRectF((w - ribbon_w) / 2.0,
+                                   plate_y + plate_h - ribbon_h - 2.0,
+                                   ribbon_w, ribbon_h)
+
+    def _shield_path(self, r: QRectF) -> QPainterPath:
+        """A heraldic shield/escutcheon: rounded shoulders + a pointed chief at
+        the base (the crest drawPolygon idiom, as a smooth path)."""
+        path = QPainterPath()
+        x, y, ww, hh = r.x(), r.y(), r.width(), r.height()
+        rad = min(16.0, ww * 0.18)
+        tip_h = hh * 0.20                    # the bottom point depth
+        body_bottom = y + hh - tip_h
+        path.moveTo(x + rad, y)
+        path.lineTo(x + ww - rad, y)
+        path.quadTo(x + ww, y, x + ww, y + rad)
+        path.lineTo(x + ww, body_bottom)
+        # sweep down to the centered point.
+        path.quadTo(x + ww, y + hh - tip_h * 0.4, x + ww / 2.0, y + hh)
+        path.quadTo(x, y + hh - tip_h * 0.4, x, body_bottom)
+        path.lineTo(x, y + rad)
+        path.quadTo(x, y, x + rad, y)
+        path.closeSubpath()
+        return path
+
+    def resizeEvent(self, event):
+        self._build_geometry()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_strap(p)
+        if self._locked:
+            self._paint_locked(p)
+        elif self._mow is None or self._mow.is_empty:
+            self._paint_empty(p)
+        else:
+            self._paint_side_plate(p, self._left_plate, "WEEK SPEND",
+                                   f"${self._mow.week_spend:,.2f}")
+            self._paint_side_plate(p, self._right_plate, "TOKENS",
+                                   _fmt_tokens(self._mow.week_tokens))
+            self._paint_escutcheon(p)
+            self._paint_ribbon(p)
+        p.end()
+
+    def _paint_strap(self, p):
+        r = self._strap_rect
+        if r is None:
+            return
+        grad = QLinearGradient(0, 0, 0, r.height())
+        if self._locked:
+            grad.setColorAt(0.0, _BELT_LOCKED_STRAP)
+            grad.setColorAt(1.0, QColor(0x1A, 0x1A, 0x20))
+        else:
+            grad.setColorAt(0.0, _BELT_STRAP_TOP)
+            grad.setColorAt(1.0, _BELT_STRAP_BOT)
+        body = QPainterPath()
+        body.addRoundedRect(r, self.STRAP_RADIUS, self.STRAP_RADIUS)
+        p.fillPath(body, QBrush(grad))
+        # dashed inner stitching, inset STITCH_INSET.
+        inset = r.adjusted(self.STITCH_INSET, self.STITCH_INSET,
+                           -self.STITCH_INSET, -self.STITCH_INSET)
+        p.setPen(self._stitch_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        stitch = QPainterPath()
+        stitch.addRoundedRect(inset, self.STRAP_RADIUS - 2, self.STRAP_RADIUS - 2)
+        p.drawPath(stitch)
+
+    def _paint_gold_plate(self, p, path_or_rect, locked_ok=True):
+        """Fill a gold plate (shield path OR a rounded rect) with the two-stop
+        gold gradient + the rim. Greyed when locked."""
+        if isinstance(path_or_rect, QPainterPath):
+            bounds = path_or_rect.boundingRect()
+        else:
+            bounds = path_or_rect
+        grad = QLinearGradient(bounds.x(), bounds.y(),
+                               bounds.x(), bounds.y() + bounds.height())
+        if self._locked and locked_ok:
+            grad.setColorAt(0.0, _BELT_LOCKED_PLATE)
+            grad.setColorAt(1.0, QColor(0x2A, 0x2A, 0x34))
+            rim = QPen(QColor(0x4A, 0x4A, 0x56), 2)
+        else:
+            grad.setColorAt(0.0, _BELT_PLATE_TOP)
+            grad.setColorAt(1.0, _BELT_PLATE_BOT)
+            rim = self._rim_pen
+        p.setBrush(QBrush(grad))
+        p.setPen(rim)
+        if isinstance(path_or_rect, QPainterPath):
+            p.drawPath(path_or_rect)
+        else:
+            p.drawRoundedRect(bounds, 6, 6)
+
+    def _paint_escutcheon(self, p):
+        mow = self._mow
+        path = self._plate_path
+        if path is None:
+            return
+        self._paint_gold_plate(p, path)
+        # the champion's spend hue as a THIN keyline just inside the rim.
+        accent = self._champion_accent()
+        kp = QPen(accent, 1.4)
+        p.setPen(kp)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(self._shield_path(self._plate_rect.adjusted(3, 3, -3, -3)))
+
+        # the glint: a narrow white-alpha band swept across the plate ONCE.
+        self._paint_glint(p, path)
+
+        # logo OR monogram disc.
+        self._paint_logo(p)
+
+        # engraved name + share, below the logo.
+        pr = self._plate_rect
+        name_top = self._logo_rect.bottom() + 3
+        name_rect = QRectF(pr.x() + 6, name_top, pr.width() - 12,
+                           QFontMetrics(Fonts.label()).height())
+        name = QFontMetrics(Fonts.label()).elidedText(
+            mow.champion_name, Qt.TextElideMode.ElideRight, int(pr.width() - 12))
+        self._engrave(p, name_rect, name, Fonts.label(), _BELT_ENGRAVE)
+        share_rect = QRectF(pr.x() + 6, name_rect.bottom() + 1, pr.width() - 12,
+                            QFontMetrics(Fonts.tiny()).height())
+        share_txt = f"{mow.share_pct:.0f}% OF THIS WEEK"
+        self._engrave(p, share_rect, share_txt, Fonts.tiny(), _BELT_ENGRAVE_MUTE)
+
+    def _paint_glint(self, p, path):
+        g = self._glint
+        if g <= 0.0 or g >= 1.0:
+            return
+        bounds = path.boundingRect()
+        p.save()
+        p.setClipPath(path)
+        band_w = bounds.width() * 0.28
+        # sweep the band left->right across the plate as glint goes 0->1.
+        cx = bounds.x() - band_w + (bounds.width() + 2 * band_w) * g
+        grad = QLinearGradient(cx - band_w / 2.0, 0, cx + band_w / 2.0, 0)
+        edge = QColor(255, 255, 255, 0)
+        peak = QColor(255, 255, 255, 120)
+        grad.setColorAt(0.0, edge)
+        grad.setColorAt(0.5, peak)
+        grad.setColorAt(1.0, edge)
+        p.fillRect(bounds, QBrush(grad))
+        p.restore()
+
+    def _paint_logo(self, p):
+        lr = self._logo_rect
+        if lr is None:
+            return
+        px = self._champion_pixmap()
+        if px is not None:
+            # rounded-tile clip so the logo reads as a coin on the gold.
+            p.save()
+            clip = QPainterPath()
+            clip.addEllipse(lr)
+            p.setClipPath(clip)
+            p.drawPixmap(lr.toRect(), px)
+            p.restore()
+            p.setPen(QPen(_BELT_PLATE_RIM, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(lr)
+            return
+        # MONOGRAM disc: the first letter on the champion's accent keyline.
+        accent = self._champion_accent()
+        disc = QColor(_BELT_ENGRAVE)
+        p.setBrush(QBrush(disc))
+        p.setPen(QPen(accent, 1.6))
+        p.drawEllipse(lr)
+        f = Fonts.mono_medium()
+        p.setFont(f)
+        p.setPen(QPen(_BELT_PLATE_TOP))
+        p.drawText(lr, Qt.AlignmentFlag.AlignCenter, self._monogram_letter())
+
+    def _paint_side_plate(self, p, rect, label, value):
+        if rect is None:
+            return
+        self._paint_gold_plate(p, rect)
+        # label (muted, top) + value (ink, mono, below).
+        lab_rect = QRectF(rect.x(), rect.y() + 3, rect.width(),
+                          QFontMetrics(Fonts.tiny()).height())
+        self._engrave(p, lab_rect, label, Fonts.tiny(), _BELT_ENGRAVE_MUTE)
+        val_rect = QRectF(rect.x(), lab_rect.bottom() + 1, rect.width(),
+                          rect.bottom() - lab_rect.bottom() - 3)
+        val_font = Fonts.mono_small()
+        val = QFontMetrics(val_font).elidedText(
+            value, Qt.TextElideMode.ElideRight, int(rect.width() - 6))
+        self._engrave(p, val_rect, val, val_font, _BELT_ENGRAVE)
+
+    def _paint_ribbon(self, p):
+        rr = self._ribbon_rect
+        mow = self._mow
+        if rr is None or mow is None:
+            return
+        if self._has_momentum():
+            self._paint_momentum_cartouche(p, rr, mow)
+        else:
+            # WEEK-1: a muted banner, NO arrow, NO color claim (TEXT_MUTED).
+            self._paint_ribbon_band(p, rr, QColor(_BELT_STRAP_TOP).darker(110))
+            p.setFont(Fonts.tiny())
+            p.setPen(QPen(Colors.TEXT_MUTED))
+            p.drawText(rr, Qt.AlignmentFlag.AlignCenter, "WEEK 1 · NO PRIOR ROUND")
+
+    def _paint_ribbon_band(self, p, rr, fill):
+        band = QPainterPath()
+        band.addRoundedRect(rr, 4, 4)
+        p.fillPath(band, QBrush(fill))
+        p.setPen(QPen(QColor(0, 0, 0, 60), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(band)
+
+    def _paint_momentum_cartouche(self, p, rr, mow):
+        """The green/red WoW cartouche (echo #7 THE TAPE): a chevron + the signed
+        share delta — ONLY drawn when a real 2nd-week delta exists."""
+        delta = mow.wow_delta or 0.0
+        up = delta >= 0
+        col = Colors.GREEN if up else Colors.RED
+        band = QColor(col); band.setAlpha(36)
+        self._paint_ribbon_band(p, rr, band)
+        # the chevron at the left of the band.
+        cy = rr.center().y()
+        cxx = rr.x() + 12
+        ch = 5.0
+        tri = QPolygonF()
+        if up:
+            tri.append(QPointF(cxx, cy + ch))
+            tri.append(QPointF(cxx + 8, cy + ch))
+            tri.append(QPointF(cxx + 4, cy - ch))
+        else:
+            tri.append(QPointF(cxx, cy - ch))
+            tri.append(QPointF(cxx + 8, cy - ch))
+            tri.append(QPointF(cxx + 4, cy + ch))
+        p.setBrush(QBrush(col))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPolygon(tri)
+        # the signed share delta text.
+        sign = "+" if up else ""
+        txt = f"{sign}{delta * 100.0:.0f}% share vs last wk"
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(col))
+        p.drawText(QRectF(cxx + 14, rr.y(), rr.width() - (cxx + 14 - rr.x()) - 6,
+                          rr.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, txt)
+
+    def _engrave(self, p, rect, text, font, ink):
+        """Engraved text on gold: a 1px light highlight (down-right) under a dark
+        ink (so it reads as struck into the plate)."""
+        if not text:
+            return
+        p.setFont(font)
+        hi = QColor(255, 255, 255, 70)
+        p.setPen(QPen(hi))
+        p.drawText(rect.translated(0.6, 0.6),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, text)
+        p.setPen(QPen(ink))
+        p.drawText(rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                   text)
+
+    def _paint_empty(self, p):
+        # zero buckets -> a tidy gold-less strap message (no champion engraved).
+        r = self._strap_rect
+        p.setFont(Fonts.body())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, "No spend yet this week")
+
+    def _paint_locked(self, p):
+        """Ghosted grey belt: a greyed escutcheon silhouette + a padlock glyph +
+        the canonical unlock copy. Mirrors the _paint_locked idiom (zero fake
+        data)."""
+        path = self._plate_path
+        if path is not None:
+            self._paint_gold_plate(p, path)   # locked -> greyed by the flag
+        # padlock glyph centered in the plate.
+        pr = self._plate_rect
+        if pr is not None:
+            f = Fonts.mono_medium()
+            p.setFont(f)
+            p.setPen(QPen(QColor(0x8A, 0x8A, 0x9A)))
+            p.drawText(QRectF(pr.x(), pr.y() + self.PAD, pr.width(), self.LOGO_PX),
+                       Qt.AlignmentFlag.AlignCenter, "\U0001F512")  # 🔒
+        # the unlock copy across the strap, below the plate.
+        r = self._strap_rect
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(r.x(), r.height() - 18, r.width(), 16),
+                   Qt.AlignmentFlag.AlignCenter, "Unlock to crown your weekly model")
+
+    # ------------------------------------------------------------------
+    #  Interaction — the whole belt is the click target -> the week dossier
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        if self._locked or self._mow is None or self._mow.is_empty:
+            super().mousePressEvent(event)
+            return
+        gy = int(self.mapToGlobal(QPoint(0, int(self._strap_h / 2))).y())
+        self.week_clicked.emit(gy)
+
+
+# ---- #16 week DOSSIER (the tap-through popup) -----------------------------
+class WeekDossierStrip(QWidget):
+    """The painted week dossier body for THE TITLE BELT: the champion header +
+    the exact week spend/tokens/requests + the runner-up trace. All text is
+    QPainter-drawn (injection-safe); the HTML wrapper ALSO html.escapes names.
+    devicePixelRatio-aware. Measure-before-allocate so nothing clips."""
+
+    STRIP_W = 300
+    PAD = 12
+    ROW_H = 18
+    ROW_GAP = 4
+
+    def __init__(self, mow, parent=None):
+        super().__init__(parent)
+        self._m = mow
+        self._rows = self._build_rows()
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _build_rows(self):
+        m = self._m
+        rows = [
+            ("week", m.date_label),
+            ("spend", f"${m.week_spend:,.2f}"),
+            ("tokens", f"{m.week_tokens:,}"),
+            ("requests", f"{m.week_requests:,}"),
+            ("share", f"{m.share_pct:.1f}% of this week"),
+        ]
+        if m.runner_up_id:
+            rows.append(("runner-up",
+                         f"{m.runner_up_name} (${m.runner_up_spend:,.2f})"))
+        return rows
+
+    def _measure_height(self) -> int:
+        head_h = QFontMetrics(Fonts.mono_small()).height() + 6
+        body = len(self._rows) * (self.ROW_H + self.ROW_GAP) - self.ROW_GAP
+        return int(self.PAD * 2 + head_h + 6 + body)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        w = self.STRIP_W
+        pad = self.PAD
+        m = self._m
+        f_head = Fonts.mono_small()
+        fm_head = QFontMetrics(f_head)
+        head = _coin_short_name(m.champion_name) or m.champion_id
+        p.setFont(f_head)
+        p.setPen(QPen(_GOLD_INK))
+        p.drawText(QRectF(pad, pad, w - 2 * pad, fm_head.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"\U0001F3C6 {head}")        # 🏆
+        y = pad + fm_head.height() + 6
+        f_lab = Fonts.tiny()
+        f_val = Fonts.mono_small()
+        for label, value in self._rows:
+            p.setFont(f_lab)
+            p.setPen(QPen(Colors.TEXT_SECONDARY))
+            p.drawText(QRectF(pad, y, 78, self.ROW_H),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       label)
+            p.setFont(f_val)
+            p.setPen(QPen(Colors.TEXT_PRIMARY))
+            p.drawText(QRectF(pad + 80, y, w - pad - 80 - pad, self.ROW_H),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       value)
+            y += self.ROW_H + self.ROW_GAP
+
+
+def build_week_dossier_html(mow) -> str:
+    """The #16 week dossier for the ProviderPopup: a header + the painted detail
+    strip embedded as a data-URI <img> (single-QLabel contract) + the full model
+    id + the honest 'Week 1' grace line. Every API-sourced string (model/provider
+    names) is html.escape'd before it enters the HTML wrapper (the pixmap text is
+    QPainter-drawn so it's injection-safe by construction). Returns '' when
+    there's no champion."""
+    if mow is None or mow.is_empty:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— NO CHAMPION THIS WEEK —</div>")
+    full_id = html.escape(mow.champion_id)
+    name = html.escape(mow.champion_name or mow.champion_id)
+    out = [
+        f"<div style='font-size:11pt;font-weight:bold;color:#E8C46A;'>"
+        f"\U0001F3C6 {name} — the week's title belt</div>",
+        f"<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+        f"{full_id}</div>",
+    ]
+    try:
+        strip = WeekDossierStrip(mow)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{WeekDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("week dossier render failed", exc_info=True)
+    # The honest comparison footnote: Week-1 grace OR the real momentum line.
+    if mow.wow_delta is None:
+        out.append(
+            "<div style='margin-top:2px;color:#9AA0AD;font-size:8pt;'>"
+            "Week 1 — a runner-up belt appears once you log a second week.</div>")
+    else:
+        up = mow.wow_delta >= 0
+        col = "#2ED573" if up else "#FF4757"
+        sign = "+" if up else ""
+        out.append(
+            f"<div style='margin-top:2px;color:{col};font-size:8pt;'>"
+            f"{sign}{mow.wow_delta * 100:.0f}% share vs last week.</div>")
+    return "".join(out)

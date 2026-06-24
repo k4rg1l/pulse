@@ -2376,21 +2376,47 @@ class APIWorker(QObject):
 
     @Slot()
     def fetch_insights(self):
-        """Wave 3 INSIGHTS zone scaffold: fetch the InsightsBoard for the mgmt
-        features (#16/#17/#18). Modeled on fetch_spend — try/except, ALWAYS emit
-        (None on failure / locked) so the zone keeps last-good / shows its locked
-        state and never crashes. NOTE: #15 THE ASSAY is NOT served here (it rides
-        _distribute_value off already-fetched USER-key stores); this worker exists
-        so #16/#17/#18 can add their analytics queries into the board LATER. For
-        now it returns an all-None InsightsBoard (a no-op board). The management
-        key is used read-only by the later queries and is NEVER logged."""
+        """Wave 3 INSIGHTS zone: fetch the InsightsBoard for the mgmt features
+        (#16/#17/#18). Modeled on fetch_spend — try/except, ALWAYS emit (None on
+        failure / locked) so the zone keeps last-good / shows its locked state and
+        never crashes. NOTE: #15 THE ASSAY is NOT served here (it rides
+        _distribute_value off already-fetched USER-key stores); only the mgmt
+        slots are populated here. The management key is used read-only by the
+        queries and is NEVER logged.
+
+        #16 THE TITLE BELT populates .week now: ONE weekly dims=[model] query over
+        the last 21d (total_usage / tokens_total / request_count). This exact
+        query is CACHED by its (metrics,dims,gran,start,end) key, so #18 will
+        re-hit it for FREE later. .recorder (#17) / .court (#18) stay None until
+        those features add their own queries."""
         try:
-            # SCAFFOLD: #16/#17/#18 will populate .week/.recorder/.court here via
-            # self.analytics.query(...) / FrontendClient / classifications. Until
-            # then this is a no-op board (all slots None) — the dashboard routes
-            # it through the same locked/keep-last-good path as Spend.
-            board = InsightsBoard()
-            log.info("insights board: scaffold (no mgmt widgets yet)")
+            week = None
+            try:
+                import datetime
+                from model_of_week import build_model_of_week
+                end = datetime.datetime.now(datetime.timezone.utc)
+                start = end - datetime.timedelta(days=21)
+                # The #16 weekly query — reused by #18 from cache (decision A).
+                parsed = self.analytics.query(
+                    ["total_usage", "tokens_total", "request_count"],
+                    ["model"], "week", start.isoformat(), end.isoformat())
+                if parsed is not None:
+                    week = build_model_of_week(parsed.get("rows") or [])
+            except Exception:
+                # #16 must never sink the whole board — degrade its slot to None.
+                log.exception("title belt build failed")
+                week = None
+
+            board = InsightsBoard(week=week)
+            if week is not None and not week.is_empty:
+                # INFO line so the live boot can confirm the belt landed.
+                # Magnitudes only (a model id + share + week count) — never the key.
+                log.info("title belt: champion=%s share=%.0f%% week=%d",
+                         week.champion_id, week.share_pct, week.week_count)
+            elif week is not None:
+                log.info("title belt: no spend this week (empty)")
+            else:
+                log.info("title belt: none (locked or query failed)")
             self.insights_ready.emit(board)
         except Exception:
             log.exception("insights worker crashed")

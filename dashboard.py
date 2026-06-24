@@ -40,6 +40,7 @@ from widgets import (
     BudgetHourglass, build_budget_html, budget_accent_hex,
     build_autopsy_html, autopsy_accent_hex,
     ValueAssayWidget, build_assay_certificate_html, assay_accent_hex,
+    ModelOfWeekBelt, build_week_dossier_html,
 )
 import value_assay
 from nav_rail import NavRail
@@ -544,10 +545,21 @@ class Dashboard(QWidget):
         self._value_assay.metric_cycled.connect(self._on_assay_metric_cycled)
         insights_layout.addWidget(self._value_assay)
 
-        # NOTE (scaffold): #16 ModelOfWeekBelt / #17 TokenRecorder / #18 TaskCourt
-        # addWidget here LATER, in this locked order. Their set_locked() dispatch
-        # already lives in update_insights below (guarded by getattr) so wiring
-        # them is purely additive.
+        # #16 THE TITLE BELT — SECOND widget: the week's CHAMPION headline. Mgmt-
+        # gated (rides fetch_insights -> board.week); update_insights below already
+        # routes board.week -> set_data and the locked path -> set_locked (guarded
+        # by getattr) so this is the only mount line needed. Wire the shared logo
+        # store if it has already landed (else set_logo_store does it later).
+        self._week_belt = ModelOfWeekBelt(self)
+        self._week_belt.week_clicked.connect(self._on_week_clicked)
+        if getattr(self, "_logo_store", None) is not None:
+            self._week_belt.set_logo_store(self._logo_store)
+        insights_layout.addWidget(self._week_belt)
+
+        # NOTE (scaffold): #17 TokenRecorder / #18 TaskCourt addWidget here LATER,
+        # in this locked order (under the belt). Their set_locked()/set_data
+        # dispatch already lives in update_insights below (guarded by getattr) so
+        # wiring them is purely additive.
 
         self._or_layout.addWidget(self._insights_container)
 
@@ -791,6 +803,36 @@ class Dashboard(QWidget):
             return
         w._metric = next_metric
         self._distribute_value()
+
+    # ---- Wave 3 #16 THE TITLE BELT click-through ----
+
+    def _on_week_clicked(self, anchor_y):
+        """#16 THE TITLE BELT: the belt was tapped -> render the week dossier to a
+        pixmap and show it in the shared popup. Mirrors _on_assay_clicked (keyed
+        'insight:week', debounced via the _popup_just_hidden_at<0.15 just-closed
+        guard, toggle-hide). GOLD accent (the championship lane). No popup when
+        there's no champion this week."""
+        popup = self._ensure_provider_popup()
+        key = "insight:week"
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        w = getattr(self, "_week_belt", None)
+        mow = getattr(w, "_mow", None) if w is not None else None
+        html_str = build_week_dossier_html(mow)
+        if not html_str or (mow is not None and mow.is_empty):
+            return
+        popup.set_accent("#E8C46A")          # championship gold
+        popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
+        self._popup_model_id = key
 
     def _build_pinned_models(self):
         self._pinned_header = SectionHeader("Pinned Models")
@@ -1237,6 +1279,11 @@ class Dashboard(QWidget):
             store.ready.connect(self._on_logo_ready)
         for card in self._pinned_cards.values():
             card.set_logo_store(store)
+        # #16 THE TITLE BELT shares the SAME logo store (it looks up the champion
+        # provider's cached tile, else paints a monogram disc).
+        belt = getattr(self, "_week_belt", None)
+        if belt is not None:
+            belt.set_logo_store(store)
 
     def _prewarm_logos(self):
         """Pre-fetch logos for every provider currently on the board so a tile
