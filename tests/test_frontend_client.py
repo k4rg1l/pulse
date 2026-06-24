@@ -30,6 +30,16 @@ def _load(name):
 # ---------------------------------------------------------------------------
 #  Permaslug resolver
 # ---------------------------------------------------------------------------
+def test_frontend_client_overrides_default_user_agent():
+    """The frontend website API bot-blocks the default 'python-requests' UA
+    (connection reset). The client MUST override it, or every fetch fails — a
+    bug a fresh requests.Session's pre-set UA hides from `setdefault`."""
+    from frontend_client import FrontendClient, USER_AGENT
+    ua = FrontendClient().session.headers.get("User-Agent")
+    assert ua == USER_AGENT
+    assert "python-requests" not in ua
+
+
 def test_resolver_maps_slug_to_permaslug_and_back():
     res = parse_catalog_permaslugs(_load("fe_catalog_slice.json")["data"])
     assert res.permaslug("anthropic/claude-opus-4.8") == "anthropic/claude-4.8-opus-20260528"

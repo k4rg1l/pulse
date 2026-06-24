@@ -168,6 +168,37 @@ def test_dossier_sanitizes_a_hostile_grade(qapp):
     assert "javascript:" not in html     # color was rejected by the whitelist
 
 
+def test_dossier_embeds_real_logo_when_cached(qapp):
+    """#2b: the dossier header shows the cached logo tile; providers without a
+    cached logo fall back cleanly to the monogram chip."""
+    from logo_store import LogoStore
+    from tests.test_logo_store import _png_bytes
+    store = LogoStore()
+    store.receive("anthropic", _png_bytes(), False)   # cache only anthropic
+    card = _card(qapp)
+    card.set_logo_store(store)
+    _render(card)
+    anthropic = card.dossier_html("anthropic")
+    assert "<img" in anthropic and "file:///" in anthropic
+    deepseek = card.dossier_html("deepseek")          # not cached → monogram
+    assert "<img" not in deepseek
+
+
+def test_logos_needed_lists_providers_with_icon_urls(qapp):
+    card = _card(qapp)
+    _render(card)
+    needed = dict(card.logos_needed())
+    assert "anthropic" in needed and needed["anthropic"].startswith("http")
+    assert "deepseek" in needed
+
+
+def test_provider_slug_for_ident_round_trips(qapp):
+    card = _card(qapp)
+    _render(card)
+    assert card.provider_slug_for("deepseek") == "deepseek"
+    assert card.provider_slug_for("nonexistent") is None
+
+
 def test_no_seals_without_trust_data_keeps_classic_star(qapp):
     """When trust data is absent, the card falls back cleanly (no crash, no
     seals) — the board still works for every provider/model."""

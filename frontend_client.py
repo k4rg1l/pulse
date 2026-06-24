@@ -548,7 +548,11 @@ class FrontendClient:
 
     def __init__(self, session: Optional[requests.Session] = None):
         self.session = session or requests.Session()
-        self.session.headers.setdefault("User-Agent", USER_AGENT)
+        # Direct assignment, NOT setdefault: a fresh requests.Session already
+        # carries a 'python-requests/x' User-Agent, and the frontend website API
+        # bot-blocks that UA (the connection is reset, not 403'd). We must
+        # override it with a browser-ish UA or every frontend fetch fails.
+        self.session.headers["User-Agent"] = USER_AGENT
 
     def _get_json(self, path: str, params: Optional[dict] = None, timeout: int = 20):
         url = BASE_URL + path

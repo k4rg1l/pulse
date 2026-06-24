@@ -593,6 +593,7 @@ class APIWorker(QObject):
     endpoints_ready = Signal(str, object)   # (model_id, ModelEndpoints|None)
     benchmarks_ready = Signal(object)       # BenchmarkBoard | None
     provider_trust_ready = Signal(object)   # ProviderTrustBook | None  (no-auth)
+    logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
     error = Signal(str)
 
     def __init__(self):
@@ -667,6 +668,22 @@ class APIWorker(QObject):
         except Exception:
             log.exception("provider trust worker crashed")
             self.provider_trust_ready.emit(None)
+
+    @Slot(str, str)
+    def fetch_logo(self, slug: str, url: str):
+        """Download one provider's raw logo bytes (no Qt). Always emits so the
+        store can drop the slug from its pending set even on failure."""
+        try:
+            from logo_store import download_logo
+            res = download_logo(url, self.frontend.session)
+            if res is None:
+                self.logo_ready.emit(slug, None, False)
+            else:
+                data, is_svg = res
+                self.logo_ready.emit(slug, data, is_svg)
+        except Exception:
+            log.exception("logo worker crashed for %s", slug)
+            self.logo_ready.emit(slug, None, False)
 
     @Slot(str)
     def fetch_endpoints(self, model_id: str):

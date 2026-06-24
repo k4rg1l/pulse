@@ -858,6 +858,7 @@ class PinnedModelCard(QWidget):
         self._provider_trust = None      # ProviderTrustBook or None
         self._seal_hits = []             # [(QRectF, ident, accent_hex)] per row
         self._seal_hover_ident = None
+        self._logo_store = None          # shared LogoStore (#2b), or None
         self._shimmer = 0.0
         self._shimmer_on = False
         self._shimmer_timer = QTimer(self)
@@ -912,6 +913,42 @@ class PinnedModelCard(QWidget):
     def _ep_ident(self, ep):
         """A stable per-row identity for the trust click target."""
         return ep.tag or ep.provider_name
+
+    # ---- Provider logos (#2b) ----
+
+    def set_logo_store(self, store):
+        self._logo_store = store
+
+    def _provider_for_ident(self, ident):
+        ep = self._ep_by_ident(ident)
+        if ep is None:
+            return None
+        p, _g = self._trust_for_ep(ep)
+        return p
+
+    def provider_slug_for(self, ident):
+        p = self._provider_for_ident(ident)
+        return p.slug if p is not None else None
+
+    def request_logo(self, ident):
+        """Ask the shared cache to fetch this provider's logo (idempotent)."""
+        if self._logo_store is None:
+            return
+        p = self._provider_for_ident(ident)
+        if p is not None and p.slug and p.icon_abs_url:
+            self._logo_store.request(p.slug, p.icon_abs_url)
+
+    def logos_needed(self):
+        """(slug, url) for every provider on this card that has trust data +
+        a logo — used by the dashboard to pre-warm the cache."""
+        out = []
+        if self._provider_trust is None or not self._endpoints:
+            return out
+        for ep in self._endpoints.endpoints:
+            p, _g = self._trust_for_ep(ep)
+            if p is not None and p.slug and p.icon_abs_url:
+                out.append((p.slug, p.icon_abs_url))
+        return out
 
     def arena_accent(self) -> str:
         return self._benchmark.tier[1] if self._benchmark else "#00d2ff"
@@ -1071,12 +1108,16 @@ class PinnedModelCard(QWidget):
         gcol = _safe_color(g.color)
         grade = html.escape(g.grade)
         score = int(g.score)
-        # Header: monogram chip + name + grade + score (logo arrives in #2b).
+        # Header: real logo tile if cached, else a grade-colored monogram chip.
+        logo_html = None
+        if self._logo_store is not None and p.slug:
+            logo_html = self._logo_store.tile_html(p.slug, px=40)
+        avatar = logo_html or (
+            f"<span style='background-color:{gcol};color:#10101c;font-weight:bold;"
+            f"font-size:11pt;padding:2px 7px;border-radius:6px;'>{mono}</span>")
         head = (
             f"<table cellspacing='0'><tr>"
-            f"<td style='padding:0 8px 0 0;'>"
-            f"<span style='background-color:{gcol};color:#10101c;font-weight:bold;"
-            f"font-size:11pt;padding:2px 7px;border-radius:6px;'>{mono}</span></td>"
+            f"<td style='padding:0 8px 0 0;'>{avatar}</td>"
             f"<td style='padding:0;'>"
             f"<span style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</span><br>"
             f"<span style='font-size:8pt;color:#64648c;'>Custody dossier · openrouter.ai</span>"
@@ -1460,8 +1501,10 @@ class PinnedModelCard(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(bpath)
 
-        EMB = 20
-        erect = QRectF(band.left() + 8, band.center().y() - EMB / 2, EMB, EMB)
+        # 16 (not 20): the elite glow rings extend past the hexagon, so a 20px
+        # emblem's glow touched the band's top/bottom border. 16 + glow clears it.
+        EMB = 16
+        erect = QRectF(band.left() + 10, band.center().y() - EMB / 2, EMB, EMB)
         self._paint_emblem(painter, erect, tier, e.is_elite)
 
         # TIER  ·  #rank CATEGORY  ............  ELO  ›
@@ -1532,10 +1575,10 @@ class PinnedModelCard(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         if elite:
-            for k, alpha in ((2.2, 46), (3.6, 22)):
+            for k, alpha in ((1.8, 46), (2.8, 22)):
                 gc = QColor(color)
                 gc.setAlpha(alpha)
-                painter.setPen(QPen(gc, 1.6))
+                painter.setPen(QPen(gc, 1.4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPath(hexagon(r + k))
 
@@ -1637,17 +1680,16 @@ class PinnedModelCard(QWidget):
                 nick.closeSubpath()
                 painter.fillPath(nick, QBrush(Colors.BG_CARD))
 
-        # Grade letter, font-metric-centered.
+        # Grade letter, optically centered in the shield's BODY (above the
+        # point) via a rect + alignment — a baseline calc sat it on the point.
         lf = QFont(Fonts.tiny())
         lf.setBold(True)
         lf.setPointSize(8)
         painter.setFont(lf)
         painter.setPen(QColor(color).lighter(125))
-        fm = QFontMetrics(lf)
-        letter = grade.grade
-        lw = fm.horizontalAdvance(letter)
-        painter.drawText(QPointF(cx - lw / 2.0, top + sh * 0.56 + fm.ascent() / 2.0 - 1),
-                         letter)
+        painter.drawText(QRectF(cx - sw / 2.0, top, sw, sh - 3.0),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                         grade.grade)
         painter.restore()
 
     def arena_html(self) -> str:

@@ -58,6 +58,7 @@ class FetchTrigger(QObject):
     fetch_models = Signal()         # full catalog for the picker
     fetch_benchmarks = Signal()     # Arena standings (slow cadence)
     fetch_provider_trust = Signal() # provider privacy/trust posture (slow, no-auth)
+    fetch_logo = Signal(str, str)   # (slug, url) — one provider logo, on demand
 
 
 class OpenRouterPulse(QObject):
@@ -107,17 +108,27 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_models.connect(self.api_worker.fetch_models)
         self.trigger.fetch_benchmarks.connect(self.api_worker.fetch_benchmarks)
         self.trigger.fetch_provider_trust.connect(self.api_worker.fetch_provider_trust)
+        self.trigger.fetch_logo.connect(self.api_worker.fetch_logo)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
         self.api_worker.models_ready.connect(self._on_models)
         self.api_worker.benchmarks_ready.connect(self._on_benchmarks)
         self.api_worker.provider_trust_ready.connect(self._on_provider_trust)
+        self.api_worker.logo_ready.connect(self._on_logo_ready)
         self.api_worker.error.connect(self._on_error)
+
+        # Provider-logo cache (feature #2b). Lives on the main thread; the
+        # worker only does the network download. The store requests downloads
+        # via needs_fetch; we normalize the bytes back on the main thread.
+        from logo_store import LogoStore
+        self.logo_store = LogoStore(self)
+        self.logo_store.needs_fetch.connect(self.trigger.fetch_logo.emit)
 
         self.api_thread.start()
 
         # -- Dashboard --
         self.dashboard = Dashboard(self.history, self.settings)
+        self.dashboard.set_logo_store(self.logo_store)
         self.dashboard.refresh_requested.connect(self._refresh_all)
         self.dashboard.refresh_endpoint_requested.connect(
             self.trigger.fetch_endpoints.emit
@@ -229,6 +240,12 @@ class OpenRouterPulse(QObject):
     def _on_provider_trust(self, book):
         log.debug("provider trust: %s providers", len(book) if book else 0)
         self.dashboard.update_provider_trust(book)
+
+    @Slot(str, object, bool)
+    def _on_logo_ready(self, slug, data, is_svg):
+        # Normalize the raw bytes into a cached tile on the MAIN thread (Qt
+        # image ops stay off the worker). The store emits `ready` on success.
+        self.logo_store.receive(slug, data, is_svg)
 
     @Slot(object)
     def _on_key_info(self, key_info):

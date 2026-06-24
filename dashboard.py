@@ -171,6 +171,10 @@ class Dashboard(QWidget):
         self._benchmark_board = None
         # The Ledger (per-provider privacy/trust posture), distributed to cards
         self._provider_trust_book = None
+        # Provider logos (#2b): the shared cache + the open-dossier context so a
+        # logo that arrives after the dossier opens can refresh it in place.
+        self._logo_store = None
+        self._trust_popup_ctx = None     # (model_id, ident, anchor_y) or None
 
         self._build_ui()
 
@@ -478,6 +482,8 @@ class Dashboard(QWidget):
                 card.info_clicked.connect(self._on_info_clicked)
                 card.arena_clicked.connect(self._on_arena_clicked)
                 card.trust_clicked.connect(self._on_trust_clicked)
+                if self._logo_store is not None:
+                    card.set_logo_store(self._logo_store)
                 self._pinned_cards[mid] = card
                 self._pinned_layout.addWidget(card)
 
@@ -529,12 +535,55 @@ class Dashboard(QWidget):
             return
         for card in self._pinned_cards.values():
             card.set_provider_trust(book)
+        self._prewarm_logos()
+
+    # ---- Provider logos (#2b) ----
+
+    def set_logo_store(self, store):
+        """Wire the shared logo cache in: hand it to every card and refresh an
+        open dossier when a logo it was waiting on arrives."""
+        self._logo_store = store
+        if store is not None:
+            store.ready.connect(self._on_logo_ready)
+        for card in self._pinned_cards.values():
+            card.set_logo_store(store)
+
+    def _prewarm_logos(self):
+        """Pre-fetch logos for every provider currently on the board so a tile
+        is cached before the user opens its dossier. Idempotent + bounded."""
+        if self._logo_store is None:
+            return
+        seen = set()
+        for card in self._pinned_cards.values():
+            for slug, url in card.logos_needed():
+                if slug not in seen:
+                    seen.add(slug)
+                    self._logo_store.request(slug, url)
+
+    def _on_logo_ready(self, slug):
+        """A logo tile just cached — if the open dossier is for that provider,
+        rebuild it in place so the real logo replaces the monogram live."""
+        ctx = self._trust_popup_ctx
+        if ctx is None or self._provider_popup is None or not self._provider_popup.isVisible():
+            return
+        model_id, ident, anchor_y = ctx
+        # Only refresh if the visible popup is STILL this exact trust dossier
+        # (the user may have since opened an info/arena popup).
+        if self._popup_model_id != "trust:" + model_id + ":" + ident:
+            return
+        card = self._pinned_cards.get(model_id)
+        if card is None or card.provider_slug_for(ident) != slug:
+            return
+        self._provider_popup.set_accent(card.dossier_accent(ident))
+        self._provider_popup.show_beside(
+            card.dossier_html(ident), self._dashboard_global_rect(), anchor_y)
 
     def update_endpoints(self, model_id, model_endpoints):
         """Worker reported new data (or None for failure) for one pinned model."""
         card = self._pinned_cards.get(model_id)
         if card is not None:
             card.set_endpoints(model_endpoints)
+            self._prewarm_logos()
 
     def update_model_catalog(self, models):
         """Worker fetched the full /api/v1/models list; feed it to the picker."""
@@ -709,12 +758,13 @@ class Dashboard(QWidget):
             popup.hide()
             self._popup_model_id = None
             return
+        # Lazily fetch this provider's logo in case pre-warm missed it; the
+        # dossier will refresh in place when it lands.
+        card.request_logo(provider_ident)
+        anchor_y = int(global_anchor.y())
+        self._trust_popup_ctx = (model_id, provider_ident, anchor_y)
         popup.set_accent(card.dossier_accent(provider_ident))
-        popup.show_beside(
-            html_str,
-            self._dashboard_global_rect(),
-            int(global_anchor.y()),
-        )
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 
     # ------------------------------------------------------------------
