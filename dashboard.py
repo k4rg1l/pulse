@@ -36,6 +36,7 @@ from widgets import (
     ModelPicker, ProviderPopup, SpendSpectrum, ReceiptStubList,
     build_receipt_html, receipt_accent_hex,
     RebateStub, build_rebate_html, rebate_accent_hex,
+    GhostVeil, build_seance_html, ghost_accent_hex,
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
@@ -455,6 +456,15 @@ class Dashboard(QWidget):
         self.spend_savings.rebate_clicked.connect(self._on_savings_clicked)
         spend_layout.addWidget(self.spend_savings)
 
+        # #13 THE SÉANCE — the ghost-model veil directly below the rebate stub.
+        # Living (model,provider) pairs glow above a membrane; vanished pairs
+        # sink below; an appeared pair flares in with a materialize ring. Always
+        # alive (a living roster + a calm caption even at zero ghosts). Click a
+        # glyph -> the per-pair séance-ledger popup.
+        self.spend_ghosts = GhostVeil(self)
+        self.spend_ghosts.ghost_clicked.connect(self._on_ghost_clicked)
+        spend_layout.addWidget(self.spend_ghosts)
+
         self._or_layout.addWidget(self._spend_container)
 
         # Keep-last-good store + initial state. On a keyless machine the worker
@@ -471,6 +481,7 @@ class Dashboard(QWidget):
             self.spend_spectrum.set_locked()
             self.spend_receipts.set_locked()
             self.spend_savings.set_locked()
+            self.spend_ghosts.set_locked()
             self._spend_header.right_label.setText("locked")
 
     def _toggle_spend_collapsed(self):
@@ -543,6 +554,42 @@ class Dashboard(QWidget):
             return
         anchor_y = int(global_anchor.y())
         popup.set_accent(rebate_accent_hex(savings))
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
+        self._popup_model_id = key
+
+    def _on_ghost_clicked(self, pair_key, global_anchor):
+        """#13 THE SÉANCE: a veil glyph (a (model,provider) pair) was clicked ->
+        render its séance-ledger to a pixmap and show it in the shared popup.
+        Mirrors _on_savings_clicked (keyed, debounced, toggle-hide). The accent is
+        the model's SHARED spectrum color (decision D — never crimson)."""
+        popup = self._ensure_provider_popup()
+        key = "ghost:" + "|".join(pair_key)
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        board = getattr(self, "_spend_board", None)
+        diff = board.ghosts if board is not None else None
+        entry = None
+        if diff is not None:
+            for e in (list(diff.living) + list(diff.vanished)
+                      + list(diff.appeared)):
+                if e.pair.key == tuple(pair_key):
+                    entry = e
+                    break
+        html_str = build_seance_html(entry, diff)
+        if not html_str:
+            return
+        anchor_y = int(global_anchor.y())
+        # ghost_accent_hex(None) safely falls back to the panel accent.
+        popup.set_accent(ghost_accent_hex(entry))
         popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 
@@ -679,6 +726,8 @@ class Dashboard(QWidget):
                     self.spend_receipts.set_locked()
                 if getattr(self, "spend_savings", None) is not None:
                     self.spend_savings.set_locked()
+                if getattr(self, "spend_ghosts", None) is not None:
+                    self.spend_ghosts.set_locked()
                 self._spend_header.right_label.setText("locked")
             return
 
@@ -687,6 +736,10 @@ class Dashboard(QWidget):
             self.spend_receipts.set_data(board.receipts)
         if getattr(self, "spend_savings", None) is not None:
             self.spend_savings.set_data(board.savings)
+        if getattr(self, "spend_ghosts", None) is not None:
+            # board.ghosts may be None (a transient ghost-query failure on an
+            # unlocked key); set_data(None) keeps last-good, never blanks.
+            self.spend_ghosts.set_data(board.ghosts)
         # Headline in the (collapsible) section header's right_label.
         sp = board.spectrum
         if sp.is_empty:

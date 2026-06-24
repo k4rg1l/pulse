@@ -1162,19 +1162,253 @@ def build_savings(rows: list) -> Savings:
     )
 
 
+# --- #13 THE SÉANCE (ghost model detector) ----------------------------------
+# Pair identity is (model, provider). The week-over-week diff cross-references
+# two week-granularity dims=[model,provider] envelopes:
+#   LIVING   = A ∩ B  (still in the room)
+#   VANISHED = B − A  (departed; carries B's prior-week figures + last-seen)
+#   APPEARED = A − B  (materialized this week; carries A's figures)
+# YOUNG-HISTORY GUARD (decision A): if Window B has NO rows the prior week has
+# no/insufficient data — a naive A−B would flag EVERY pair as a false apparition.
+# So B-empty -> young_history=True, the diff is SUPPRESSED (vanished/appeared
+# empty, living = A's pairs), and the widget paints the calm "watching" state.
+
+@dataclass(frozen=True)
+class GhostPair:
+    """One (model, provider) pair's presence figures for a single window. The
+    SÉANCE ledger reads these for the two-bar mini-timeline. request_count is a
+    COUNT (_as_int over the STRING); usage is total_usage ($)."""
+    model_id: str
+    provider: str
+    short_name: str
+    request_count: int
+    usage: float
+    bucket: str = ""          # the created_at__week bucket date the API returned
+
+    @property
+    def key(self) -> tuple:
+        return (self.model_id, self.provider)
+
+
+@dataclass(frozen=True)
+class GhostEntry:
+    """A living/vanished/appeared roster entry — a pair plus the cross-window
+    context the widget + ledger need. `rank` is the model's descending-spend
+    rank across BOTH windows so the chip color == that model's #9 spectrum band
+    (the shared spend_palette.model_color contract — decision D). `reroute` flags
+    a benign 'same model, new provider' move (decision C): set on the appeared/
+    vanished entries when the model survives but only its provider half changed.
+    `this` / `prior` carry the A / B figures for the ledger (either may be None
+    for a vanished/appeared pair)."""
+    pair: GhostPair                 # the canonical pair (the surviving-window one)
+    rank: int                       # model's descending-spend rank (shared color)
+    this: Optional[GhostPair] = None    # Window A figures (None if vanished)
+    prior: Optional[GhostPair] = None   # Window B figures (None if appeared)
+    reroute: bool = False           # same model, new/old provider (benign)
+
+
+@dataclass(frozen=True)
+class GhostDiff:
+    """#13 THE SÉANCE payload — the week-over-week (model,provider) roster diff.
+
+    living/vanished/appeared are tuple[GhostEntry]. young_history=True means the
+    prior week had no data (the live state on this young account) -> the widget
+    renders the calm "watching — needs a 2nd full week" state and the diff is
+    suppressed (no phantom apparitions). ranges carries the two window labels for
+    the ledger; week_bucket_a/b are the API's returned created_at__week bucket
+    dates the windows aligned to (decision B — NOT a client-side calendar week)."""
+    living: tuple = ()
+    vanished: tuple = ()
+    appeared: tuple = ()
+    young_history: bool = False
+    range_a: str = ""               # this-week window label
+    range_b: str = ""               # prior-week window label
+    week_bucket_a: str = ""         # the API's this-week bucket date
+    week_bucket_b: str = ""         # the API's prior-week bucket date
+
+    @property
+    def is_locked_placeholder(self) -> bool:
+        return False
+
+    @property
+    def has_ghosts(self) -> bool:
+        return bool(self.vanished or self.appeared)
+
+    def living_pairs(self) -> tuple:
+        return tuple(e.pair.key for e in self.living)
+
+    def vanished_pairs(self) -> tuple:
+        return tuple(e.pair.key for e in self.vanished)
+
+    def appeared_pairs(self) -> tuple:
+        return tuple(e.pair.key for e in self.appeared)
+
+
+def _ghost_pairs(rows: list, only_bucket: Optional[str] = None) -> tuple:
+    """Roll week rows up to ({(model,provider): GhostPair}, {bucket_dates}).
+    When `only_bucket` is given, ONLY rows whose created_at__week equals it are
+    aggregated (so we can split one envelope into its distinct week buckets —
+    decision B aligns windows to the API's RETURNED bucket dates). request_count
+    is a STRING -> _as_int. Multiple rows for one pair in a bucket sum."""
+    rows = rows or []
+    agg: dict = {}
+    buckets_seen: set = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        bk = _bucket_key(row)
+        bucket = (row.get(bk) if bk else "") or ""
+        if bucket:
+            buckets_seen.add(bucket)
+        if only_bucket is not None and bucket != only_bucket:
+            continue
+        model = row.get("model") or ""
+        provider = row.get("provider") or ""
+        key = (model, provider)
+        reqs = _as_int(row.get("request_count"))   # STRING -> int
+        usage = _as_float(row.get("total_usage"))
+        prev = agg.get(key)
+        if prev is None:
+            agg[key] = GhostPair(
+                model_id=model, provider=provider,
+                short_name=_short_model(model),
+                request_count=reqs, usage=usage, bucket=bucket,
+            )
+        else:
+            agg[key] = GhostPair(
+                model_id=model, provider=provider,
+                short_name=_short_model(model),
+                request_count=prev.request_count + reqs,
+                usage=prev.usage + usage,
+                bucket=prev.bucket or bucket,
+            )
+    return agg, buckets_seen
+
+
+def parse_ghost_diff(envelope_a, envelope_b=None, range_a: str = "",
+                     range_b: str = "") -> GhostDiff:
+    """Pure week-over-week (model,provider) diff (decisions A/B/C/D). Never raises.
+
+    Takes two PARSED week envelopes ({"rows",...}) OR raw row lists. CRITICAL
+    LIVE TRUTH (re-verified 2026-06-24): the OpenRouter `week` query IGNORES the
+    date_range — every window returns the SAME set of created_at__week buckets
+    (one bucket per week that has data). So we do NOT trust the client-side
+    A/B windows; instead we POOL both envelopes' rows and key off the DISTINCT
+    created_at__week bucket DATES the API actually returned (decision B):
+
+      - latest bucket  -> Window A (this week)
+      - 2nd-latest     -> Window B (prior week)
+
+    YOUNG-HISTORY GUARD (decision A): if FEWER THAN 2 distinct week buckets exist
+    (the live state on this account, which has exactly one week of data) there is
+    no prior week to compare -> young_history=True, the diff is SUPPRESSED
+    (living = the single week's pairs, appeared/vanished empty). This is what
+    stops a naive A−B from flagging EVERY pair as a phantom apparition.
+
+    With ≥2 distinct buckets: LIVING=A∩B, VANISHED=B−A (carry B figures),
+    APPEARED=A−B (carry A). PAIR IDENTITY=(model,provider); a 'same model, new
+    provider' move sets reroute=True on the appeared+vanished entries (decision C,
+    a benign re-route). rank = the model's descending-spend rank across BOTH
+    windows so a chip's color == that model's #9 band (decision D).
+    """
+    def _rows(env):
+        if isinstance(env, dict):
+            return env.get("rows") or []
+        return env or []
+
+    # Pool every row from both envelopes; the API hands the same buckets to each
+    # window anyway, so a union is the honest source of "which weeks have data".
+    all_rows = _rows(envelope_a) + _rows(envelope_b)
+    _, all_buckets = _ghost_pairs(all_rows)
+    # Distinct week buckets, NEWEST first (ISO dates sort lexicographically).
+    distinct = sorted((b for b in all_buckets if b), reverse=True)
+
+    # Shared descending-spend RANK per model across ALL data (the color key).
+    pairs_all, _ = _ghost_pairs(all_rows)
+    model_usage: dict = defaultdict(float)
+    for p in pairs_all.values():
+        model_usage[p.model_id] += p.usage
+    ordered_models = sorted(model_usage.keys(),
+                            key=lambda m: (-model_usage[m], m))
+    rank_of = {m: i for i, m in enumerate(ordered_models)}
+
+    def _entry(pair, this=None, prior=None, reroute=False):
+        return GhostEntry(pair=pair, rank=rank_of.get(pair.model_id, 0),
+                          this=this, prior=prior, reroute=reroute)
+
+    def _sorter(keys):
+        return sorted(keys, key=lambda k: (rank_of.get(k[0], 0), k))
+
+    # ---- YOUNG-HISTORY GUARD: <2 distinct weeks -> NO diff (decision A) ------
+    if len(distinct) < 2:
+        bucket_a = distinct[0] if distinct else ""
+        # Living = the single (latest) week's pairs; appeared/vanished SUPPRESSED
+        # so we can't fabricate an apparition for every pair.
+        living_pairs, _ = _ghost_pairs(all_rows, only_bucket=bucket_a) if bucket_a \
+            else ({}, set())
+        living = tuple(
+            _entry(living_pairs[k], this=living_pairs[k])
+            for k in _sorter(living_pairs.keys())
+        )
+        return GhostDiff(living=living, vanished=(), appeared=(),
+                         young_history=True, range_a=range_a, range_b=range_b,
+                         week_bucket_a=bucket_a, week_bucket_b="")
+
+    # ---- ≥2 distinct weeks -> a real diff (latest vs 2nd-latest bucket) ------
+    bucket_a, bucket_b = distinct[0], distinct[1]
+    pairs_a, _ = _ghost_pairs(all_rows, only_bucket=bucket_a)
+    pairs_b, _ = _ghost_pairs(all_rows, only_bucket=bucket_b)
+
+    models_a = {p.model_id for p in pairs_a.values()}
+    models_b = {p.model_id for p in pairs_b.values()}
+
+    keys_a = set(pairs_a)
+    keys_b = set(pairs_b)
+    living_keys = keys_a & keys_b
+    vanished_keys = keys_b - keys_a
+    appeared_keys = keys_a - keys_b
+
+    living = tuple(
+        _entry(pairs_a[k], this=pairs_a[k], prior=pairs_b.get(k))
+        for k in _sorter(living_keys)
+    )
+    vanished = tuple(
+        _entry(pairs_b[k], prior=pairs_b[k],
+               # reroute: this model still exists in A under a DIFFERENT provider.
+               reroute=(k[0] in models_a))
+        for k in _sorter(vanished_keys)
+    )
+    appeared = tuple(
+        _entry(pairs_a[k], this=pairs_a[k],
+               # reroute: this model was already in B under a DIFFERENT provider.
+               reroute=(k[0] in models_b))
+        for k in _sorter(appeared_keys)
+    )
+    return GhostDiff(living=living, vanished=vanished, appeared=appeared,
+                     young_history=False, range_a=range_a, range_b=range_b,
+                     week_bucket_a=bucket_a, week_bucket_b=bucket_b)
+
+
+# Alias to match the F3 build_* naming the design references.
+build_ghost_diff = parse_ghost_diff
+
+
 def build_spend_board(rows: list, granularity: str = "day", start: str = "",
                       end: str = "", range_label: str = "Last 7 Days",
-                      truncated: bool = False) -> SpendBoard:
+                      truncated: bool = False, ghosts=None) -> SpendBoard:
     """Build the aggregate SpendBoard from QUERY A's rows. #9's .spectrum,
     #10's .receipts AND #12's .savings are all populated from the SAME rows (no
-    new query); later features' slots stay empty until they ride this same
-    cached envelope."""
+    new query). #13's .ghosts is passed in (it rides its OWN two week queries,
+    fired in get_spend_board) so this stays a pure function of QUERY A's rows for
+    the existing tests; later features' slots stay empty until they ride this
+    same cached envelope."""
     spectrum = build_spend_spectrum(rows, granularity=granularity,
                                     truncated=truncated)
     receipts = build_receipts(rows)
     savings = build_savings(rows)
     return SpendBoard(spectrum=spectrum, receipts=receipts, savings=savings,
-                      start=start, end=end, range_label=range_label)
+                      ghosts=ghosts, start=start, end=end,
+                      range_label=range_label)
 
 
 class AnalyticsClient:
@@ -1283,6 +1517,38 @@ class AnalyticsClient:
             if parsed is None:
                 return None
             meta = parsed.get("metadata") or {}
+
+            # #13 THE SÉANCE — ONE wide-range week-granularity dims=[model,provider]
+            # query (cached by its key; the 15-min poll re-hits free within TTL).
+            # The OpenRouter `week` query IGNORES date_range (re-verified
+            # 2026-06-24): both the old Window A and Window B POSTs returned
+            # BYTE-IDENTICAL data — 2 redundant requests against a rate-limited
+            # endpoint. A single ~21-day range ensures all returned
+            # created_at__week buckets are captured. parse_ghost_diff itself
+            # pools rows and keys off DISTINCT bucket dates (decision B), so it
+            # is handed the full envelope as env_a and None for env_b. Bucket
+            # splitting (latest vs 2nd-latest) is performed inside
+            # parse_ghost_diff — no row is double-counted.
+            ghosts = None
+            try:
+                ghost_metrics = ["request_count", "total_usage"]
+                # Wide range: ~3 weeks back so multiple week buckets are captured
+                # if/when the API ever returns them; today it returns one.
+                wide_start = (end - datetime.timedelta(days=21)).isoformat()
+                env_a = self.query(ghost_metrics, ["model", "provider"],
+                                   "week", wide_start, end_iso)
+                # query() returns None only when locked/failure; we're unlocked
+                # here, so None means a transient failure -> treat as empty rows
+                # (parse_ghost_diff is None-safe and falls into young_history,
+                # which is the calm, honest degrade — never a fake apparition).
+                ghosts = parse_ghost_diff(
+                    env_a, None,
+                    range_a="this week", range_b="prior week",
+                )
+            except Exception:
+                log.exception("ghost diff fetch crashed")
+                ghosts = None
+
             board = build_spend_board(
                 parsed.get("rows") or [],
                 granularity=granularity,
@@ -1290,6 +1556,7 @@ class AnalyticsClient:
                 end=end_iso,
                 range_label="Last 7 Days",
                 truncated=bool(meta.get("truncated")),
+                ghosts=ghosts,
             )
             # #10 receipts INFO line (no secret — counts + top $/call only).
             try:
@@ -1307,6 +1574,15 @@ class AnalyticsClient:
                     log.info("savings: rebate=$%.2f, hit=%.1f%%, rsn=%d tok",
                              sv.total_rebate, sv.hit_rate_pct,
                              sv.reasoning_total)
+            except Exception:
+                pass
+            # #13 ghosts INFO line (no secret — roster counts + young flag only).
+            try:
+                g = board.ghosts
+                if g is not None:
+                    log.info("ghosts: living=%d appeared=%d vanished=%d young=%s",
+                             len(g.living), len(g.appeared), len(g.vanished),
+                             bool(g.young_history))
             except Exception:
                 pass
             return board

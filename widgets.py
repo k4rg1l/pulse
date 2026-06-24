@@ -6964,3 +6964,762 @@ def rebate_accent_hex(savings) -> str:
     """The popup border accent for the rebate dossier — always GREEN (the
     savings role this widget owns exclusively in the zone). Returns a #rrggbb."""
     return Colors.GREEN.name()
+
+
+# ===========================================================================
+#  #13 THE SÉANCE — the ghost-model veil
+# ===========================================================================
+# A full-width "veil" strip: still-active (model,provider) pairs glow as solid
+# sigils ABOVE a membrane hairline; pairs that VANISHED week-over-week fade as
+# hollow chips sinking BELOW it; pairs that APPEARED this week flare in from the
+# right with a one-shot materialize ring + a "new" pip. ALWAYS meaningful — even
+# at zero ghosts it renders the living roster + a calm caption. Cross-references
+# the Spectrum's per-model colors (spend_palette.model_color — decision D).
+
+# A small fixed palette for the provider tick-dot (the corner pip on each chip),
+# keyed by a stable hash of the provider name (NOT the model color, so the dot
+# reads as a second channel). Never crimson/green (those are reserved roles).
+_PROVIDER_DOT_PALETTE = [
+    QColor(0, 210, 255),     # cyan
+    QColor(255, 199, 0),     # yellow
+    QColor(155, 89, 255),    # purple
+    QColor(0, 200, 160),     # teal
+    QColor(255, 145, 77),    # soft orange (NOT the alarm red)
+    QColor(120, 170, 255),   # periwinkle
+]
+
+
+def _provider_dot_color(provider: str) -> QColor:
+    if not provider:
+        return QColor(Colors.TEXT_MUTED)
+    import hashlib as _hl
+    idx = int(_hl.md5(provider.encode("utf-8")).hexdigest()[:8], 16) \
+        % len(_PROVIDER_DOT_PALETTE)
+    return QColor(_PROVIDER_DOT_PALETTE[idx])
+
+
+def ghost_accent_hex(entry) -> str:
+    """The popup border accent for a séance-ledger dossier — the chip's MODEL
+    color (the shared spectrum band, decision D), NEVER crimson. Returns #rrggbb.
+    """
+    try:
+        return spend_palette.model_color(entry.pair.model_id, entry.rank).name()
+    except Exception:
+        return theme_controller.accent().name()
+
+
+class GhostVeil(QWidget):
+    """THE SÉANCE (#13): a full-width veil strip below the rebate stub. A membrane
+    hairline runs across the vertical centre; LIVING (model,provider) pairs glow
+    as solid sigils ABOVE it in their shared #9 spectrum colors; VANISHED pairs
+    sink BELOW it as hollow desaturated chips with a fading-dot trail + a
+    'last seen Nd' caption (never crimson — a vanish is not an error); APPEARED
+    pairs flare in ABOVE with a one-shot materialize RING + a 'new' pip (a
+    runaway never-before-seen model literally FLARES in at the edge).
+
+    Always alive — at zero ghosts it renders the living roster + a calm caption,
+    and on a young account (only one week of data) the calm 'watching — needs a
+    2nd full week' caption (decision A/F). Click a glyph -> the SÉANCE LEDGER
+    popup (a two-bar last-week/this-week timeline + figures + the re-route note).
+
+    ONE measure pass (_measure) feeds BOTH paint and setFixedHeight (chip wrap is
+    measured here so chips never clip). Paint is allocation-light: glyph rects +
+    apparition rings are measured in set_data and cached; paint only strokes the
+    cached objects. The materialize flair is ONE held QPropertyAnimation on a
+    distinct `materialize` Property (NOT a QWidget builtin), started ONCE when
+    APPEARED>0 (a static ring when animations are off).
+    """
+
+    ghost_clicked = Signal(tuple, QPointF)   # ((model,provider), global_anchor)
+
+    # -- geometry constants (the measure pass positions content WITHIN these) --
+    TOP_PAD = 8
+    BOTTOM_PAD = 8
+    PAD_X = 12
+    CHIP_PAD_X = 6          # horizontal text padding inside a chip (×2 = +12)
+    CHIP_VPAD = 6           # chip height = label height + this
+    CHIP_GAP = 6            # gap between chips on a row
+    ROW_GAP = 4             # gap between wrapped chip rows
+    CAPTION_GAP = 2         # gap between a chip row and its caption
+    # gap region around the veil tuned so the populated height lands at 94 and
+    # the calm/young height at 62 (with the deterministic offscreen font metrics).
+    VEIL_GAP_POP = 22       # populated: the living-block→veil→vanished-block band
+    VEIL_GAP_CALM = 18      # calm/young: living-block → veil (no lower lane)
+    CHIP_ELIDE_W = 84       # max chip label width before elide (spec)
+    DOT_R = 2.0             # provider tick-dot radius
+    RING_PAD = 4.0          # apparition ring sits this far outside the chip
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._diff = None          # GhostDiff | None
+        self._locked = False
+        self._signature = None
+        self._materialize = 1.0    # 0..1 apparition ring factor (animated ONCE)
+        self._materialize_started_count = 0
+        self._caption_text = ""
+        # Cached paint geometry (rebuilt in set_data/resize — never alloc in paint)
+        self._veil_y = 0.0
+        # _glyph_rects: list[(QRectF, (model,provider), role)] for hit-testing.
+        self._glyph_rects: list = []
+        # _entry_map: {(model,provider): GhostEntry} cached for the paint loop so
+        # paint needs no per-chip scan/allocation (the hot-path discipline).
+        self._entry_map: dict = {}
+        # _apparition_rings: list[QRectF] (chip rects to draw a materialize ring on)
+        self._apparition_rings: list = []
+        self._hover_key = None
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # ONE held animation on a DISTINCT Property name (NOT pos/size/geometry).
+        self._anim = QPropertyAnimation(self, b"materialize")
+        self._anim.setDuration(1400)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()
+        theme_controller.changed.connect(self._on_theme_changed)
+
+    # -- the materialize Property (distinct name; NOT a QWidget builtin) -----
+    def get_materialize(self):
+        return self._materialize
+
+    def set_materialize(self, v):
+        self._materialize = float(v)
+        self.update()
+
+    materialize = Property(float, get_materialize, set_materialize)
+
+    def _on_theme_changed(self):
+        # colors are re-fetched from spend_palette in set_data; a theme change
+        # only needs a repaint of the cached geometry.
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Geometry primitives (font-metric-driven)
+    # ------------------------------------------------------------------
+    @classmethod
+    def _chip_h(cls) -> int:
+        return QFontMetrics(Fonts.label()).height() + cls.CHIP_VPAD
+
+    @classmethod
+    def _caption_h(cls) -> int:
+        return QFontMetrics(Fonts.tiny()).height()
+
+    @classmethod
+    def _populated_height(cls) -> int:
+        # top_pad + living chip + ghost-caption + veil-band + vanished chip +
+        # last-seen caption + bottom_pad. (≈94px at the offscreen font metrics.)
+        ch = cls._chip_h()
+        cap = cls._caption_h()
+        return (cls.TOP_PAD + ch + cap + cls.VEIL_GAP_POP + ch + cap
+                + cls.BOTTOM_PAD)
+
+    @classmethod
+    def _calm_height(cls) -> int:
+        # top_pad + living chip + caption + veil-gap + bottom_pad (no lower lane).
+        return (cls.TOP_PAD + cls._chip_h() + cls._caption_h()
+                + cls.VEIL_GAP_CALM + cls.BOTTOM_PAD)
+
+    def _has_lower_lane(self) -> bool:
+        """The lower (vanished) lane only exists in the POPULATED state — i.e.
+        a key is present, NOT young, and there is at least one ghost."""
+        d = self._diff
+        return bool(d is not None and not d.young_history and d.has_ghosts)
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, diff):
+        """diff: a GhostDiff (board.ghosts) or None (keep last-good — never blank).
+        """
+        if diff is None:
+            return
+        self._locked = False
+        self._diff = diff
+        sig = self._compute_signature(diff)
+        first_or_changed = (sig != self._signature)
+        self._signature = sig
+        self._measure()            # sets fixed height + rebuilds glyph geometry
+        # One-shot materialize ONLY when there are apparitions AND the roster
+        # changed (a 15-min identical poll is silent). Static ring otherwise.
+        if first_or_changed and diff.appeared:
+            self._start_materialize()
+        else:
+            self._materialize = 1.0
+        self.update()
+
+    def set_locked(self):
+        """No management key: a dim DASHED hairline, NO chips, a centered padlock
+        + the canonical unlock copy (decision F). ZERO fake glyphs/names. Keeps
+        the calm height so the section doesn't jump when a key is added."""
+        self._locked = True
+        self._diff = None
+        self._signature = None
+        self._materialize = 1.0
+        self._glyph_rects = []
+        self._apparition_rings = []
+        self._caption_text = SPEND_UNLOCK_BASE + " ghost detection"
+        self.setFixedHeight(self._calm_height())
+        self.update()
+
+    @staticmethod
+    def _compute_signature(diff):
+        if diff is None:
+            return None
+        return (
+            bool(diff.young_history),
+            tuple(e.pair.key for e in diff.living),
+            tuple(e.pair.key for e in diff.vanished),
+            tuple(e.pair.key for e in diff.appeared),
+        )
+
+    # ------------------------------------------------------------------
+    #  Materialize animation (ONE held anim; started only when APPEARED>0)
+    # ------------------------------------------------------------------
+    def _start_materialize(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on or not self.isVisible():
+            self._materialize = 1.0    # static ring (purely additive flair)
+            return
+        self._materialize = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+        self._materialize_started_count += 1
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint geometry and setFixedHeight — no clip)
+    # ------------------------------------------------------------------
+    def _measure(self):
+        """ONE pass: pick the height, place the veil, lay out + WRAP the chips
+        into _glyph_rects, and record which appeared-chips get a materialize ring.
+        Shared by paint and setFixedHeight so nothing clips."""
+        d = self._diff
+        populated = self._has_lower_lane()
+        h = self._populated_height() if populated else self._calm_height()
+        self.setFixedHeight(h)
+
+        self._glyph_rects = []
+        self._apparition_rings = []
+        self._entry_map = {}
+        if d is None or self._locked:
+            self._veil_y = h / 2.0
+            return
+        # Cache the entry-by-key map ONCE (paint reads it, never re-scans).
+        for e in (list(getattr(d, "living", ()) or [])
+                  + list(getattr(d, "vanished", ()) or [])
+                  + list(getattr(d, "appeared", ()) or [])):
+            self._entry_map[e.pair.key] = e
+
+        ch = self._chip_h()
+        cap = self._caption_h()
+        # The veil sits below the living block (chip + its caption) by VEIL_GAP/2
+        # so the upper lane has room; in the populated state the lower lane
+        # mirrors it. living block top:
+        living_top = float(self.TOP_PAD)
+        if populated:
+            # living chip row top .. caption .. (gap) veil (gap) .. vanished row.
+            self._veil_y = (self.TOP_PAD + ch + cap + self.VEIL_GAP_POP / 2.0)
+            vanished_top = self._veil_y + self.VEIL_GAP_POP / 2.0
+        else:
+            self._veil_y = (self.TOP_PAD + ch + cap + self.VEIL_GAP_CALM / 2.0)
+            vanished_top = None
+
+        # ABOVE the veil: LIVING then APPEARED (both alive). Appeared last so they
+        # flare at the right edge (the spec's 'in from the right').
+        above = list(getattr(d, "living", ()) or []) + \
+            list(getattr(d, "appeared", ()) or [])
+        appeared_keys = {e.pair.key for e in getattr(d, "appeared", ()) or []}
+        self._layout_lane(above, living_top, ch, role_above=True,
+                          appeared_keys=appeared_keys)
+
+        # BELOW the veil: VANISHED (only in the populated state).
+        if populated and vanished_top is not None:
+            self._layout_lane(list(getattr(d, "vanished", ()) or []),
+                              vanished_top, ch, role_above=False,
+                              appeared_keys=appeared_keys)
+
+        # The caption text for the calm/young states (no ghosts / young).
+        if d.young_history:
+            self._caption_text = "watching — needs a 2nd full week to spot ghosts"
+        elif not d.has_ghosts:
+            self._caption_text = "no ghosts this week — the veil is still"
+        else:
+            self._caption_text = ""
+
+    def _chip_w(self, entry) -> float:
+        fm = QFontMetrics(Fonts.label())
+        label = self._short_label(entry)
+        adv = fm.horizontalAdvance(label)
+        adv = min(adv, self.CHIP_ELIDE_W)
+        return adv + self.CHIP_PAD_X * 2
+
+    def _short_label(self, entry) -> str:
+        """A compact chip label: the model short-name with the trailing date
+        stamp stripped (claude-4.6-sonnet-20260217 -> claude-4.6-sonnet)."""
+        name = entry.pair.short_name or entry.pair.model_id or ""
+        # strip a trailing -YYYYMMDD date stamp the OpenRouter ids carry.
+        name = _re.sub(r"-\d{6,8}$", "", name)
+        return name
+
+    def _layout_lane(self, entries, top, ch, role_above, appeared_keys):
+        """Place a lane's chips left->right, WRAPPING to a new row when the inner
+        width is exceeded (the measured cumulative advance). Vanished chips sink
+        a progressive 2px lower (the spec's sinking cue). Records hit rects +
+        apparition ring rects. Allocation happens here (measure), not in paint."""
+        if not entries:
+            return
+        w = max(1, self.width())
+        x = float(self.PAD_X)
+        y = float(top)
+        right_limit = w - self.PAD_X
+        sink = 0
+        for e in entries:
+            cw = self._chip_w(e)
+            if x + cw > right_limit and x > self.PAD_X:
+                # wrap to the next row within this lane.
+                x = float(self.PAD_X)
+                y += ch + self.ROW_GAP
+            chip_y = y + (sink if not role_above else 0)
+            rect = QRectF(x, chip_y, cw, ch)
+            is_appeared = e.pair.key in appeared_keys
+            role = ("appeared" if (role_above and is_appeared)
+                    else "living" if role_above else "vanished")
+            self._glyph_rects.append((rect, e.pair.key, role))
+            if role == "appeared":
+                # the materialize ring is measured here (an ellipse just outside).
+                self._apparition_rings.append(rect)
+            x += cw + self.CHIP_GAP
+            if not role_above:
+                sink += 2     # progressive sinking for the departed
+
+    def resizeEvent(self, event):
+        self._measure()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint (allocation-light: cached rects + cached strokes)
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_veil(p)
+        if self._locked:
+            self._paint_locked(p)
+        else:
+            self._paint_populated(p)
+        p.end()
+
+    def _paint_veil(self, p):
+        """The membrane hairline at the vertical centre: a QLinearGradient that's
+        transparent at both ends and the panel accent (~alpha 90) in the middle,
+        with a faint blurred echo line below. LOCKED -> a dim DASHED accent line.
+        """
+        w = self.width()
+        y = self._veil_y
+        accent = theme_controller.accent()
+        if self._locked:
+            dim = QColor(accent); dim.setAlpha(40)
+            pen = QPen(dim, 1, Qt.PenStyle.DotLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(self.PAD_X, y), QPointF(w - self.PAD_X, y))
+            return
+        grad = QLinearGradient(self.PAD_X, 0, w - self.PAD_X, 0)
+        edge = QColor(accent); edge.setAlpha(0)
+        mid = QColor(accent); mid.setAlpha(90)
+        grad.setColorAt(0.0, edge)
+        grad.setColorAt(0.5, mid)
+        grad.setColorAt(1.0, edge)
+        p.setPen(QPen(QBrush(grad), 1))
+        p.drawLine(QPointF(self.PAD_X, y), QPointF(w - self.PAD_X, y))
+        # a faint echo line just below (reads as a membrane depth).
+        echo = QLinearGradient(self.PAD_X, 0, w - self.PAD_X, 0)
+        e_edge = QColor(accent); e_edge.setAlpha(0)
+        e_mid = QColor(accent); e_mid.setAlpha(30)
+        echo.setColorAt(0.0, e_edge)
+        echo.setColorAt(0.5, e_mid)
+        echo.setColorAt(1.0, e_edge)
+        p.setPen(QPen(QBrush(echo), 3))
+        p.drawLine(QPointF(self.PAD_X, y + 2.5), QPointF(w - self.PAD_X, y + 2.5))
+
+    def _paint_populated(self, p):
+        d = self._diff
+        if d is None:
+            return
+        # 1) the chips (living/appeared above; vanished below). Entry lookup is a
+        # cached dict (no per-chip scan/allocation in the paint hot path).
+        for (rect, key, role) in self._glyph_rects:
+            e = self._entry_map.get(key)
+            if e is None:
+                continue
+            if role == "vanished":
+                self._paint_vanished_chip(p, rect, e)
+            else:
+                self._paint_living_chip(p, rect, e, apparition=(role == "appeared"))
+        # 2) the apparition materialize rings (one-shot factor self._materialize).
+        self._paint_apparition_rings(p)
+        # 3) the calm/young caption (centered just under the veil) if present.
+        if self._caption_text:
+            self._paint_caption(p, self._caption_text)
+
+    def _paint_living_chip(self, p, rect, entry, apparition=False):
+        """A filled rounded-rect chip in the model's SHARED color, BG-dark label,
+        a provider tick-dot at the top-left corner. Apparitions also get a 'new'
+        pip at the top-right (the ring is drawn separately over the materialize
+        factor)."""
+        color = spend_palette.model_color(entry.pair.model_id, entry.rank)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 4, 4)
+        p.fillPath(path, QBrush(color))
+        # label (elided), in the dark panel color for contrast on the bright chip.
+        label = self._short_label(entry)
+        fm = QFontMetrics(Fonts.label())
+        label = fm.elidedText(label, Qt.TextElideMode.ElideRight,
+                              int(rect.width() - self.CHIP_PAD_X * 2))
+        p.setFont(Fonts.label())
+        p.setPen(QPen(Colors.BG_DARK))
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+        # provider tick-dot (top-left corner).
+        dot = _provider_dot_color(entry.pair.provider)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(dot))
+        p.drawEllipse(QPointF(rect.left() + 3.0, rect.top() + 3.0),
+                      self.DOT_R, self.DOT_R)
+        if apparition:
+            # the accent 'new' pip (top-right).
+            pip = theme_controller.accent()
+            p.setBrush(QBrush(pip))
+            p.drawEllipse(QPointF(rect.right() - 3.0, rect.top() + 3.0), 3.0, 3.0)
+
+    def _paint_vanished_chip(self, p, rect, entry):
+        """A hollow desaturated chip: the SAME model color @18 fill / @110 outline,
+        TEXT_MUTED label, a 3-dot fading trail ABOVE it, and a 'last seen Nd'
+        caption below. NEVER crimson (a vanish is not an error)."""
+        base = spend_palette.model_color(entry.pair.model_id, entry.rank)
+        fill = QColor(base); fill.setAlpha(18)
+        outline = QColor(base); outline.setAlpha(110)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 4, 4)
+        p.fillPath(path, QBrush(fill))
+        p.setPen(QPen(outline, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        # label, muted.
+        label = self._short_label(entry)
+        fm = QFontMetrics(Fonts.label())
+        label = fm.elidedText(label, Qt.TextElideMode.ElideRight,
+                              int(rect.width() - self.CHIP_PAD_X * 2))
+        p.setFont(Fonts.label())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+        # the 3-dot fading trail ABOVE the chip (alpha 90/50/20) — a 'rising
+        # ghost' cue pointing back up at the veil it sank through.
+        p.setPen(Qt.PenStyle.NoPen)
+        cx = rect.center().x()
+        for i, alpha in enumerate((90, 50, 20)):
+            d = QColor(base); d.setAlpha(alpha)
+            p.setBrush(QBrush(d))
+            ty = rect.top() - 3.0 - i * 3.5
+            p.drawEllipse(QPointF(cx, ty), 1.4, 1.4)
+        # 'last seen Nd' caption under the chip (tiny, muted).
+        days = self._last_seen_days(entry)
+        cap = f"last seen {days}d" if days is not None else "last seen"
+        f_tiny = Fonts.tiny()
+        fmt = QFontMetrics(f_tiny)
+        p.setFont(f_tiny)
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(rect.left() - 8, rect.bottom() + 1,
+                          rect.width() + 16, fmt.height()),
+                   Qt.AlignmentFlag.AlignHCenter, cap)
+
+    def _last_seen_days(self, entry):
+        """Days since the prior-week bucket date (best-effort; None if unknown)."""
+        pair = getattr(entry, "prior", None) or entry.pair
+        bucket = getattr(pair, "bucket", "") or ""
+        if not bucket:
+            return None
+        try:
+            import datetime
+            d = datetime.date.fromisoformat(bucket)
+            return max(0, (datetime.date.today() - d).days)
+        except Exception:
+            return None
+
+    def _paint_apparition_rings(self, p):
+        """A 2px accent ellipse just outside each apparition chip. The radius
+        grows (chip edge -> +RING_PAD) and the alpha fades (200->0) over the
+        one-shot `materialize` factor; at factor 1.0 (resolved / anim-off-static)
+        a faint resting ring remains as the 'newly arrived' marker."""
+        if not self._apparition_rings:
+            return
+        f = max(0.0, min(1.0, self._materialize))
+        accent = theme_controller.accent()
+        for rect in self._apparition_rings:
+            grow = self.RING_PAD * f
+            ring = QRectF(rect.left() - grow, rect.top() - grow,
+                          rect.width() + 2 * grow, rect.height() + 2 * grow)
+            # alpha 200 -> a resting 70 (never fully gone, so the marker persists).
+            alpha = int(200 - (200 - 70) * f)
+            col = QColor(accent); col.setAlpha(alpha)
+            p.setPen(QPen(col, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(ring, 6, 6)
+
+    def _paint_caption(self, p, text):
+        """A single centered TEXT_MUTED caption just below the veil (the calm /
+        young state messaging)."""
+        f_tiny = Fonts.tiny()
+        fm = QFontMetrics(f_tiny)
+        y = self._veil_y + 4
+        p.setFont(f_tiny)
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(self.PAD_X, y, self.width() - 2 * self.PAD_X,
+                          fm.height() + 2),
+                   Qt.AlignmentFlag.AlignHCenter, text)
+
+    def _paint_locked(self, p):
+        """A centered padlock + the canonical unlock copy under the dim dashed
+        hairline (the veil is drawn dashed by _paint_veil). NO chips, ZERO fake
+        names (decision F)."""
+        msg = self._caption_text or (SPEND_UNLOCK_BASE + " ghost detection")
+        f_body = Fonts.body()
+        fm = QFontMetrics(f_body)
+        msg_w = fm.horizontalAdvance(msg)
+        avail = self.width() - 2 * self.PAD_X - 22
+        msg = fm.elidedText(msg, Qt.TextElideMode.ElideRight, int(avail))
+        msg_w = min(msg_w, int(avail))
+        cx = self.width() / 2.0
+        cy = self._veil_y + 4 + fm.height() / 2.0
+        _paint_padlock(p, cx - msg_w / 2.0 - 12, cy, 13, Colors.TEXT_MUTED)
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.setFont(f_body)
+        p.drawText(QRectF(self.PAD_X, cy - fm.height() / 2.0,
+                          self.width() - 2 * self.PAD_X, fm.height()),
+                   Qt.AlignmentFlag.AlignHCenter, msg)
+
+    # ------------------------------------------------------------------
+    #  Interaction — click a glyph -> the séance-ledger popup
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event):
+        if self._locked or self._diff is None:
+            super().mousePressEvent(event)
+            return
+        try:
+            pos = event.position()
+        except AttributeError:
+            pos = QPointF(event.pos())
+        for (rect, key, _role) in self._glyph_rects:
+            if rect.contains(pos):
+                gpos = event.globalPosition() if hasattr(event, "globalPosition") \
+                    else QPointF(self.mapToGlobal(event.pos()))
+                self.ghost_clicked.emit(key, gpos)
+                return
+        super().mousePressEvent(event)
+
+
+class SeanceLedgerStrip(QWidget):
+    """The per-pair SÉANCE LEDGER (the #13 click-through), rendered to a QPixmap
+    and embedded as a data-URI <img> in the shared ProviderPopup (UptimeStrip
+    idiom). A two-bar last-week/this-week mini-timeline of the pair's presence
+    (request_count) + the $ + the first/last-seen line; for an apparition the
+    'materialized this week — never seen before' line, and for a same-model-new-
+    provider move the re-route note.
+
+    All names are QPainter-drawn here (injection-safe); the HTML wrapper
+    html.escapes them. devicePixelRatio-aware so text stays crisp on HiDPI."""
+
+    STRIP_W = 292
+
+    def __init__(self, entry, diff, parent=None):
+        super().__init__(parent)
+        self._entry = entry
+        self._diff = diff
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _measure_height(self) -> int:
+        fm = QFontMetrics(Fonts.tiny())
+        # header + the 2-bar timeline (two rows) + figure line + note line(s).
+        rows = 2                      # last-week + this-week bars
+        notes = 2                     # first/last-seen + (apparition/reroute)
+        return int(10 + fm.height() + 6 + rows * 20 + 6 + notes * (fm.height() + 4)
+                   + 10)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        e = self._entry
+        w = self.STRIP_W
+        pad = 12
+        color = spend_palette.model_color(e.pair.model_id, e.rank)
+        f_tiny = Fonts.tiny()
+        f_mono = Fonts.mono_small()
+        fm = QFontMetrics(f_tiny)
+        y = 10.0
+
+        # header — the provider line (model name is the popup title in HTML).
+        p.setFont(f_tiny)
+        p.setPen(QPen(Colors.TEXT_SECONDARY))
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"via {e.pair.provider or '—'}")
+        y += fm.height() + 6
+
+        # two-bar timeline: last week (prior) vs this week (this), bar ∝ requests.
+        prior = getattr(e, "prior", None)
+        this = getattr(e, "this", None)
+        pr = prior.request_count if prior else 0
+        tr = this.request_count if this else 0
+        ref = max(pr, tr, 1)
+        bar_left = pad + 64.0
+        bar_max = (w - pad) - bar_left - 44
+        for (lbl, reqs, present, is_this) in (
+            ("last wk", pr, prior is not None, False),
+            ("this wk", tr, this is not None, True),
+        ):
+            row_cy = y + 10
+            p.setFont(f_tiny)
+            p.setPen(QPen(Colors.TEXT_MUTED))
+            p.drawText(QRectF(pad, y, 60, 20),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       lbl)
+            frac = (reqs / ref) if ref > 0 else 0.0
+            bw = max(2.0, bar_max * frac) if present else 0.0
+            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(_rounded(QRectF(bar_left, row_cy - 4, bar_max, 8), 4),
+                       QBrush(track))
+            if present and bw > 0:
+                # this-week bar is the live model color; last-week is desaturated.
+                bc = QColor(color)
+                if not is_this:
+                    bc.setAlpha(120)
+                p.fillPath(_rounded(QRectF(bar_left, row_cy - 4, bw, 8), 4),
+                           QBrush(bc))
+            # request count at the right.
+            p.setFont(f_mono)
+            p.setPen(QPen(Colors.TEXT_SECONDARY if present else Colors.TEXT_MUTED))
+            txt = f"{reqs}" if present else "—"
+            p.drawText(QRectF(bar_left, row_cy - 10, bar_max + 44, 20),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       txt)
+            y += 20
+
+        y += 6
+        # the $ figure line (the surviving window's usage).
+        figure_pair = this or prior
+        usage = figure_pair.usage if figure_pair else 0.0
+        reqs = figure_pair.request_count if figure_pair else 0
+        p.setFont(f_tiny)
+        p.setPen(QPen(color))
+        verb = "drained" if (this is None) else "spent"
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"{verb} ${usage:,.4f} over {reqs} requests")
+        y += fm.height() + 4
+
+        # the status note: apparition / vanished / re-route / living.
+        note = _seance_note_text(e)
+        p.setFont(f_tiny)
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   note)
+
+
+def _seance_role(entry) -> str:
+    """'appeared' / 'vanished' / 'living' for an entry (which window it carries).
+    """
+    has_this = getattr(entry, "this", None) is not None
+    has_prior = getattr(entry, "prior", None) is not None
+    if has_this and not has_prior:
+        return "appeared"
+    if has_prior and not has_this:
+        return "vanished"
+    return "living"
+
+
+def _seance_note_text(entry) -> str:
+    """The plain-text ledger status note (QPainter-safe; the HTML wrapper escapes
+    the model name where it interpolates one). Honors the re-route note."""
+    role = _seance_role(entry)
+    if role == "appeared":
+        if getattr(entry, "reroute", False):
+            return "same model, new provider — a benign re-route"
+        return "materialized this week — never seen before"
+    if role == "vanished":
+        if getattr(entry, "reroute", False):
+            return "same model, new provider — a benign re-route"
+        return "gone this week — last week's ghost"
+    return "still active — present both weeks"
+
+
+def build_seance_html(entry, diff) -> str:
+    """The per-pair séance-ledger dossier for the ProviderPopup: a header (the
+    model + provider, html.escaped — decision E) + the painted timeline pixmap
+    embedded as a data-URI <img>. The pixmap text is QPainter-drawn (injection-
+    safe); we ALSO html.escape every name that reaches this HTML wrapper. Returns
+    a 'no ledger' card when entry is None."""
+    if entry is None:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— NO LEDGER ON FILE —</div>")
+    model = html.escape(getattr(entry.pair, "short_name", "")
+                        or getattr(entry.pair, "model_id", ""))
+    provider = html.escape(getattr(entry.pair, "provider", "") or "—")
+    role = _seance_role(entry)
+    accent = ghost_accent_hex(entry)
+    accent = _safe_color(accent, "#a0a0c8")
+    title_word = {"appeared": "Materialized", "vanished": "Departed",
+                  "living": "Present"}.get(role, "Present")
+    out = [f"<div style='font-size:11pt;font-weight:bold;color:{accent};'>"
+           f"{title_word}: {model}</div>"]
+    note = html.escape(_seance_note_text(entry))
+    out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+               f"via {provider} · {note}</div>")
+    try:
+        strip = SeanceLedgerStrip(entry, diff)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{SeanceLedgerStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("seance ledger render failed", exc_info=True)
+    out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
+               "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
+    return "".join(out)
