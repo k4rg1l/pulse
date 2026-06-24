@@ -2,6 +2,7 @@
 OpenRouter Pulse - Custom Widgets
 Hand-drawn gauges, sparklines, stat cards, status badges.
 """
+import datetime
 import html
 import logging
 import math
@@ -10287,4 +10288,826 @@ def build_week_dossier_html(mow) -> str:
         out.append(
             f"<div style='margin-top:2px;color:{col};font-size:8pt;'>"
             f"{sign}{mow.wow_delta * 100:.0f}% share vs last week.</div>")
+    return "".join(out)
+
+
+# ===========================================================================
+#  #17 THE FLIGHT RECORDER — Token Odometer + Records + Streak
+#  (the THIRD Insights widget, under #16, above the #18 slot)
+# ===========================================================================
+# A dedicated WARM BRASS/AMBER lane no sibling owns — deliberately warmer/more
+# industrial than #16's trophy gold (the rolling-drum FORM + the warm dark panel
+# disambiguate even though both are goldish). NEVER model-derived; never touches
+# Spend's spend_palette.model_color. (decision E)
+_REC_AMBER = QColor(0xE8, 0xA2, 0x3D)       # the value / lit color
+_REC_AMBER_HI = QColor(0xF6, 0xC6, 0x6B)    # drum highlight center / glow
+_REC_BRASS_DARK = QColor(0x6B, 0x4A, 0x1E)  # drum window top/bottom cylinder shadow
+_REC_PANEL = QColor(0x14, 0x11, 0x0C)       # the warm near-black panel fill
+_REC_BEZEL = QColor(0x2A, 0x21, 0x14)       # the 1px inner bezel stroke
+_REC_INACTIVE = QColor(0x4A, 0x40, 0x30)    # unlit runway rings
+_REC_DRUM_INK = QColor(0x1A, 0x14, 0x09)    # the digit on the bright drum face
+_REC_STRIP_PANEL = QColor(0x0D, 0x0B, 0x07)  # the black-box strip inset (darker)
+
+
+def _fmt_tokens_compact(n: int) -> str:
+    """A compact token magnitude for the flight strip ('6634418' -> '6.63M').
+    No ' tok' suffix (the strip appends its own)."""
+    n = int(n or 0)
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.2f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return f"{n}"
+
+
+def _fmt_record_date(iso: str) -> str:
+    """'2026-06-22' -> 'Jun 22' for the flight strip stamp. Falls back to the raw
+    string if it isn't an ISO date (defensive — never raises)."""
+    if not iso:
+        return ""
+    try:
+        d = datetime.date.fromisoformat(iso[:10])
+        return d.strftime("%b %d").replace(" 0", " ")   # 'Jun 02' -> 'Jun 2'
+    except (ValueError, TypeError):
+        return iso
+
+
+class TokenRecorder(QWidget):
+    """#17 THE FLIGHT RECORDER — a brass cockpit instrument that fuses three thin
+    facts into one short-but-real flight log (the third Insights widget, under
+    #16's belt).
+
+    ONE rounded brushed-metal panel (REC_PANEL fill + a 1px REC_BEZEL inner
+    stroke) painted top->bottom by a SINGLE _paint_into(p) shared by paintEvent
+    AND render_pixmap. Three stacked bands:
+      BAND A — ODOMETER DRUM: a row of digit drums (a vertical brass gradient with
+        a bright center faking cylinder curve, the digit centered, a faint sliver
+        of the NEXT digit peeking at the window bottom + a 1px seam line), comma
+        separators as half-width drums, the 'TOKENS ROUTED · LIFETIME' hairline
+        label + a 'tok' tag — reading the LIFETIME token total.
+      BAND B — BLACK-BOX FLIGHT STRIP: a darker inset plaque with a left amber
+        spine + a static 'REC' dot, the record day's big amber '$4.37', a 'Jun 22'
+        stamp, and a micro '6.63M tok · 97 req'. A 2nd dimmer strip auto-appears
+        ONLY if the biggest-TOKEN day differs from the biggest-SPEND day (decision
+        E; today they coincide -> one strip).
+      BAND C — RUNWAY: a thin centerline with 7 landing-light slots — active days
+        lit amber + a soft glow, inactive dark rings, the current run connected by
+        a brighter bar, a right-aligned 'N-DAY RUN' caption.
+
+    set_data(TokenRecord) paints the instrument; None keeps last-good. set_locked()
+    paints a dimmed drum reading the LOCKED_SENTINEL ('— — —') + a key glyph + the
+    canonical unlock copy (NEVER a zeroed '0' that could read as real, decision D).
+    EMPTY (key present, zero active days) -> a tidy 'No traffic logged yet'
+    instrument (real zeros honest). Clicking the card emits
+    recorder_clicked(anchor_y_global) -> the dashboard's flight-recorder dossier.
+
+    Motion (decision C): THE Insights zone's count-up owner. ONE held
+    QPropertyAnimation drives a DISTINCT `_roll` Property (NOT a QWidget builtin —
+    the widget never moves) 0->1 over ~900ms OutCubic on first set_data / a value
+    INCREASE; the displayed lifetime = int(target * _roll) re-formatted f'{v:,}'
+    every frame and RIGHT-aligned so the drums roll UP like a gas pump. A same-
+    value 15-min re-poll does NOT re-animate (gated on a stored _last_lifetime).
+    The runway lights stagger off the SAME _roll driver (no 2nd animation object);
+    the 'REC' dot is STATIC. Reduce-motion -> _roll parked at 1.0 instantly.
+    Allocation-free paint: pens/brushes + the measured geometry are built in
+    set_data/_measure, never paintEvent."""
+
+    recorder_clicked = Signal(int)         # global anchor y for the dossier popup
+
+    LOCKED_SENTINEL = "— — —"   # '— — —' (NOT '0', decision D)
+    RUNWAY_SLOTS = 7                       # the last-7 landing-light pads
+
+    # -- geometry constants (the measure pass derives everything from these) --
+    PANEL_RADIUS = 12
+    PAD = 14
+    DRUM_GAP = 2                           # ridge between drums
+    DRUM_PAD_BOLD = 8                      # window inset around a bold digit
+    DRUM_PAD_REG = 6                       # tighter inset under the regular weight
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rec = None                   # token_recorder.TokenRecord | None
+        self._locked = False
+        self._roll = 1.0                   # 0..1 odometer roll position (animated once)
+        self._last_lifetime = None         # value-CHANGED gate (None == fresh)
+
+        # Cached from the measure pass (rebuilt in set_data/resize) — paint reads
+        # only these, never recomputes geometry:
+        self._panel_h = 0
+        self._cells = []                   # list[str] the drum digit/comma cells
+        self._drum_compact = False         # regular-weight fallback (overflow)
+        self._drum_font = None             # the chosen drum QFont (bold|regular)
+        self._cell_w = 0.0                 # a full digit cell width
+        self._comma_w = 0.0                # a half-width comma cell
+        self._window_h = 0.0               # the drum window height
+        self._bandA_top = 0.0
+        self._bandB_top = 0.0
+        self._bandC_top = 0.0
+        self._inner = None                 # the padded inner QRectF
+
+        # Pre-built strokes (allocation-free paint).
+        self._bezel_pen = QPen(_REC_BEZEL, 1)
+        self._seam_pen = QPen(QColor(0, 0, 0, 110), 1)
+        self._ridge_pen = QPen(QColor(0, 0, 0, 90), 1)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        # ONE held animation (ArcGauge/Assay idiom) — never per-frame alloc.
+        self._anim = QPropertyAnimation(self, b"roll")
+        self._anim.setDuration(900)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()
+        theme_controller.changed.connect(self.update)
+
+    # -- the _roll Property (DISTINCT name; NOT a QWidget builtin) --
+    def get_roll(self):
+        return self._roll
+
+    def set_roll(self, v):
+        self._roll = float(v)
+        self.update()
+
+    roll = Property(float, get_roll, set_roll)
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, rec):
+        """rec: a token_recorder.TokenRecord (or None). None => keep last-good (the
+        instrument never blanks). The roll fires ONCE when the lifetime CHANGES; an
+        identical re-distribution (same lifetime) repaints silently (decision C)."""
+        if rec is None:
+            return
+        self._locked = False
+        self._rec = rec
+        target = int(rec.lifetime_tokens or 0)
+        changed = (self._last_lifetime is None or target != self._last_lifetime)
+        self._last_lifetime = target
+        self._measure()
+        self._build_geometry()
+        if changed:
+            self._start_roll()
+        else:
+            self._roll = 1.0
+        self.update()
+
+    def set_locked(self):
+        """No management key: a dimmed drum reading the LOCKED_SENTINEL ('— — —')
+        + a key glyph + the canonical unlock copy. The locked height MATCHES the
+        populated height so the section never jumps. ZERO fake data — NEVER a
+        zeroed '0' that could read as real (decision D)."""
+        self._locked = True
+        self._rec = None
+        self._last_lifetime = None
+        self._roll = 1.0
+        self._measure()
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  State / readout helpers (read by paint + the tests)
+    # ------------------------------------------------------------------
+    def _drum_string(self) -> str:
+        """The string the odometer drums currently show. LOCKED -> the sentinel.
+        Populated -> the displayed lifetime = int(target * _roll), comma-grouped
+        and RIGHT-aligned by the cell layout (drums roll UP like a gas pump)."""
+        if self._locked:
+            return self.LOCKED_SENTINEL
+        if self._rec is None or self._rec.is_empty:
+            return "0"
+        target = int(self._rec.lifetime_tokens or 0)
+        shown = int(target * max(0.0, min(1.0, self._roll)))
+        return f"{shown:,}"
+
+    def _target_string(self) -> str:
+        """The FINAL (settled) drum string — drives the measure pass / cell count
+        so the geometry is stable across the whole roll (the row never reflows)."""
+        if self._locked:
+            return self.LOCKED_SENTINEL
+        if self._rec is None or self._rec.is_empty:
+            return "0"
+        return f"{int(self._rec.lifetime_tokens or 0):,}"
+
+    def _runway_slots(self) -> int:
+        return self.RUNWAY_SLOTS
+
+    def _lit_count(self) -> int:
+        """How many runway pads are lit = the last-active-run, clamped to the slot
+        count. 0 when locked / empty."""
+        if self._locked or self._rec is None or self._rec.is_empty:
+            return 0
+        return max(0, min(self.RUNWAY_SLOTS, int(self._rec.streak_run or 0)))
+
+    def _run_caption(self) -> str:
+        """The honest right-aligned runway caption. Always the LAST-ACTIVE-RUN
+        length — NEVER an ongoing-today claim today's emptiness contradicts
+        (decision B). '3-DAY RUN' / '1-DAY RUN'; empty -> 'NO RUNS YET'."""
+        if self._locked:
+            return ""
+        if self._rec is None or self._rec.is_empty or self._rec.streak_run <= 0:
+            return "NO RUNS YET"
+        n = int(self._rec.streak_run)
+        return f"{n}-DAY RUN"
+
+    # ------------------------------------------------------------------
+    #  Roll animation (one-time, value-CHANGED gated) — decision C
+    # ------------------------------------------------------------------
+    def _start_roll(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on or not self.isVisible():
+            self._roll = 1.0           # reduce-motion -> snap to the full value
+            return
+        self._roll = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint and setFixedHeight — no clipping).
+    #  Font-metric-driven; the SAME pass feeds _paint_into + sizeHint. The drum
+    #  row drops to the regular weight + a tighter pad if the bold row would
+    #  overflow the inner width (decision: the regular-weight fallback recompute).
+    # ------------------------------------------------------------------
+    def _measure(self):
+        inner_w = max(40.0, self.width() - 2 * self.PAD)
+
+        # The cells are the FINAL string's characters (digits + commas), so the
+        # geometry is stable across the whole roll (the row never reflows).
+        s = self._target_string()
+        self._cells = list(s)
+
+        def _row_metrics(font, pad):
+            fm = QFontMetrics(font)
+            digit_w = fm.horizontalAdvance("0")
+            cell_w = digit_w + pad
+            comma_w = max(6.0, digit_w * 0.55)
+            window_h = fm.height() + 10.0
+            total = 0.0
+            for ch in self._cells:
+                total += (comma_w if ch == "," else cell_w)
+            total += max(0, len(self._cells) - 1) * self.DRUM_GAP
+            return cell_w, comma_w, window_h, total
+
+        bold = Fonts.mono_medium()         # the bold drum digit
+        cell_w, comma_w, window_h, total = _row_metrics(bold, self.DRUM_PAD_BOLD)
+        if total > inner_w:
+            # OVERFLOW -> drop to the regular weight + a tighter pad, recompute.
+            reg = Fonts.mono_small()
+            cell_w, comma_w, window_h, total = _row_metrics(reg, self.DRUM_PAD_REG)
+            self._drum_font = reg
+            self._drum_compact = True
+        else:
+            self._drum_font = bold
+            self._drum_compact = False
+        self._cell_w = cell_w
+        self._comma_w = comma_w
+        self._window_h = window_h
+
+        label_h = QFontMetrics(Fonts.label()).height()
+        # BAND A = label + window + the 'tok' tag baseline (small gap).
+        bandA_h = label_h + 4 + window_h
+        # BAND B = the flight strip: 2 mono rows + paddings. A 2nd strip stacks
+        # when the biggest-token day diverges from the biggest-spend day.
+        strip_one = QFontMetrics(Fonts.mono_medium()).height() + \
+            QFontMetrics(Fonts.tiny()).height() + 16
+        n_strips = 2 if (self._rec is not None and not self._locked and
+                         self._rec.has_second_strip) else 1
+        bandB_h = strip_one * n_strips + (6 if n_strips == 2 else 0)
+        # BAND C = the runway: a pad row + a caption line.
+        cap_h = QFontMetrics(Fonts.tiny()).height()
+        bandC_h = 22 + cap_h
+
+        gap = 12
+        self._panel_h = int(self.PAD + bandA_h + gap + bandB_h + gap +
+                            bandC_h + self.PAD)
+        self.setFixedHeight(self._panel_h)
+
+    def sizeHint(self) -> QSize:
+        return QSize(320, self._panel_h)
+
+    # ------------------------------------------------------------------
+    #  Geometry build (cache the inner rect + the band tops). Runs in
+    #  set_data/resize — NOT the paint hot path.
+    # ------------------------------------------------------------------
+    def _build_geometry(self):
+        w = max(1, self.width())
+        h = self._panel_h
+        self._inner = QRectF(self.PAD, self.PAD, w - 2 * self.PAD,
+                             h - 2 * self.PAD)
+        label_h = QFontMetrics(Fonts.label()).height()
+        gap = 12
+        self._bandA_top = self.PAD
+        bandA_h = label_h + 4 + self._window_h
+        self._bandB_top = self._bandA_top + bandA_h + gap
+        strip_one = QFontMetrics(Fonts.mono_medium()).height() + \
+            QFontMetrics(Fonts.tiny()).height() + 16
+        n_strips = 2 if (self._rec is not None and not self._locked and
+                         self._rec.has_second_strip) else 1
+        bandB_h = strip_one * n_strips + (6 if n_strips == 2 else 0)
+        self._bandC_top = self._bandB_top + bandB_h + gap
+
+    def resizeEvent(self, event):
+        self._measure()
+        self._build_geometry()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint — ONE _paint_into shared by paintEvent AND render_pixmap.
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        if self._inner is None:
+            self._build_geometry()
+        w = max(1, self.width())
+        h = self._panel_h
+        # the warm brushed-metal panel + the 1px bezel.
+        panel = QPainterPath()
+        panel.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1),
+                             self.PANEL_RADIUS, self.PANEL_RADIUS)
+        grad = QLinearGradient(0, 0, 0, h)
+        grad.setColorAt(0.0, _REC_PANEL.lighter(118))
+        grad.setColorAt(0.5, _REC_PANEL)
+        grad.setColorAt(1.0, _REC_PANEL.darker(115))
+        p.fillPath(panel, QBrush(grad))
+        p.setPen(self._bezel_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(panel)
+
+        self._paint_band_a(p)              # the odometer drum (always)
+        if self._locked:
+            self._paint_locked_lower(p)
+        elif self._rec is None or self._rec.is_empty:
+            self._paint_empty_lower(p)
+        else:
+            self._paint_band_b(p)          # the black-box flight strip
+            self._paint_band_c(p)          # the runway streak
+
+    # ---- BAND A: the odometer drum -----------------------------------
+    def _paint_band_a(self, p):
+        inner = self._inner
+        label_h = QFontMetrics(Fonts.label()).height()
+        # hairline label, letter-spaced amber.
+        p.setFont(Fonts.label())
+        p.setPen(QPen(_REC_AMBER.darker(105)))
+        p.drawText(QRectF(inner.x(), self._bandA_top, inner.width(), label_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "TOKENS ROUTED · LIFETIME")
+
+        # the drum row, RIGHT-aligned within the inner width (a 'tok' tag sits to
+        # the right of the last drum, so reserve its advance first).
+        win_top = self._bandA_top + label_h + 4
+        cells = self._cells
+        # measure the row width from the cached cell metrics.
+        row_w = 0.0
+        for ch in cells:
+            row_w += (self._comma_w if ch == "," else self._cell_w)
+        row_w += max(0, len(cells) - 1) * self.DRUM_GAP
+
+        tok_font = Fonts.tiny()
+        tok_w = QFontMetrics(tok_font).horizontalAdvance(" tok") + 4
+        x0 = inner.x() + inner.width() - tok_w - row_w
+        x0 = max(inner.x(), x0)            # never spill left of the panel
+
+        shown = self._drum_string()
+        # right-align the shown string into the FINAL cell slots: pad with blanks
+        # on the LEFT so lower drums change while the leading drums stay parked.
+        pad_n = max(0, len(cells) - len(shown))
+        glyphs = [""] * pad_n + list(shown)
+        if len(glyphs) > len(cells):       # defensive (shouldn't exceed)
+            glyphs = glyphs[-len(cells):]
+
+        x = x0
+        for i, ch in enumerate(cells):
+            is_comma = (ch == ",")
+            cw = self._comma_w if is_comma else self._cell_w
+            glyph = glyphs[i] if i < len(glyphs) else ""
+            self._paint_drum_cell(p, QRectF(x, win_top, cw, self._window_h),
+                                  glyph, is_comma)
+            if i < len(cells) - 1:
+                # a thin ridge between drums.
+                rx = x + cw + self.DRUM_GAP / 2.0
+                p.setPen(self._ridge_pen)
+                p.drawLine(QPointF(rx, win_top + 2),
+                           QPointF(rx, win_top + self._window_h - 2))
+            x += cw + self.DRUM_GAP
+
+        # the 'tok' tag baseline-aligned to the right of the last drum.
+        p.setFont(tok_font)
+        p.setPen(QPen(_REC_AMBER.darker(115)))
+        p.drawText(QRectF(x + 2, win_top, tok_w, self._window_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+                   "tok")
+
+    def _paint_drum_cell(self, p, r: QRectF, glyph: str, is_comma: bool):
+        """One digit/comma drum: a rounded window with a vertical brass gradient
+        (bright center, dark top+bottom faking the cylinder curve), the glyph
+        centered, a faint peeking next-digit sliver at the bottom + a 1px seam
+        line (a physical wheel mid-rotation). Dimmed when locked."""
+        cell = QPainterPath()
+        cell.addRoundedRect(r, 3, 3)
+        grad = QLinearGradient(r.x(), r.y(), r.x(), r.y() + r.height())
+        if self._locked:
+            grad.setColorAt(0.0, QColor(0x30, 0x2A, 0x20))
+            grad.setColorAt(0.5, QColor(0x3A, 0x33, 0x26))
+            grad.setColorAt(1.0, QColor(0x24, 0x1F, 0x17))
+        else:
+            grad.setColorAt(0.0, _REC_BRASS_DARK)
+            grad.setColorAt(0.18, _REC_AMBER.darker(112))
+            grad.setColorAt(0.5, _REC_AMBER_HI)        # bright cylinder center
+            grad.setColorAt(0.82, _REC_AMBER.darker(112))
+            grad.setColorAt(1.0, _REC_BRASS_DARK)
+        p.fillPath(cell, QBrush(grad))
+        # the seam line across the cylinder midline (mid-rotation physicality).
+        p.setPen(self._seam_pen)
+        p.drawLine(QPointF(r.x() + 1, r.center().y()),
+                   QPointF(r.right() - 1, r.center().y()))
+
+        if not glyph:
+            return
+        ink = QColor(0x6A, 0x6A, 0x7A) if self._locked else _REC_DRUM_INK
+        # a faint sliver of the NEXT digit peeking at the window bottom (only for
+        # real digits, not commas / the locked sentinel) — the rolling tell.
+        if not is_comma and not self._locked and glyph.isdigit():
+            nxt = str((int(glyph) + 1) % 10)
+            p.save()
+            clip = QPainterPath()
+            sliver = QRectF(r.x(), r.y() + r.height() * 0.74,
+                            r.width(), r.height() * 0.26)
+            clip.addRect(sliver)
+            p.setClipPath(clip)
+            p.setFont(self._drum_font)
+            peek = QColor(_REC_DRUM_INK); peek.setAlpha(70)
+            p.setPen(QPen(peek))
+            # draw the next glyph shifted up so only its TOP peeks into the sliver.
+            p.drawText(r.translated(0, -r.height() * 0.62),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                       nxt)
+            p.restore()
+        # the current glyph, centered.
+        p.setFont(self._drum_font)
+        p.setPen(QPen(ink))
+        p.drawText(r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                   glyph)
+
+    # ---- BAND B: the black-box flight strip --------------------------
+    def _paint_band_b(self, p):
+        rec = self._rec
+        inner = self._inner
+        strip_h = QFontMetrics(Fonts.mono_medium()).height() + \
+            QFontMetrics(Fonts.tiny()).height() + 16
+        # primary strip = the record-by-SPEND day.
+        self._paint_flight_strip(
+            p, QRectF(inner.x(), self._bandB_top, inner.width(), strip_h),
+            rec.record, dim=False)
+        # a 2nd dimmer strip ONLY when the biggest-token day diverges (decision E).
+        if rec.has_second_strip:
+            self._paint_flight_strip(
+                p, QRectF(inner.x(), self._bandB_top + strip_h + 6,
+                          inner.width(), strip_h),
+                rec.record_by_tokens, dim=True, tag="TOKEN PEAK")
+
+    def _paint_flight_strip(self, p, r: QRectF, day, dim: bool, tag: str = "REC"):
+        if day is None or day.is_empty:
+            return
+        amber = _REC_AMBER.darker(125) if dim else _REC_AMBER
+        # the darker inset plaque.
+        plaque = QPainterPath()
+        plaque.addRoundedRect(r, 6, 6)
+        p.fillPath(plaque, QBrush(_REC_STRIP_PANEL))
+        p.setPen(QPen(QColor(0, 0, 0, 120), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(plaque)
+        # the left amber spine.
+        spine = QRectF(r.x(), r.y() + 3, 3.0, r.height() - 6)
+        p.fillRect(spine, QBrush(amber))
+        # the static 'REC' dot (a filled amber circle + ring) at the spine top.
+        dot_r = 4.0
+        dot = QRectF(r.x() + 9, r.y() + 8, dot_r * 2, dot_r * 2)
+        p.setBrush(QBrush(amber))
+        p.setPen(QPen(amber.darker(140), 1))
+        p.drawEllipse(dot)
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(amber.darker(115)))
+        p.drawText(QRectF(dot.right() + 5, r.y() + 5, 70, 14),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, tag)
+
+        # the big amber spend + the date stamp on the value row.
+        val_y = r.y() + 6
+        f_val = Fonts.mono_medium()
+        p.setFont(f_val)
+        p.setPen(QPen(amber if not dim else amber.lighter(110)))
+        val_txt = f"${day.spend:,.2f}"
+        p.drawText(QRectF(r.x() + 14, val_y + 14, r.width() * 0.5,
+                          QFontMetrics(f_val).height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   val_txt)
+        # the 'Jun 22' stamp, right-aligned on the value row.
+        p.setFont(Fonts.mono_small())
+        p.setPen(QPen(QColor(0xC8, 0xB8, 0x98)))
+        p.drawText(QRectF(r.x() + r.width() * 0.45, val_y + 14,
+                          r.width() * 0.55 - 10, QFontMetrics(f_val).height()),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   _fmt_record_date(day.date))
+        # the micro 'tok · req' line.
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(QColor(0x8A, 0x80, 0x6A)))
+        micro = f"{_fmt_tokens_compact(day.tokens)} tok · {day.reqs} req"
+        p.drawText(QRectF(r.x() + 14, r.bottom() - 16, r.width() - 20, 14),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   micro)
+
+    # ---- BAND C: the runway streak -----------------------------------
+    def _paint_band_c(self, p):
+        inner = self._inner
+        lit = self._lit_count()
+        slots = self.RUNWAY_SLOTS
+        cap_h = QFontMetrics(Fonts.tiny()).height()
+        pad_y = self._bandC_top + 8
+        # the thin centerline.
+        cl_y = pad_y
+        p.setPen(QPen(QColor(0x3A, 0x33, 0x24), 1))
+        p.drawLine(QPointF(inner.x() + 4, cl_y),
+                   QPointF(inner.x() + inner.width() - 4, cl_y))
+
+        spacing = inner.width() / float(slots)
+        pad_r = 4.0
+        # the run is the RIGHTMOST `lit` pads (the most-recent days), so the
+        # current run sits at the approach end of the runway.
+        first_lit = slots - lit
+        # the brighter connector bar under the current run.
+        if lit >= 1:
+            bx0 = inner.x() + spacing * (first_lit + 0.5)
+            bx1 = inner.x() + spacing * (slots - 0.5)
+            bar = QColor(_REC_AMBER); bar.setAlpha(150)
+            p.setPen(QPen(bar, 2))
+            p.drawLine(QPointF(bx0, cl_y), QPointF(bx1, cl_y))
+
+        for i in range(slots):
+            cx = inner.x() + spacing * (i + 0.5)
+            is_lit = (i >= first_lit) and (lit > 0)
+            # stagger the lights off the SAME _roll driver (decision C).
+            if is_lit:
+                idx_in_run = i - first_lit
+                lit_now = self._roll >= ((idx_in_run + 1) / max(1, lit)) - 1e-6
+            else:
+                lit_now = False
+            pad = QRectF(cx - pad_r, cl_y - pad_r, pad_r * 2, pad_r * 2)
+            if is_lit and lit_now:
+                # a soft glow + a lit amber pad.
+                glow = QColor(_REC_AMBER); glow.setAlpha(40)
+                p.setBrush(QBrush(glow))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(pad.adjusted(-3, -3, 3, 3))
+                p.setBrush(QBrush(_REC_AMBER_HI))
+                p.setPen(QPen(_REC_AMBER.darker(130), 1))
+                p.drawEllipse(pad)
+            else:
+                # a dark unlit ring.
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(_REC_INACTIVE, 1.4))
+                p.drawEllipse(pad)
+
+        # the right-aligned caption.
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(_REC_AMBER.darker(110)))
+        p.drawText(QRectF(inner.x(), pad_y + 8, inner.width(), cap_h),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   self._run_caption())
+
+    # ---- LOCKED / EMPTY lower bands ----------------------------------
+    def _paint_locked_lower(self, p):
+        """The lower two bands when locked: a key glyph + the canonical unlock
+        copy (the drum already painted its dimmed sentinel)."""
+        inner = self._inner
+        y = self._bandB_top
+        f = Fonts.mono_medium()
+        p.setFont(f)
+        p.setPen(QPen(QColor(0x8A, 0x80, 0x6A)))
+        p.drawText(QRectF(inner.x(), y, inner.width(),
+                          QFontMetrics(f).height() + 6),
+                   Qt.AlignmentFlag.AlignCenter, "\U0001F511")   # 🔑
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(inner.x(), self._bandC_top, inner.width(),
+                          QFontMetrics(Fonts.tiny()).height() + 6),
+                   Qt.AlignmentFlag.AlignCenter,
+                   "Connect a management key to log your traffic")
+
+    def _paint_empty_lower(self, p):
+        """Key present, zero active days -> a tidy honest 'No traffic logged yet'
+        (real zeros, not a fake record / runway)."""
+        inner = self._inner
+        p.setFont(Fonts.body())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(inner.x(), self._bandB_top, inner.width(),
+                          self._bandC_top - self._bandB_top),
+                   Qt.AlignmentFlag.AlignCenter, "No traffic logged yet")
+
+    # ------------------------------------------------------------------
+    #  render_pixmap — the SAME _paint_into, for a dossier thumbnail if ever
+    #  needed (parity with the belt; devicePixelRatio-aware).
+    # ------------------------------------------------------------------
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        w = max(1, self.width())
+        h = max(1, self._panel_h)
+        pm = QPixmap(int(w * dpr), int(h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    # ------------------------------------------------------------------
+    #  Interaction — the whole card is the click target -> the dossier
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        if self._locked or self._rec is None or self._rec.is_empty:
+            super().mousePressEvent(event)
+            return
+        gy = int(self.mapToGlobal(QPoint(0, int(self._panel_h / 2))).y())
+        self.recorder_clicked.emit(gy)
+
+
+# ---- #17 flight-recorder DOSSIER (the tap-through popup) -------------------
+class RecorderDossierStrip(QWidget):
+    """The painted flight-recorder dossier body for THE FLIGHT RECORDER: the
+    lifetime totals header + a TIMELINE of every active day as a mini amber bar
+    (reusing the BurnRateBar mini-bar vocabulary) + the record day + the streak
+    definition. All text is QPainter-drawn (injection-safe); the HTML wrapper ALSO
+    html.escapes the date strings. devicePixelRatio-aware. Measure-before-allocate
+    so nothing clips."""
+
+    STRIP_W = 300
+    PAD = 12
+    ROW_H = 22
+    ROW_GAP = 5
+    BAR_H = 8
+
+    def __init__(self, rec, parent=None):
+        super().__init__(parent)
+        self._r = rec
+        self._rows = list(rec.series) if rec is not None else []
+        # the max spend across the series drives the mini-bar scale.
+        self._max_spend = max((d.spend for d in self._rows), default=0.0)
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _measure_height(self) -> int:
+        head_h = QFontMetrics(Fonts.mono_small()).height() + 6
+        body = len(self._rows) * (self.ROW_H + self.ROW_GAP)
+        return int(self.PAD * 2 + head_h + 8 + body)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        w = self.STRIP_W
+        pad = self.PAD
+        r = self._r
+        f_head = Fonts.mono_small()
+        fm_head = QFontMetrics(f_head)
+        p.setFont(f_head)
+        p.setPen(QPen(_REC_AMBER))
+        head = f"✈ {r.lifetime_tokens:,} tok routed · ${r.lifetime_spend:,.2f}"
+        p.drawText(QRectF(pad, pad, w - 2 * pad, fm_head.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   head)
+        y = pad + fm_head.height() + 8
+        # one mini-bar row per active day (the daily timeline).
+        for day in self._rows:
+            is_rec = (day.date == r.record.date)
+            # the date stamp.
+            p.setFont(Fonts.tiny())
+            p.setPen(QPen(Colors.TEXT_SECONDARY))
+            p.drawText(QRectF(pad, y, 52, 14),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       _fmt_record_date(day.date))
+            # the spend value (amber-bright for the record day).
+            p.setPen(QPen(_REC_AMBER if is_rec else Colors.TEXT_PRIMARY))
+            p.setFont(Fonts.mono_small())
+            p.drawText(QRectF(w - pad - 92, y, 92, 14),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"${day.spend:,.2f}")
+            # the mini bar (BurnRateBar vocabulary): an amber fill scaled to the
+            # max-spend day, so the Jun-22 spike dominates honestly.
+            bar_y = y + 14
+            bw = w - 2 * pad
+            track = QRectF(pad, bar_y, bw, self.BAR_H)
+            tpath = QPainterPath(); tpath.addRoundedRect(track, 3, 3)
+            p.fillPath(tpath, QBrush(QColor(0x2A, 0x24, 0x18)))
+            frac = (day.spend / self._max_spend) if self._max_spend > 0 else 0.0
+            frac = max(0.02, min(1.0, frac))     # a visible nub even for tiny days
+            fill = QRectF(pad, bar_y, bw * frac, self.BAR_H)
+            fpath = QPainterPath(); fpath.addRoundedRect(fill, 3, 3)
+            col = _REC_AMBER_HI if is_rec else _REC_AMBER.darker(125)
+            p.fillPath(fpath, QBrush(col))
+            y += self.ROW_H + self.ROW_GAP
+
+
+def build_recorder_dossier_html(rec) -> str:
+    """The #17 flight-recorder dossier for the ProviderPopup: a header + the
+    painted daily-timeline strip embedded as a data-URI <img> (single-QLabel
+    contract) + the record day + the streak definition SPELLED OUT (the honest
+    last-active-run wording, NEVER an ongoing-today claim). Every API-sourced
+    string (the ISO dates) is html.escape'd before it enters the HTML wrapper (the
+    pixmap text is QPainter-drawn so it's injection-safe by construction). Returns
+    '' / a tidy note when there's no traffic."""
+    if rec is None or rec.is_empty:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— NO TRAFFIC LOGGED YET —</div>")
+    rec_date = html.escape(rec.record.date or "")
+    last_date = html.escape(rec.last_active_date or "")
+    out = [
+        f"<div style='font-size:11pt;font-weight:bold;color:#E8A23D;'>"
+        f"✈ The Flight Recorder — your lifetime log</div>",
+        f"<div style='color:#8A806A;font-size:8pt;margin-bottom:6px;'>"
+        f"{rec.lifetime_tokens:,} tokens · ${rec.lifetime_spend:,.2f} "
+        f"· {rec.lifetime_requests:,} requests "
+        f"· {rec.active_days} active day(s)</div>",
+    ]
+    try:
+        strip = RecorderDossierStrip(rec)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{RecorderDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("recorder dossier render failed", exc_info=True)
+    # the record day, spelled out.
+    out.append(
+        f"<div style='margin-top:2px;color:#F6C66B;font-size:8.5pt;'>"
+        f"Record day: {rec_date} — ${rec.record.spend:,.2f}, "
+        f"{rec.record.tokens:,} tok, {rec.record.reqs} req.</div>")
+    # the streak DEFINITION spelled out — honest last-active-run wording.
+    if rec.streak_run > 0:
+        if rec.streak_is_ongoing_today:
+            streak_line = (f"Current run: {rec.streak_run} consecutive active day(s) "
+                           f"through today ({last_date}).")
+        else:
+            streak_line = (f"Last-active run: {rec.streak_run} consecutive active "
+                           f"day(s), ending {last_date} (no traffic since).")
+    else:
+        streak_line = "No active-day run yet."
+    out.append(
+        f"<div style='margin-top:1px;color:#9AA0AD;font-size:8pt;'>"
+        f"{html.escape(streak_line)}</div>")
+    out.append(
+        "<div style='margin-top:3px;color:#6B6150;font-size:7.5pt;'>"
+        "A run is consecutive calendar days with logged traffic; a gap day "
+        "resets it.</div>")
     return "".join(out)

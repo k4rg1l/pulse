@@ -41,6 +41,7 @@ from widgets import (
     build_autopsy_html, autopsy_accent_hex,
     ValueAssayWidget, build_assay_certificate_html, assay_accent_hex,
     ModelOfWeekBelt, build_week_dossier_html,
+    TokenRecorder, build_recorder_dossier_html,
 )
 import value_assay
 from nav_rail import NavRail
@@ -556,10 +557,19 @@ class Dashboard(QWidget):
             self._week_belt.set_logo_store(self._logo_store)
         insights_layout.addWidget(self._week_belt)
 
-        # NOTE (scaffold): #17 TokenRecorder / #18 TaskCourt addWidget here LATER,
-        # in this locked order (under the belt). Their set_locked()/set_data
-        # dispatch already lives in update_insights below (guarded by getattr) so
-        # wiring them is purely additive.
+        # #17 THE FLIGHT RECORDER — THIRD widget: the LIFETIME odometer + the
+        # record "black-box" day + the active-day runway streak. Mgmt-gated (rides
+        # fetch_insights -> board.recorder; update_insights below already routes
+        # board.recorder -> set_data and the locked path -> set_locked). It is THE
+        # Insights zone's count-up owner (the odometer roll); the warm brass lane
+        # is distinct from #16's trophy gold.
+        self._token_recorder = TokenRecorder(self)
+        self._token_recorder.recorder_clicked.connect(self._on_recorder_clicked)
+        insights_layout.addWidget(self._token_recorder)
+
+        # NOTE (scaffold): #18 TaskCourt addWidget here LATER (under the recorder).
+        # Its set_locked()/set_data dispatch already lives in update_insights below
+        # (guarded by getattr) so wiring it is purely additive.
 
         self._or_layout.addWidget(self._insights_container)
 
@@ -831,6 +841,37 @@ class Dashboard(QWidget):
         if not html_str or (mow is not None and mow.is_empty):
             return
         popup.set_accent("#E8C46A")          # championship gold
+        popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
+        self._popup_model_id = key
+
+    # ---- Wave 3 #17 THE FLIGHT RECORDER click-through ----
+
+    def _on_recorder_clicked(self, anchor_y):
+        """#17 THE FLIGHT RECORDER: the instrument was tapped -> render the flight
+        dossier (the daily-spend timeline + the lifetime totals + the record day +
+        the streak definition) to a pixmap and show it in the shared popup.
+        Mirrors _on_week_clicked (keyed 'insight:recorder', debounced via the
+        _popup_just_hidden_at<0.15 just-closed guard, toggle-hide). BRASS/AMBER
+        accent (the flight-recorder lane). No popup when there's no traffic."""
+        popup = self._ensure_provider_popup()
+        key = "insight:recorder"
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        w = getattr(self, "_token_recorder", None)
+        rec = getattr(w, "_rec", None) if w is not None else None
+        html_str = build_recorder_dossier_html(rec)
+        if not html_str or (rec is not None and rec.is_empty):
+            return
+        popup.set_accent("#E8A23D")          # brass/amber (decision E)
         popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
         self._popup_model_id = key
 

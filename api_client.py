@@ -2387,36 +2387,69 @@ class APIWorker(QObject):
         #16 THE TITLE BELT populates .week now: ONE weekly dims=[model] query over
         the last 21d (total_usage / tokens_total / request_count). This exact
         query is CACHED by its (metrics,dims,gran,start,end) key, so #18 will
-        re-hit it for FREE later. .recorder (#17) / .court (#18) stay None until
-        those features add their own queries."""
+        re-hit it for FREE later. #17 THE FLIGHT RECORDER populates .recorder: ONE
+        daily dims=[] full-range query over the last 60d — its dims=[] total is
+        ALSO REUSED by #18 for the user's token total (decision A). A failure in
+        EITHER build degrades ONLY its own slot to None (independent try/except),
+        so #17's failure never wipes #16's week and vice-versa. .court (#18) stays
+        None until that feature adds its query."""
         try:
+            import datetime
+            now = datetime.datetime.now(datetime.timezone.utc)
+
+            # ---- #16 THE TITLE BELT — weekly dims=[model] (reused by #18) ----
             week = None
             try:
-                import datetime
                 from model_of_week import build_model_of_week
-                end = datetime.datetime.now(datetime.timezone.utc)
-                start = end - datetime.timedelta(days=21)
-                # The #16 weekly query — reused by #18 from cache (decision A).
-                parsed = self.analytics.query(
+                w_start = now - datetime.timedelta(days=21)
+                parsed_w = self.analytics.query(
                     ["total_usage", "tokens_total", "request_count"],
-                    ["model"], "week", start.isoformat(), end.isoformat())
-                if parsed is not None:
-                    week = build_model_of_week(parsed.get("rows") or [])
+                    ["model"], "week", w_start.isoformat(), now.isoformat())
+                if parsed_w is not None:
+                    week = build_model_of_week(parsed_w.get("rows") or [])
             except Exception:
                 # #16 must never sink the whole board — degrade its slot to None.
                 log.exception("title belt build failed")
                 week = None
 
-            board = InsightsBoard(week=week)
+            # ---- #17 THE FLIGHT RECORDER — daily dims=[] full-range (reused #18)
+            recorder = None
+            try:
+                from token_recorder import build_token_recorder
+                r_start = now - datetime.timedelta(days=60)
+                # The #17 daily dims=[] query — its dims=[] total re-hits the cache
+                # for #18 for FREE (decision A). dims=[] -> bucket key date__day.
+                parsed_d = self.analytics.query(
+                    ["total_usage", "tokens_total", "request_count"],
+                    [], "day", r_start.isoformat(), now.isoformat())
+                if parsed_d is not None:
+                    recorder = build_token_recorder(parsed_d.get("rows") or [])
+            except Exception:
+                # #17 must never sink the whole board — degrade its slot to None.
+                log.exception("flight recorder build failed")
+                recorder = None
+
+            board = InsightsBoard(week=week, recorder=recorder)
+
+            # INFO lines so the live boot can confirm each slot landed. Magnitudes
+            # only (ids/shares/counts) — NEVER the management key.
             if week is not None and not week.is_empty:
-                # INFO line so the live boot can confirm the belt landed.
-                # Magnitudes only (a model id + share + week count) — never the key.
                 log.info("title belt: champion=%s share=%.0f%% week=%d",
                          week.champion_id, week.share_pct, week.week_count)
             elif week is not None:
                 log.info("title belt: no spend this week (empty)")
             else:
                 log.info("title belt: none (locked or query failed)")
+
+            if recorder is not None and not recorder.is_empty:
+                log.info("flight recorder: lifetime=%d tok, record=%s $%.2f, run=%d",
+                         recorder.lifetime_tokens, recorder.record.date,
+                         recorder.record.spend, recorder.streak_run)
+            elif recorder is not None:
+                log.info("flight recorder: no traffic logged yet (empty)")
+            else:
+                log.info("flight recorder: none (locked or query failed)")
+
             self.insights_ready.emit(board)
         except Exception:
             log.exception("insights worker crashed")
