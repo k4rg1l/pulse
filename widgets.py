@@ -28,6 +28,7 @@ import theme_controller
 
 log = logging.getLogger("pulse.widgets")
 _door_log = logging.getLogger("pulse.threshold")   # #5 door-resolution INFO line
+_waterline_log = logging.getLogger("pulse.waterline")  # #6 hidden-fee-classes INFO line
 
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1021,7 @@ class PinnedModelCard(QWidget):
     speed_clicked = Signal(str, QPointF)   # speed band clicked -> Time Slip dossier
     door_clicked = Signal(str, QPointF)    # #5 door band clicked -> Threshold dossier
     uptime_clicked = Signal(str, str, QPointF)  # (model_id, ep_ident, anchor) -> Vitals
+    fees_clicked = Signal(str, str, QPointF)  # #6 (model_id, ep_ident, anchor) -> Waterline
 
     # ---- THE PULSE (#3 — the 73h uptime cardiogram) geometry constants ----
     # A health-keyed heartbeat painted in the existing UPTIME_W column. Adds NO
@@ -1096,6 +1098,18 @@ class PinnedModelCard(QWidget):
         self._pulse_dip_xs = []          # list[float]
         self._pulse_has_outage = False
         self._pulse_avg = None
+        # #6 THE WATERLINE — the hidden-cost iceberg under each price. Per-row,
+        # ZERO height, ZERO column shift (lives in the price cell's sub-baseline
+        # slack). The fee CLASSES + submerged depth are resolved ONCE per ident
+        # in set_fees (mirroring _pulse_cache) so the paint hot path only fills
+        # cached rects (GC-disabled / allocation-free-paint invariant).
+        self._show_fees = True            # gated by settings.show_hidden_fees
+        self._waterline_depth = {}        # {ident: submerged fraction 0..1}
+        self._waterline_fee_classes = {}  # {ident: frozenset of class names}
+        self._waterline_buoy = {}         # {ident: bool} implicit-caching support
+        self._waterline_hits = []         # [(QRectF, ident, accent_hex)] clickable rows
+        self._waterline_buoy_rects = {}   # {ident: QRectF} recorded buoy ring (test introspection)
+        self._waterline_hover_ident = None  # price cell under the cursor (for the hand cursor)
         # Shimmer phase is shared by the Arena crest sweep AND the elite speed
         # comet; the one timer runs whenever EITHER band wants it.
         self._shimmer = 0.0
@@ -1231,6 +1245,72 @@ class PinnedModelCard(QWidget):
                 "threshold: %s SAVE %d%% green=%s (%s $%.3f/Mtok -> %s $%.3f/Mtok)",
                 self.model_id, d.save_pct, d.green, d.from_name, d.from_mtok,
                 d.cheaper_name, d.to_mtok)
+
+    # ---- #6 THE WATERLINE (the hidden-cost iceberg under each price) ----
+
+    def set_fees(self, model_endpoints=None):
+        """Resolve + CACHE the per-row hidden-fee CLASSES, submerged depth, and
+        implicit-caching buoy flag for every endpoint ONCE (mirroring the
+        _pulse_cache idiom), so the paint hot path only fills cached rects
+        (allocation-free / GC-disabled invariant). NEVER calls _update_height:
+        the waterline lives in the existing price cell's sub-baseline slack and
+        adds NO height, shifts NO column (decision F). When gated off (decision
+        E/SETTING_GATE), every dict is cleared so paint draws nothing.
+
+        `model_endpoints` is accepted for symmetry with set_endpoints/set_speed
+        but the data is read from self._endpoints (the SAME payload #5 uses, no
+        new fetch); pass it to seed before _endpoints is assigned if needed."""
+        from api_client import (hidden_fee_classes, hidden_fee_depth,
+                                 HIDDEN_MAX)
+        self._waterline_depth = {}
+        self._waterline_fee_classes = {}
+        self._waterline_buoy = {}
+        eps = (model_endpoints or self._endpoints)
+        eps = eps.endpoints if eps is not None else []
+        if not self._show_fees:
+            self.update()
+            return
+        for ep in eps:
+            ident = self._ep_ident(ep)
+            classes = hidden_fee_classes(ep)
+            depth = hidden_fee_depth(classes)
+            buoy = bool(ep.supports_implicit_caching)
+            # Cache even the empty/clean case (depth 0, no buoy) so the paint
+            # loop can read every row from the cache without re-resolving.
+            self._waterline_fee_classes[ident] = classes
+            self._waterline_depth[ident] = depth
+            self._waterline_buoy[ident] = buoy
+            if classes or buoy:
+                _waterline_log.info(
+                    "waterline: %s/%s classes={%s} depth=%d/%d implicit_cache=%s",
+                    self.model_id, ident,
+                    ",".join(sorted(classes)) if classes else "",
+                    len(classes), HIDDEN_MAX, buoy)
+        self.update()
+
+    def has_fees(self) -> bool:
+        """True iff any row carries a hidden-fee class or an implicit-cache buoy
+        (i.e. the waterline draws SOMETHING somewhere)."""
+        if not self._show_fees:
+            return False
+        return (any(self._waterline_fee_classes.values())
+                or any(self._waterline_buoy.values()))
+
+    def set_show_fees(self, show: bool):
+        """Settings gate (show_hidden_fees). When off the card paints no strip,
+        no ticks, no buoy and records no hit rects (decision E). Mirrors
+        set_show_door, but #6 adds no height so this never re-measures."""
+        show = bool(show)
+        if show == self._show_fees:
+            return
+        self._show_fees = show
+        self.set_fees()
+
+    def fees_accent(self, ident=None) -> str:
+        """The dossier border accent for the waterline — the surface steel-teal
+        (distinct from Speed cyan / the door amber / Pulse green)."""
+        from api_client import WATERLINE_SURFACE
+        return WATERLINE_SURFACE
 
     # ---- Shared left rail ----
     # The crest + speed band emblems sit in the SAME column as each provider
@@ -1464,6 +1544,10 @@ class PinnedModelCard(QWidget):
         # cheapest door from the endpoints we just received. set_door re-measures
         # height itself if the band toggled, so this is safe after _update_height.
         self._resolve_door_from_endpoints()
+        # #6 THE WATERLINE rides the SAME endpoints payload (the now-widened F1
+        # pricing_extra): resolve + cache the per-row hidden-fee classes. Adds no
+        # height, so this never re-measures.
+        self.set_fees()
         self.update()
 
     def provider_html(self) -> str:
@@ -1708,6 +1792,14 @@ class PinnedModelCard(QWidget):
                 return rect, ident
         return None, None
 
+    def _waterline_at(self, pos):
+        """(rect, ident) of the #6 price-cell waterline under `pos`, or
+        (None, None). Only rows with a hidden-fee class or buoy are present."""
+        for rect, ident, _color in self._waterline_hits:
+            if rect.contains(pos):
+                return rect, ident
+        return None, None
+
     def mouseMoveEvent(self, event):
         pos = event.position()
         icon_hover = self._icon_hit_rect.contains(pos)
@@ -1716,6 +1808,7 @@ class PinnedModelCard(QWidget):
         door_hover = self._door is not None and self._door_hit_rect.contains(pos)
         _, seal_ident = self._seal_at(pos)
         _, pulse_ident = self._pulse_at(pos)
+        _, wl_ident = self._waterline_at(pos)
         changed = False
         if icon_hover != self._icon_hover:
             self._icon_hover = icon_hover
@@ -1735,25 +1828,33 @@ class PinnedModelCard(QWidget):
         if pulse_ident != self._pulse_hover_ident:
             self._pulse_hover_ident = pulse_ident
             changed = True
-        if changed:
+        # The waterline is static (decision E defers the hover glint) — track the
+        # hovered price cell only to show the hand cursor; it triggers no repaint.
+        cursor_changed = (wl_ident != self._waterline_hover_ident)
+        self._waterline_hover_ident = wl_ident
+        if changed or cursor_changed:
             if (icon_hover or crest_hover or speed_hover or door_hover
-                    or seal_ident is not None or pulse_ident is not None):
+                    or seal_ident is not None or pulse_ident is not None
+                    or wl_ident is not None):
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
                 self.unsetCursor()
-            self.update()
+            if changed:
+                self.update()
 
     def leaveEvent(self, event):
         if (self._icon_hover or self._crest_hover or self._speed_hover
                 or self._door_hover
                 or self._seal_hover_ident is not None
-                or self._pulse_hover_ident is not None):
+                or self._pulse_hover_ident is not None
+                or self._waterline_hover_ident is not None):
             self._icon_hover = False
             self._crest_hover = False
             self._speed_hover = False
             self._door_hover = False
             self._seal_hover_ident = None
             self._pulse_hover_ident = None
+            self._waterline_hover_ident = None
             self.unsetCursor()
             self.update()
 
@@ -1762,9 +1863,10 @@ class PinnedModelCard(QWidget):
             return
         pos = event.position()
         seal_rect, seal_ident = self._seal_at(pos)
-        # The pulse hit-test is LAST so it can never steal a seal/band click —
-        # though the uptime column never geometrically overlaps them.
+        # The pulse + waterline hit-tests are LAST so they can never steal a
+        # seal/band click — though their columns never geometrically overlap them.
         pulse_rect, pulse_ident = self._pulse_at(pos)
+        wl_rect, wl_ident = self._waterline_at(pos)
         if self._icon_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._icon_hit_rect.center().toPoint())
             self.info_clicked.emit(self.model_id, QPointF(global_pos))
@@ -1783,6 +1885,9 @@ class PinnedModelCard(QWidget):
         elif pulse_ident is not None:
             global_pos = self.mapToGlobal(pulse_rect.center().toPoint())
             self.uptime_clicked.emit(self.model_id, pulse_ident, QPointF(global_pos))
+        elif wl_ident is not None:
+            global_pos = self.mapToGlobal(wl_rect.center().toPoint())
+            self.fees_clicked.emit(self.model_id, wl_ident, QPointF(global_pos))
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -1955,6 +2060,8 @@ class PinnedModelCard(QWidget):
 
         self._seal_hits = []
         self._pulse_hits = []
+        self._waterline_hits = []          # #6 clickable rows (depth>0 or buoy)
+        self._waterline_buoy_rects = {}    # #6 recorded buoy rings (test introspection)
         for ep in self._endpoints.endpoints:
             is_best = self._best is ep
             p_trust, grade = self._trust_for_ep(ep)
@@ -2045,9 +2152,105 @@ class PinnedModelCard(QWidget):
                 price_text,
             )
 
+            # #6 THE WATERLINE — the hidden-cost iceberg painted in the price
+            # cell's sub-baseline slack, right under the digits we just drew.
+            # Zero width, zero height, no column shift (decision F).
+            self._paint_waterline(painter, ep, y, price_right, PRICE_W,
+                                  price_text, is_best)
+
             y += self.ROW_H
 
         painter.end()
+
+    # ---- #6 THE WATERLINE rendering (allocation-light: fills cached classes) ----
+
+    def _paint_waterline(self, painter, ep, y, price_right, PRICE_W, price_text,
+                         is_best):
+        """Paint ONE row's iceberg waterline under its price + (far-left) the
+        implicit-caching buoy. Reads the per-ident classes/depth/buoy resolved
+        in set_fees. A CLEAN row (no classes, no buoy) draws NOTHING and records
+        no hit rect — silent honest degrade (decision D). Gate off → no-op."""
+        if not self._show_fees:
+            return
+        ident = self._ep_ident(ep)
+        classes = self._waterline_fee_classes.get(ident, frozenset())
+        depth = self._waterline_depth.get(ident, 0.0)
+        buoy = self._waterline_buoy.get(ident, False)
+        if not classes and not buoy:
+            return                          # clean row → nothing, not clickable
+
+        from api_client import (WATERLINE_SURFACE, WATERLINE_ABYSS,
+                                WATERLINE_EDGE, FEE_CLASS_ORDER)
+        painter.save()
+        # (1) MEASURE the price cell — the SAME VCenter math the price text used.
+        fm = QFontMetrics(Fonts.mono_small())
+        pw = fm.horizontalAdvance(price_text)
+        tx = price_right - pw               # text left edge (right-aligned)
+        # price_baseline = where the digits' baseline sits (AlignVCenter):
+        price_baseline = y + (self.ROW_H + fm.ascent() - fm.descent()) / 2.0
+        # Strip sits 2px BELOW the baseline, but is clamped into the row: never
+        # past the bottom edge, and — decision F — never ABOVE the baseline (so
+        # the sea-level line can't ride up into the digits even on a tight font).
+        floor_clamp = y + self.ROW_H - 0.5  # never paint past the row's bottom
+        strip_top = min(price_baseline + 2.0, floor_clamp - 3.0)
+        strip_top = max(strip_top, price_baseline)
+
+        if classes:
+            # (2) WATER FILL: the calm steel-teal sea the price floats on.
+            wl = QRectF(tx, strip_top, pw, 3.0)
+            surf = QColor(WATERLINE_SURFACE); surf.setAlpha(90)
+            sea = QPainterPath(); sea.addRoundedRect(wl, 1.5, 1.5)
+            painter.fillPath(sea, QBrush(surf))
+            # the SUBMERGED portion grows from the LEFT (deep end), pw*depth wide.
+            sub_w = max(0.0, pw * depth)
+            if sub_w > 0:
+                abyss = QColor(WATERLINE_ABYSS); abyss.setAlpha(160)
+                sub = QPainterPath()
+                sub.addRoundedRect(QRectF(tx, wl.top(), sub_w, 3.0), 1.5, 1.5)
+                painter.fillPath(sub, QBrush(abyss))
+            # (3) WATERLINE EDGE: a 1px pale-aqua sea-level line on top.
+            edge = QColor(WATERLINE_EDGE); edge.setAlpha(200)
+            painter.setPen(QPen(edge, 1))
+            painter.drawLine(QPointF(tx, wl.top()), QPointF(tx + pw, wl.top()))
+            # (4) FEE TICKS: one 2px notch per present class, hanging below the
+            # strip — short ticks = submerged mass. Evenly spread across pw.
+            tick = QColor(WATERLINE_ABYSS); tick.setAlpha(150)
+            painter.setPen(QPen(tick, 2))
+            present = [c for c in FEE_CLASS_ORDER if c in classes]
+            nticks = len(present)
+            if nticks:
+                tick_top = wl.bottom()
+                tick_h = 3.0
+                tick_bot = min(tick_top + tick_h, floor_clamp)
+                # spread the ticks across the strip width (left → right)
+                for k in range(nticks):
+                    frac = (k + 0.5) / nticks
+                    tx_k = tx + frac * pw
+                    painter.drawLine(QPointF(tx_k, tick_top),
+                                     QPointF(tx_k, tick_bot))
+
+        # (5) BUOY: a hollow abyss-teal ring at the far-left margin marking
+        # implicit-caching support. Default x=PAD_X-4 centered on the row; on a
+        # BEST row it shifts +4px DOWN to clear the gold accent bar (decision G).
+        if buoy:
+            d = 5.0
+            cx = self.PAD_X - 4 + d / 2.0
+            cy = y + self.ROW_H / 2.0
+            if is_best:
+                cy += 4.0                   # clear the gold best-accent bar
+            ring = QColor(WATERLINE_ABYSS); ring.setAlpha(200)
+            painter.setPen(QPen(ring, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            buoy_rect = QRectF(cx - d / 2.0, cy - d / 2.0, d, d)
+            painter.drawEllipse(buoy_rect)
+            self._waterline_buoy_rects[ident] = QRectF(buoy_rect)
+
+        painter.restore()
+        # (6) HIT RECT — only when there's something to decode (depth>0 or buoy).
+        # The whole price cell is the click target (mirrors _pulse_hits).
+        self._waterline_hits.append(
+            (QRectF(price_right - PRICE_W, y, PRICE_W, self.ROW_H),
+             ident, WATERLINE_SURFACE))
 
     # ---- THE PULSE rendering (allocation-free: strokes cached geometry) ----
 
@@ -2932,6 +3135,137 @@ class PinnedModelCard(QWidget):
         if d.to_throughput is None and d.to_latency is None:
             return "Cheaper — speed for this provider isn't reported yet."
         return "Cheaper, with comparable speed."
+
+    # ---- #6 THE WATERLINE dossier (the hidden-cost decode) ----
+
+    def fees_html(self, ident) -> str:
+        """The 'WHAT THE STICKER PRICE HIDES' fine-print dossier for one provider
+        row: the listed prompt/completion price (the visible tip), then one line
+        per hidden fee actually present (value in $/Mtok or $/call + a ratio-vs-
+        prompt phrase), and an implicit-caching ON/OFF footer. Empty string for a
+        clean row (no hidden fees AND no implicit caching) — nothing to decode.
+        Every API-sourced string is HTML-escaped (mirrors door_html/speed_html)."""
+        ep = self._ep_by_ident(ident)
+        if ep is None:
+            return ""
+        from api_client import hidden_fee_classes, HIDDEN_MAX, WATERLINE_SURFACE
+        classes = hidden_fee_classes(ep)
+        buoy = bool(ep.supports_implicit_caching)
+        if not classes and not buoy:
+            return ""                       # clean row — the strip drew nothing
+
+        accent = WATERLINE_SURFACE
+        name = html.escape(self._display_model_name())
+        prov = html.escape(self._provider_label(ep))
+        pm = ep.price_per_mtok_prompt       # $/Mtok prompt
+        cm = ep.price_per_mtok_completion   # $/Mtok completion
+
+        def mtok(per_token):                # a $/token fee → $/Mtok
+            return per_token * 1_000_000
+
+        def mtok_fmt(v):                     # a $/Mtok value → trimmed string
+            if v >= 1:
+                return f"{v:,.2f}"
+            s = f"{v:.4f}".rstrip("0").rstrip(".")
+            return s if s else "0"
+
+        def call_fmt(v):                     # a $/call value → trimmed string
+            s = f"{v:.4f}".rstrip("0").rstrip(".")
+            return s if s else "0"
+
+        def ratio_to(v_mtok, base_mtok, base_label):
+            if not base_mtok or base_mtok <= 0:
+                return ""
+            r = v_mtok / base_mtok
+            if r >= 1:
+                rs = f"{r:.2f}".rstrip("0").rstrip(".")
+            else:
+                rs = f"{r:.2g}"
+            return f"{rs}× {base_label}"
+
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+        out.append(
+            f"<div style='color:{accent};font-size:9pt;font-weight:bold;"
+            f"margin-bottom:2px;'>&#9656; WHAT THE STICKER PRICE HIDES "
+            f"&nbsp;·&nbsp; {prov}</div>")
+        # the visible tip
+        out.append(
+            f"<div style='color:#c8c8e0;font-size:8.5pt;margin-bottom:2px;'>"
+            f"Listed: <b style='color:#f0f0ff;'>${mtok_fmt(pm)}</b> in / "
+            f"<b style='color:#f0f0ff;'>${mtok_fmt(cm)}</b> out per Mtok "
+            f"<span style='color:#64648c;'>— that's the tip.</span></div>")
+        out.append(
+            f"<div style='color:#64648c;font-size:8pt;margin-bottom:8px;'>"
+            f"{len(classes)} hidden fee class{'' if len(classes) == 1 else 'es'} "
+            f"of {HIDDEN_MAX} below the waterline · live from openrouter.ai</div>")
+
+        # One row per hidden fee actually present (value>0). Each row: name,
+        # value, ratio-vs-prompt/completion phrase.
+        def row(label, value_str, note):
+            return (
+                f"<tr>"
+                f"<td style='padding:2px 12px 2px 0;color:{accent};font-weight:bold;"
+                f"white-space:nowrap;'>{label}</td>"
+                f"<td style='padding:2px 10px 2px 0;color:#f0f0ff;font-weight:bold;"
+                f"white-space:nowrap;' align='right'>{value_str}</td>"
+                f"<td style='padding:2px 0;color:#a0a0c8;white-space:nowrap;'>{note}</td>"
+                f"</tr>")
+
+        rows = []
+        # cache read / write — each its own line (the class collapses for the
+        # strip, but the dossier shows both member fees when present).
+        if ep.has_fee("input_cache_read"):
+            v = mtok(ep.fee("input_cache_read"))
+            rows.append(row("cache read", f"${mtok_fmt(v)}/Mtok",
+                            ratio_to(v, pm, "prompt")))
+        if ep.has_fee("input_cache_write"):
+            v = mtok(ep.fee("input_cache_write"))
+            rows.append(row("cache write", f"${mtok_fmt(v)}/Mtok",
+                            ratio_to(v, pm, "prompt")))
+        if ep.has_fee("web_search"):
+            # web_search is $/call, NOT $/token — show it as-is.
+            v = ep.fee("web_search")
+            rows.append(row("web search", f"${call_fmt(v)}/call",
+                            "billed per search request"))
+        if ep.has_fee("internal_reasoning"):
+            v = mtok(ep.fee("internal_reasoning"))
+            note = ratio_to(v, cm, "completion")
+            note = (note + " · billed on tokens you never see") if note else \
+                "billed on tokens you never see"
+            rows.append(row("reasoning", f"${mtok_fmt(v)}/Mtok", note))
+        for key, lbl in (("image", "image"), ("audio", "audio"),
+                         ("input_audio_cache", "audio cache")):
+            if ep.has_fee(key):
+                v = mtok(ep.fee(key))
+                rows.append(row(lbl, f"${mtok_fmt(v)}/Mtok",
+                                ratio_to(v, pm, "prompt")))
+
+        if rows:
+            out.append(
+                "<table cellspacing='0' style='border-spacing:0;margin-bottom:6px;'>"
+                "<tr><td></td>"
+                "<td style='color:#64648c;font-size:8pt;' align='right'>rate</td>"
+                "<td style='color:#64648c;font-size:8pt;padding-left:0;'>&nbsp;vs listed</td></tr>"
+                + "".join(rows)
+                + "</table>")
+
+        # implicit-caching footer (decision C — buoy/footer only when truthy).
+        if buoy:
+            out.append(
+                f"<div style='margin-top:4px;color:{accent};font-size:8.5pt;'>"
+                f"&#9711; implicit caching <b>ON</b> "
+                f"<span style='color:#a0a0c8;'>— repeated prompts are auto-cached "
+                f"at the cache-read rate, no code change.</span></div>")
+        else:
+            out.append(
+                "<div style='margin-top:4px;color:#64648c;font-size:8.5pt;'>"
+                "&#9711; implicit caching <b>OFF</b> "
+                "— you pay full prompt rate every call unless you cache explicitly.</div>")
+        out.append(
+            "<div style='margin-top:6px;color:#64648c;font-size:8pt;'>"
+            "The waterline shows how much of the true cost sits below the listed "
+            "price · deeper = more hidden fee classes</div>")
+        return "".join(out)
 
     # ---- THE PULSE dossier (#3 — the painted 73h "Vitals" strip + verdict) ----
 

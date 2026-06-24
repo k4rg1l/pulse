@@ -394,6 +394,69 @@ def resolve_door(endpoints, best) -> Optional[DoorResolution]:
 
 
 # ---------------------------------------------------------------------------
+#  #6 THE WATERLINE — the hidden-cost iceberg (pure layer)
+#
+#  The listed prompt/completion price is the visible tip; the submerged mass is
+#  every OTHER fee class the public route carries but the row can't show. We
+#  COLLAPSE the sparse pricing_extra keys into FOUR fee CLASSES (decision A) so
+#  the depth caps at a clean denominator, and count a class ONLY when one of its
+#  member fees is present with value > 0 (decision B — key-presence alone, e.g.
+#  a zero-padded key or discount==0, must NOT count).
+#
+#    cache     = input_cache_read OR input_cache_write   (> 0)
+#    search    = web_search                              (> 0)   ($/call)
+#    reasoning = internal_reasoning                      (> 0)
+#    media     = image OR audio OR input_audio_cache     (> 0)
+#
+#  hidden_count = |classes present|;  depth = hidden_count / HIDDEN_MAX. The
+#  denominator is HIDDEN_MAX=5 (NOT 4) on purpose: max real depth is 4/5, an
+#  intentional headroom so a fully-loaded row never reads as "100% submerged".
+#  A clean row (only prompt+completion) yields an EMPTY set and depth 0 — the
+#  card then draws nothing (silent honest degrade, decision D). `discount` is
+#  deliberately NOT a fee class (it's a price CUT, not a hidden charge).
+# ---------------------------------------------------------------------------
+
+# Marine "deep water" lane (steel surface / abyss submerged / pale-aqua edge /
+# hollow buoy). Deliberately darker + greener than Speed's cyan #00d2ff, not
+# the Pulse green, never red. #6 owns these.
+WATERLINE_SURFACE = "#2f7d8a"   # the calm sea the price floats on
+WATERLINE_ABYSS = "#0e4d5c"     # submerged mass + ticks + buoy ring
+WATERLINE_EDGE = "#7fd6e0"      # 1px sea-level line
+
+HIDDEN_MAX = 5                  # depth denominator (decision A — /5 headroom)
+
+# class -> the member fee keys; a class applies iff ANY member has value > 0.
+_FEE_CLASS_MEMBERS = {
+    "cache": ("input_cache_read", "input_cache_write"),
+    "search": ("web_search",),
+    "reasoning": ("internal_reasoning",),
+    "media": ("image", "audio", "input_audio_cache"),
+}
+# A stable display order for the dossier / ticks (left → right).
+FEE_CLASS_ORDER = ("cache", "search", "reasoning", "media")
+
+
+def hidden_fee_classes(ep) -> frozenset:
+    """The set of hidden-fee CLASSES an EndpointInfo carries (decision A/B).
+
+    Pure over ep.has_fee() (which is True only for a present key with value>0),
+    so an absent key, an explicit-zero fee, and discount all correctly DON'T
+    count. Returns a frozenset of class names ⊆ {'cache','search','reasoning',
+    'media'} — empty for a clean prompt+completion-only row."""
+    out = set()
+    for cls, members in _FEE_CLASS_MEMBERS.items():
+        if any(ep.has_fee(k) for k in members):
+            out.add(cls)
+    return frozenset(out)
+
+
+def hidden_fee_depth(classes) -> float:
+    """The submerged fraction for a set of fee classes: |classes| / HIDDEN_MAX.
+    0.0 for a clean row; the live max is 4/5=0.8 (decision A headroom)."""
+    return len(classes) / HIDDEN_MAX
+
+
+# ---------------------------------------------------------------------------
 #  The Arena — model competitive standings from /api/v1/benchmarks
 #
 #  DesignArena rates models by ELO + head-to-head win-rate across creative-

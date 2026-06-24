@@ -175,6 +175,9 @@ class Dashboard(QWidget):
         # #5 THE THRESHOLD gate (settings.show_door). Cached so cards created
         # later inherit it; #5 has no fetch, so this is its only gate point.
         self._show_door = bool(getattr(settings, "show_door", True)) if settings else True
+        # #6 THE WATERLINE gate (settings.show_hidden_fees). Same idiom: #6 has no
+        # fetch (rides the endpoints payload), so this is its only gate point.
+        self._show_fees = bool(getattr(settings, "show_hidden_fees", True)) if settings else True
         # Speed Percentile (#4): the fleet performance board + the slug→permaslug
         # map needed to look a pinned model up in it. Both distributed to cards.
         self._speed_board = None
@@ -499,7 +502,9 @@ class Dashboard(QWidget):
                 card.speed_clicked.connect(self._on_speed_clicked)
                 card.door_clicked.connect(self._on_door_clicked)
                 card.uptime_clicked.connect(self._on_uptime_clicked)
+                card.fees_clicked.connect(self._on_fees_clicked)
                 card.set_show_door(self._show_door)   # #5 settings gate
+                card.set_show_fees(self._show_fees)   # #6 settings gate
                 if self._logo_store is not None:
                     card.set_logo_store(self._logo_store)
                 self._pinned_cards[mid] = card
@@ -566,6 +571,16 @@ class Dashboard(QWidget):
         self._show_door = bool(show)
         for card in self._pinned_cards.values():
             card.set_show_door(self._show_door)
+
+    # ---- #6 THE WATERLINE (the hidden-fee gate) ----
+
+    def set_show_fees(self, show: bool):
+        """Apply the settings.show_hidden_fees gate to every pinned card (and
+        remember it for cards created later). #6 carries no fetch, so toggling
+        this is how the waterline is shown/hidden."""
+        self._show_fees = bool(show)
+        for card in self._pinned_cards.values():
+            card.set_show_fees(self._show_fees)
 
     # ---- Speed Percentile (#4) ----
 
@@ -953,6 +968,34 @@ class Dashboard(QWidget):
         anchor_y = int(global_anchor.y())
         self._uptime_popup_ctx = (model_id, ep_ident, anchor_y)
         popup.set_accent(card.uptime_accent(ep_ident))
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
+        self._popup_model_id = key
+
+    def _on_fees_clicked(self, model_id, ep_ident, global_anchor):
+        """#6 THE WATERLINE: a row's price-cell iceberg was clicked -> show the
+        'WHAT THE STICKER PRICE HIDES' decode dossier. Mirrors _on_uptime_clicked
+        exactly (per-row, keyed by ident, debounced toggle-hide)."""
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        html_str = card.fees_html(ep_ident)
+        if not html_str:
+            return
+        popup = self._ensure_provider_popup()
+        key = "fees:" + model_id + ":" + ep_ident
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        anchor_y = int(global_anchor.y())
+        popup.set_accent(card.fees_accent(ep_ident))
         popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 

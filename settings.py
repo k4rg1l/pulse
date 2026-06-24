@@ -69,6 +69,7 @@ class Settings:
     show_speed: bool = True             # show the fleet-relative Speed Percentile band on pinned cards
     show_door: bool = True              # show #5 THE THRESHOLD — the "cheapest door" band on pinned cards
     show_uptime: bool = True            # show THE PULSE — the 73h uptime cardiogram on provider rows
+    show_hidden_fees: bool = True       # show #6 THE WATERLINE — the hidden-cost iceberg under each price
 
     # -- UI overhaul (nav-rail command center) --
     default_source: str = "openrouter"  # which tab opens when the dashboard is shown

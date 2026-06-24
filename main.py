@@ -206,6 +206,11 @@ class OpenRouterPulse(QObject):
         # when endpoints land). The only thing to wire is the show_door gate.
         self.dashboard.set_show_door(getattr(self.settings, "show_door", True))
 
+        # #6 THE WATERLINE (hidden-cost iceberg): also NO new fetch — it rides
+        # the SAME endpoints payload (the widened F1 pricing_extra). Just wire
+        # the show_hidden_fees gate (each card resolves its own fees on set).
+        self.dashboard.set_show_fees(getattr(self.settings, "show_hidden_fees", True))
+
         # THE PULSE (#3): per-endpoint 73h uptime cardiogram. PER-ENDPOINT, so
         # this fans out — fetch sparingly (~20 min, mirroring the speed cadence)
         # and cache hard (cards keep last-good). No-auth. Needs the permaslug
@@ -260,6 +265,9 @@ class OpenRouterPulse(QObject):
         # takes effect on manual refresh (the per-model door re-resolves when
         # endpoints land via _fetch_all_endpoints above).
         self.dashboard.set_show_door(getattr(self.settings, "show_door", True))
+        # #6 THE WATERLINE: likewise no fetch; re-apply the gate (the per-row
+        # fees re-resolve when endpoints land via _fetch_all_endpoints above).
+        self.dashboard.set_show_fees(getattr(self.settings, "show_hidden_fees", True))
         if getattr(self.settings, "show_uptime", True):
             self._fetch_all_uptime()
         # Peer sources (Claude/GPU/System) too — a manual refresh should
