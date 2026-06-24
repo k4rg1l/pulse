@@ -111,6 +111,8 @@ These exist because we hit them the hard way. Breaking any one corrupts behavior
 - `pricing.prompt` and `pricing.completion` in `/api/v1/models` are STRINGS. Convert with `float()`.
 - `/api/v1/models/{slug}/endpoints` returns `latency_last_30m` as a dict `{p50, p75, p90, p99}`, not a single number. Extract `p50` for the headline metric. Same shape for `throughput_last_30m`. See `EndpointInfo` + `_percentile` in `api_client.py`.
 - The dashboard URL field on each provider in `/api/v1/providers` is mostly unused by us today, but the data is there if a future feature wants per-provider status-page deep links.
+- **The no-auth frontend website API (`/api/frontend/*`, the F2 client in `frontend_client.py`) bot-blocks the default `python-requests` User-Agent** — the connection is *reset* (WinError 10054), not 403'd. A fresh `requests.Session` already carries a `python-requests/x` UA, so `headers.setdefault("User-Agent", …)` does **nothing**. You must assign it directly (`session.headers["User-Agent"] = <browser UA>`). This bug is invisible to parser unit tests (which use fixtures) — only a live boot reveals it; `tests/test_frontend_client.py::test_frontend_client_overrides_default_user_agent` locks it.
+- **Frontend `stats/*` endpoints want the versioned permaslug, not the public slug** (`anthropic/claude-opus-4.8` 404s; `anthropic/claude-4.8-opus-20260528` works). Resolve via `catalog/models` (`PermaslugResolver`). `stats/uptime-hourly` wants `id=<endpoint-UUID>` from `stats/endpoint`, not a permaslug. The API drifts — re-run `tools/or_probe_frontend.py` before building on these.
 
 ## Sources (the agnostic architecture)
 
