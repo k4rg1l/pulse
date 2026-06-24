@@ -10,14 +10,16 @@
     3. Runs PyInstaller against pulse.spec.
     4. Reports the resulting exe (and optionally launches it).
 
-.PARAMETER Run
-    Launch the freshly built dist\Pulse.exe when the build succeeds.
+.PARAMETER NoRun
+    Build only — do NOT launch dist\Pulse.exe afterward. By default the script
+    relaunches the freshly built exe (a rebuild is usually a "refresh the running
+    app" action), so omit this unless you just want the binary on disk.
 
 .EXAMPLE
-    .\tools\rebuild.ps1
-    .\tools\rebuild.ps1 -Run
+    pulse-rebuild           # kill + clean + rebuild + launch the fresh exe
+    pulse-rebuild -NoRun    # ... build only, leave it stopped
 #>
-param([switch]$Run)
+param([switch]$NoRun)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -57,7 +59,7 @@ if (-not (Test-Path $exe)) {
 $sizeMb = [Math]::Round((Get-Item $exe).Length / 1MB, 1)
 Write-Host "==> Built  $exe  ($sizeMb MB)" -ForegroundColor Green
 
-if ($Run) {
+if (-not $NoRun) {
     Write-Host '==> Launching...' -ForegroundColor Cyan
     Start-Process $exe
 }
