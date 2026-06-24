@@ -1,0 +1,74 @@
+{
+  "data": [
+    {
+      "model_permaslug": "anthropic/claude-4.8-opus-20260528",
+      "variant": "standard",
+      "variant_permaslug": "anthropic/claude-4.8-opus-20260528",
+      "date": "2026-06-23 00:00:00",
+      "count": 25340934,
+      "change": 0.4253374838839868,
+      "total_prompt_tokens": 9000000000,
+      "total_completion_tokens": 400000000
+    },
+    {
+      "model_permaslug": "z-ai/glm-5.2-20260616",
+      "variant": "standard",
+      "variant_permaslug": "z-ai/glm-5.2-20260616",
+      "date": "2026-06-23 00:00:00",
+      "count": 38747555,
+      "change": 56.651346410311056,
+      "total_prompt_tokens": 12000000000,
+      "total_completion_tokens": 800000000
+    },
+    {
+      "model_permaslug": "poolside/laguna-xs.2-20260421",
+      "variant": "standard",
+      "variant_permaslug": "poolside/laguna-xs.2-20260421",
+      "date": "2026-06-23 00:00:00",
+      "count": 512345,
+      "change": 247.5472116814958,
+      "total_prompt_tokens": 90000000,
+      "total_completion_tokens": 4000000
+    },
+    {
+      "model_permaslug": "nvidia/nemotron-nano-9b-v2",
+      "variant": "standard",
+      "variant_permaslug": "nvidia/nemotron-nano-9b-v2",
+      "date": "2026-06-23 00:00:00",
+      "count": 88210,
+      "change": -0.975319580248895,
+      "total_prompt_tokens": 30000000,
+      "total_completion_tokens": 1500000
+    },
+    {
+      "model_permaslug": "anthropic/claude-5-fable-20260609",
+      "variant": "standard",
+      "variant_permaslug": "anthropic/claude-5-fable-20260609",
+      "date": "2026-06-23 00:00:00",
+      "count": 4021,
+      "change": -1,
+      "total_prompt_tokens": 1200000,
+      "total_completion_tokens": 60000
+    },
+    {
+      "model_permaslug": "meta-llama/llama-3.3-70b-instruct",
+      "variant": "standard",
+      "variant_permaslug": "meta-llama/llama-3.3-70b-instruct",
+      "date": "2026-06-23 00:00:00",
+      "count": 6620114,
+      "change": 0.012,
+      "total_prompt_tokens": 2000000000,
+      "total_completion_tokens": 100000000
+    },
+    {
+      "model_permaslug": "cohere/north-mini-code-20260617",
+      "variant": "free",
+      "variant_permaslug": "cohere/north-mini-code-20260617:free",
+      "date": "2026-06-23 00:00:00",
+      "count": 1172216,
+      "change": null,
+      "total_prompt_tokens": 1,
+      "total_completion_tokens": 1
+    }
+  ]
+}

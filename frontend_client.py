@@ -548,6 +548,66 @@ def parse_performance(rows: list) -> SpeedBoard:
 
 
 # ---------------------------------------------------------------------------
+#  Week-over-week request momentum  (from /api/frontend/v1/rankings/models)
+#  — feature #7 "THE TAPE": a per-model trending signal. Each row carries a
+#  ``change`` FLOAT fraction (week-over-week request-volume delta): -1.0 = -100%
+#  (dying), 0.50 = +50% riser, and explosive new entrants run to 247 / 727
+#  (i.e. +24700%). 33/424 live rows lack a change → None (no glyph). Keyed by
+#  the VERSIONED permaslug (``model_permaslug``), so the card resolves a pinned
+#  model_id → permaslug via PermaslugResolver before looking it up here.
+# ---------------------------------------------------------------------------
+class TrendBoard:
+    """Week-over-week request-momentum map: ``{permaslug: change_float|None}``.
+    A row whose ``change`` is null lands as ``None`` so the card paints nothing
+    (silent-degrade), distinct from a model that simply isn't ranked (a KeyError
+    → :meth:`change` returns None too)."""
+
+    def __init__(self, by_perma: dict):
+        self._by_perma = dict(by_perma)
+
+    def __len__(self):
+        return len(self._by_perma)
+
+    def change(self, permaslug):
+        """The week-over-week change fraction for a permaslug, or None when the
+        model isn't ranked OR its row carried no change value. Both miss-cases
+        collapse to None so the caller has ONE silent-degrade path."""
+        if not permaslug:
+            return None
+        return self._by_perma.get(permaslug)
+
+    def as_map(self) -> dict:
+        return dict(self._by_perma)
+
+
+def parse_rankings_models(rows: list) -> TrendBoard:
+    """Build a :class:`TrendBoard` from ``rankings/models`` rows. Pure.
+
+    Rows are keyed by ``model_permaslug`` (NOT ``slug``/``id`` — those are null
+    on this endpoint, re-verified live 2026-06-24). ``change`` is a float
+    fraction; a missing/null/non-numeric change is retained as the key mapping
+    to None (33/424 rows live), so the card can tell "ranked but no delta" from
+    "absent from the board"."""
+    def _f(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    by_perma = {}
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        perma = r.get("model_permaslug") or r.get("slug") or r.get("id")
+        if not perma:
+            continue
+        # Last writer wins on a permaslug collision (e.g. a :free variant row
+        # sharing a base permaslug); the standard variant is listed first live.
+        by_perma.setdefault(perma, _f(r.get("change")))
+    return TrendBoard(by_perma)
+
+
+# ---------------------------------------------------------------------------
 #  Per-provider endpoint refs + uptime history
 #  (from /api/frontend/v1/stats/endpoint and /stats/uptime-hourly)
 # ---------------------------------------------------------------------------
@@ -687,6 +747,17 @@ class FrontendClient:
             return parse_performance(data)
         except Exception:
             log.warning("rankings/performance fetch failed", exc_info=True)
+            return None
+
+    def get_rankings_models(self) -> Optional[TrendBoard]:
+        """THE TAPE (#7): the no-auth week-over-week request-momentum board
+        (~191KB, keyed by permaslug). Returns None on failure so cards keep
+        their last-good tape."""
+        try:
+            data = self._get_json("/api/frontend/v1/rankings/models").get("data", [])
+            return parse_rankings_models(data)
+        except Exception:
+            log.warning("rankings/models fetch failed", exc_info=True)
             return None
 
     def get_endpoint_refs(self, permaslug: str, variant: str = "standard") -> list:

@@ -182,6 +182,9 @@ class Dashboard(QWidget):
         # map needed to look a pinned model up in it. Both distributed to cards.
         self._speed_board = None
         self._permaslug_resolver = None
+        # #7 THE TAPE: the week-over-week request-momentum board (TrendBoard),
+        # permaslug-keyed; resolved per pinned card. Kept last-good.
+        self._trend_board = None
         # THE PULSE (#3): per-model {ep_ident: UptimeHistory}, kept last-good so a
         # transient fetch failure never blanks a card's cardiogram.
         self._uptime_by_model = {}
@@ -500,6 +503,7 @@ class Dashboard(QWidget):
                 card.arena_clicked.connect(self._on_arena_clicked)
                 card.trust_clicked.connect(self._on_trust_clicked)
                 card.speed_clicked.connect(self._on_speed_clicked)
+                card.trend_clicked.connect(self._on_trend_clicked)
                 card.door_clicked.connect(self._on_door_clicked)
                 card.uptime_clicked.connect(self._on_uptime_clicked)
                 card.fees_clicked.connect(self._on_fees_clicked)
@@ -530,6 +534,7 @@ class Dashboard(QWidget):
         self._distribute_benchmarks()
         self._distribute_provider_trust()
         self._distribute_speed()
+        self._distribute_trend()
         self._distribute_uptime()
 
     def update_benchmarks(self, board):
@@ -592,10 +597,13 @@ class Dashboard(QWidget):
         self._distribute_speed()
 
     def update_permaslug_resolver(self, resolver):
-        """Worker fetched the slug↔permaslug map (or None)."""
+        """Worker fetched the slug↔permaslug map (or None). Shared by Speed AND
+        #7 THE TAPE (both look pinned models up by permaslug), so re-distribute
+        both when it lands."""
         if resolver is not None:
             self._permaslug_resolver = resolver
         self._distribute_speed()
+        self._distribute_trend()
 
     def _distribute_speed(self):
         """Resolve each pinned model's public slug → permaslug, look it up in the
@@ -609,6 +617,34 @@ class Dashboard(QWidget):
             perma = resolver.permaslug(mid)
             standing = board.standing(perma) if perma else None
             card.set_speed(standing)
+
+    # ---- #7 THE TAPE (week-over-week request momentum) ----
+
+    def update_trend(self, board):
+        """Worker fetched the rankings/models momentum board (or None). Cards
+        keep their last-good tape if board is None."""
+        if board is not None:
+            self._trend_board = board
+        self._distribute_trend()
+
+    def _distribute_trend(self):
+        """Resolve each pinned model's public slug → permaslug, read its change
+        from the board, and hand the card the change float (or None). A
+        resolver-miss OR a row-miss → None → silent no-op on the card. Needs
+        BOTH the board and the resolver."""
+        board = self._trend_board
+        resolver = self._permaslug_resolver
+        if board is None or resolver is None:
+            return
+        for mid, card in self._pinned_cards.items():
+            perma = resolver.permaslug(mid)
+            change = board.change(perma) if perma else None
+            card.set_trend(change)
+            if change is not None:
+                # A single greppable INFO line on the dedicated openrouter logger
+                # so the live-boot check has something deterministic to assert.
+                logging.getLogger("pulse.openrouter").info(
+                    "trend: %s change=%s stamp=%s", mid, change, card._trend_stamp)
 
     # ---- THE PULSE (#3 — per-endpoint 73h uptime) ----
 
@@ -881,6 +917,32 @@ class Dashboard(QWidget):
         popup.set_accent(card.speed_accent())
         popup.show_beside(
             card.speed_html(),
+            self._dashboard_global_rect(),
+            int(global_anchor.y()),
+        )
+        self._popup_model_id = key
+
+    def _on_trend_clicked(self, model_id, global_anchor):
+        """#7 THE TAPE was clicked -> show the week-over-week momentum dossier."""
+        card = self._pinned_cards.get(model_id)
+        if card is None or not card.has_trend():
+            return
+        popup = self._ensure_provider_popup()
+        key = "trend:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        popup.set_accent(card.trend_accent())
+        popup.show_beside(
+            card.trend_html(),
             self._dashboard_global_rect(),
             int(global_anchor.y()),
         )

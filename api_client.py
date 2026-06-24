@@ -822,6 +822,7 @@ class APIWorker(QObject):
     benchmarks_ready = Signal(object)       # BenchmarkBoard | None
     provider_trust_ready = Signal(object)   # ProviderTrustBook | None  (no-auth)
     speed_board_ready = Signal(object)      # SpeedBoard | None  (no-auth, #4)
+    trend_ready = Signal(object)            # TrendBoard | None  (no-auth, #7 THE TAPE)
     permaslug_resolver_ready = Signal(object)  # PermaslugResolver | None (no-auth)
     uptime_ready = Signal(str, object)      # (model_id, {ep_ident: UptimeHistory}) (no-auth, #3)
     logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
@@ -910,6 +911,18 @@ class APIWorker(QObject):
         except Exception:
             log.exception("speed board worker crashed")
             self.speed_board_ready.emit(None)
+
+    @Slot()
+    def fetch_trend(self):
+        """THE TAPE (#7): fetch the no-auth rankings/models week-over-week
+        momentum board (~191KB, permaslug-keyed). Always emits (None on failure)
+        so cards keep their last-good tape."""
+        try:
+            board = self.frontend.get_rankings_models()
+            self.trend_ready.emit(board)
+        except Exception:
+            log.exception("trend board worker crashed")
+            self.trend_ready.emit(None)
 
     @Slot()
     def fetch_permaslug_resolver(self):

@@ -59,6 +59,7 @@ class FetchTrigger(QObject):
     fetch_benchmarks = Signal()     # Arena standings (slow cadence)
     fetch_provider_trust = Signal() # provider privacy/trust posture (slow, no-auth)
     fetch_speed_board = Signal()    # rankings/performance fleet (slow, no-auth, #4)
+    fetch_trend = Signal()          # rankings/models WoW momentum (slow, no-auth, #7)
     fetch_permaslug_resolver = Signal()  # catalog slug↔permaslug map (slow, no-auth)
     fetch_uptime = Signal(str, str)  # (model_id, permaslug) — per-endpoint 73h uptime (#3)
     fetch_logo = Signal(str, str)   # (slug, url) — one provider logo, on demand
@@ -112,6 +113,7 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_benchmarks.connect(self.api_worker.fetch_benchmarks)
         self.trigger.fetch_provider_trust.connect(self.api_worker.fetch_provider_trust)
         self.trigger.fetch_speed_board.connect(self.api_worker.fetch_speed_board)
+        self.trigger.fetch_trend.connect(self.api_worker.fetch_trend)
         self.trigger.fetch_permaslug_resolver.connect(self.api_worker.fetch_permaslug_resolver)
         self.trigger.fetch_uptime.connect(self.api_worker.fetch_uptime)
         self.trigger.fetch_logo.connect(self.api_worker.fetch_logo)
@@ -121,6 +123,7 @@ class OpenRouterPulse(QObject):
         self.api_worker.benchmarks_ready.connect(self._on_benchmarks)
         self.api_worker.provider_trust_ready.connect(self._on_provider_trust)
         self.api_worker.speed_board_ready.connect(self._on_speed_board)
+        self.api_worker.trend_ready.connect(self._on_trend)
         self.api_worker.permaslug_resolver_ready.connect(self._on_permaslug_resolver)
         self.api_worker.uptime_ready.connect(self._on_uptime)
         self.api_worker.logo_ready.connect(self._on_logo_ready)
@@ -201,6 +204,19 @@ class OpenRouterPulse(QObject):
                 lambda: self.trigger.fetch_speed_board.emit())
             self.speed_timer.start(20 * 60 * 1000)        # every 20 minutes
 
+        # #7 THE TAPE (week-over-week momentum): no-auth rankings/models on a
+        # slow cached cadence (mirror speed, 20 min). It is permaslug-keyed, so
+        # it ALSO needs the resolver — ensure it's fetched even if Speed is off
+        # (idempotent with the speed/uptime blocks). Opt-out via show_trend.
+        if getattr(self.settings, "show_trend", True):
+            if not getattr(self.settings, "show_speed", True):
+                QTimer.singleShot(1500, lambda: self.trigger.fetch_permaslug_resolver.emit())
+            QTimer.singleShot(1900, lambda: self.trigger.fetch_trend.emit())
+            self.trend_timer = QTimer(self)
+            self.trend_timer.timeout.connect(
+                lambda: self.trigger.fetch_trend.emit())
+            self.trend_timer.start(20 * 60 * 1000)        # every 20 minutes
+
         # #5 THE THRESHOLD ("cheapest door"): NO new fetch — it rides the
         # existing per-model endpoints fetch (each card resolves its own door
         # when endpoints land). The only thing to wire is the show_door gate.
@@ -261,6 +277,11 @@ class OpenRouterPulse(QObject):
         if getattr(self.settings, "show_speed", True):
             self.trigger.fetch_permaslug_resolver.emit()
             self.trigger.fetch_speed_board.emit()
+        # #7 THE TAPE: re-fetch the WoW momentum board (and ensure the resolver
+        # it needs is fetched even when Speed is off).
+        if getattr(self.settings, "show_trend", True):
+            self.trigger.fetch_permaslug_resolver.emit()
+            self.trigger.fetch_trend.emit()
         # #5 THE THRESHOLD: no fetch; re-apply the gate so a settings toggle
         # takes effect on manual refresh (the per-model door re-resolves when
         # endpoints land via _fetch_all_endpoints above).
@@ -323,6 +344,11 @@ class OpenRouterPulse(QObject):
     def _on_speed_board(self, board):
         log.debug("speed board: %s ranked models", len(board) if board else 0)
         self.dashboard.update_speed_board(board)
+
+    @Slot(object)
+    def _on_trend(self, board):
+        log.debug("trend board: %s ranked models", len(board) if board else 0)
+        self.dashboard.update_trend(board)
 
     @Slot(object)
     def _on_permaslug_resolver(self, resolver):

@@ -62,6 +62,45 @@ def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
     )
 
 
+# ---------------------------------------------------------------------------
+#  THE TAPE (#7) — week-over-week momentum stamp + slope helpers (pure)
+# ---------------------------------------------------------------------------
+# `change` is an UNBOUNDED week-over-week request-volume FRACTION (-1.0 = -100%
+# dying, 0.50 = +50% riser, 247 = +24700% new entrant). The honest-magnitude
+# rule (decision A): print a literal % only in the normal band; switch to a "Nx"
+# multiplier for explosive risers (so we never stamp a meaningless "+24700%"),
+# clamp the multiplier at 999x, and collapse a near-zero change to a flat "~".
+# Module-level + pure so a unit test can pin the EXACT format output without a
+# QWidget. f"{change:+.0%}" rounding is whatever Python's %-format produces
+# (e.g. -0.975 → "-98%"); the test asserts that literal, never a guess.
+TREND_FLAT_EPS = 0.03      # |change| below this reads as flat (a centered dash)
+TREND_EXPLOSIVE = 5.0      # change above this is "off the chart" → "Nx" + ghost
+
+
+def _trend_stamp(change) -> str:
+    """The torn-ticker delta stamp for a week-over-week change fraction."""
+    if change is None:
+        return ""
+    if abs(change) < TREND_FLAT_EPS:
+        return "~"
+    if change > TREND_EXPLOSIVE:
+        return f"+{min(round(change), 999)}x"
+    return f"{change:+.0%}"
+
+
+def _trend_slope_sign(change) -> int:
+    """+1 riser / -1 faller / 0 flat — the geometric tell the trace encodes.
+    Thresholds match TREND_FLAT_EPS so the stamp and the slope never disagree
+    (a "~" stamp always pairs with a 0 slope, i.e. a centered dash)."""
+    if change is None:
+        return 0
+    if change > TREND_FLAT_EPS:
+        return 1
+    if change < -TREND_FLAT_EPS:
+        return -1
+    return 0
+
+
 class ArcGauge(QWidget):
     """A large, animated circular arc gauge for credit balance."""
 
@@ -984,6 +1023,73 @@ class UptimeStripWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+#  THE TAPE — the dossier's 2-point "last 7d" momentum ramp (#7)
+# ---------------------------------------------------------------------------
+class TrendRampWidget(QWidget):
+    """The Tape dossier's hero: a HONEST 2-point ramp (last-week index → now)
+    drawn from the SINGLE week-over-week `change` fraction. We have ONE delta,
+    so we draw exactly two anchored points (NOT a fabricated multi-point series),
+    in the same amber/violet lane as the card cartouche. Rendered to a QPixmap +
+    embedded as a data-URI <img> in the single-QLabel ProviderPopup, mirroring
+    UptimeStripWidget."""
+
+    STRIP_W = 292
+    STRIP_H = 56
+    PAD = 10
+
+    def __init__(self, change, line_color: QColor, parent=None):
+        super().__init__(parent)
+        self._change = change
+        self._line = QColor(line_color)
+        self.setFixedSize(self.STRIP_W, self.STRIP_H)
+
+    def render_pixmap(self) -> QPixmap:
+        pm = QPixmap(self.STRIP_W, self.STRIP_H)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        pad = self.PAD
+        left, right = pad, self.STRIP_W - pad
+        top, bottom = 6.0, self.STRIP_H - 8.0
+        midy = (top + bottom) / 2.0
+
+        # dim baseline frame at the "last week" index level (the mid-line).
+        frame = QColor(Colors.TEXT_MUTED); frame.setAlpha(70)
+        p.setPen(QPen(frame, 1))
+        p.drawLine(QPointF(left, midy), QPointF(right, midy))
+
+        ch = self._change if self._change is not None else 0.0
+        # Map the ratio to a slope: tail anchored at the index mid-line, head
+        # offset by the magnitude (capped) — up for a riser, down for a faller.
+        mag = min(abs(ch), 1.0)
+        dy = (bottom - midy) * 0.92 * mag
+        tail = QPointF(left, midy)
+        head = QPointF(right, midy - dy if ch >= 0 else midy + dy)
+
+        p.setPen(QPen(self._line, 2.0, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawLine(tail, head)
+        # anchor dots
+        p.setPen(Qt.PenStyle.NoPen)
+        dim = QColor(self._line); dim.setAlpha(150)
+        p.setBrush(QBrush(dim)); p.drawEllipse(tail, 2.6, 2.6)
+        p.setBrush(QBrush(self._line)); p.drawEllipse(head, 3.4, 3.4)
+
+
+# ---------------------------------------------------------------------------
 #  Pinned Model Card (per-provider health)
 # ---------------------------------------------------------------------------
 class PinnedModelCard(QWidget):
@@ -1022,6 +1128,27 @@ class PinnedModelCard(QWidget):
     door_clicked = Signal(str, QPointF)    # #5 door band clicked -> Threshold dossier
     uptime_clicked = Signal(str, str, QPointF)  # (model_id, ep_ident, anchor) -> Vitals
     fees_clicked = Signal(str, str, QPointF)  # #6 (model_id, ep_ident, anchor) -> Waterline
+    trend_clicked = Signal(str, QPointF)   # #7 THE TAPE clicked -> week-over-week dossier
+
+    # ---- #7 THE TAPE (the torn-ticker momentum cartouche) geometry constants ----
+    # A compact "ripped off the wire" cartouche pinned in the header RIGHT gutter
+    # (the slot the ★ best-chip vacated — it relocates inline after the name).
+    # Adds NO height (TAPE_H=15 < HEADER_H=28 slack); set_trend never reflows.
+    TAPE_H = 15
+    TAPE_TRACE_W = 16           # the sloped 3-tick trace slot width
+    TAPE_DOT_R = 2.2            # head-dot radius (the latest tick)
+    TAPE_NOTCH = 3             # torn-paper notch triangle size on the pill's left
+    TAPE_HPAD = 10             # pill horizontal padding
+    TAPE_TRACE_GAP = 4         # gap from the trace to the stamp
+    GAP_CHIP_TO_ICON = 10      # tape right edge sits this far left of the ⓘ icon
+    GAP_NAME_TO_CHIP = 12      # name↔inline-chip and tape↔name reservation gap
+    # Lane colors (decision E) — amber riser / violet faller / grey flat, NEVER
+    # green (Pulse owns it) or red (Pulse outage). Region-separated from #5's
+    # brass-amber band by living in the header gutter.
+    TAPE_AMBER = QColor(0xF4, 0xB7, 0x40)        # warm "hot money" riser
+    TAPE_AMBER_HOT = QColor(0xFF, 0xD0, 0x71)    # brighter, explosive riser
+    TAPE_VIOLET = QColor(0x9B, 0x8C, 0xCB)       # muted "cooling off" faller (light)
+    TAPE_VIOLET_DK = QColor(0x7A, 0x6E, 0x9E)    # faller, deep end
 
     # ---- THE PULSE (#3 — the 73h uptime cardiogram) geometry constants ----
     # A health-keyed heartbeat painted in the existing UPTIME_W column. Adds NO
@@ -1110,6 +1237,18 @@ class PinnedModelCard(QWidget):
         self._waterline_hits = []         # [(QRectF, ident, accent_hex)] clickable rows
         self._waterline_buoy_rects = {}   # {ident: QRectF} recorded buoy ring (test introspection)
         self._waterline_hover_ident = None  # price cell under the cursor (for the hand cursor)
+        # #7 THE TAPE — week-over-week momentum cartouche in the header gutter.
+        # _trend is the raw change FRACTION (or None → paints nothing, empty hit
+        # rect). The 3-point sloped trace QPolygonF + the slope sign + stamp are
+        # built ONCE in set_trend (allocation-free paint, GC-disabled invariant);
+        # paint only positions/strokes cached objects. NO height (decision D).
+        self._trend = None                # change float | None
+        self._trend_explosive = False     # change > 5 → ghost trace + live-wire shimmer
+        self._trend_stamp = ""            # measured-once delta stamp ("+50%"/"+248x"/"~")
+        self._trend_hover = False
+        self._tape_hit_rect = QRectF()    # introspection: the clickable cartouche box
+        self._tape_trace_pts = []         # introspection: 3 QPointF (UNIT shape, 0..1)
+        self._tape_slope_sign = 0         # introspection: +1 riser / -1 faller / 0 flat
         # Shimmer phase is shared by the Arena crest sweep AND the elite speed
         # comet; the one timer runs whenever EITHER band wants it.
         self._shimmer = 0.0
@@ -1142,8 +1281,11 @@ class PinnedModelCard(QWidget):
 
     def _wants_shimmer(self) -> bool:
         # The flawless-uptime "earned heartbeat" rides the SAME 55ms timer as
-        # the Arena sweep / elite speed comet — no new QTimer (decision C).
-        return self._arena_elite or self._speed_elite or self._uptime_alive
+        # the Arena sweep / elite speed comet — no new QTimer (decision C). #7's
+        # explosive-riser "live wire" (ghost-trace pulse + breathing head-dot)
+        # reuses it too via _trend_explosive — ordinary risers/fallers stay static.
+        return (self._arena_elite or self._speed_elite or self._uptime_alive
+                or self._trend_explosive)
 
     def _sync_shimmer(self):
         """Run the one shared shimmer timer iff some band wants it AND we're
@@ -1189,6 +1331,71 @@ class PinnedModelCard(QWidget):
 
     def speed_accent(self) -> str:
         return _safe_color(self._speed.tier[1], "#00d2ff") if self._speed else "#00d2ff"
+
+    # ---- #7 THE TAPE (the torn-ticker momentum cartouche) ----
+
+    def set_trend(self, change):
+        """change: the week-over-week request-volume FRACTION (a float) for this
+        model, or None when the model isn't in the ranked rows / the fetch
+        failed. None paints nothing and empties the hit rect (silent degrade).
+
+        Stores the change + the explosive flag, MEASURES the stamp, and builds
+        the 3-point sloped trace ONCE here as a UNIT-space (0..1) shape so the
+        paint hot path only positions + strokes cached objects (allocation-free
+        paint, GC-disabled invariant). NEVER calls _update_height — the cartouche
+        lives inside the header band's slack and adds no height (decision D)."""
+        self._trend = change
+        self._trend_explosive = bool(change is not None and change > TREND_EXPLOSIVE)
+        self._trend_stamp = _trend_stamp(change)
+        sign = _trend_slope_sign(change)
+        self._tape_slope_sign = sign
+        # Build the UNIT trace (x,y in [0,1]; y grows DOWNWARD in screen space, so
+        # a riser must DESCEND in y from tail→head). Slope steepness scales with
+        # the magnitude, capped at a full-height swing (min(|change|,1.0)).
+        mag = min(abs(change), 1.0) if change is not None else 0.0
+        if sign == 0:
+            # flat: a centered dash (all three points on the mid-line)
+            ys = (0.5, 0.5, 0.5)
+        elif sign > 0:
+            # riser: staircase climbing up-right → y DESCENDS left→right
+            lo, hi = 0.5 - 0.42 * mag, 0.5 + 0.42 * mag
+            ys = (hi, 0.5, lo)          # tail low (high y) → head high (low y)
+        else:
+            # faller: descending right → y ASCENDS left→right
+            lo, hi = 0.5 - 0.42 * mag, 0.5 + 0.42 * mag
+            ys = (lo, 0.5, hi)          # tail high (low y) → head low (high y)
+        self._tape_trace_pts = [QPointF(0.0, ys[0]),
+                                QPointF(0.5, ys[1]),
+                                QPointF(1.0, ys[2])]
+        self._sync_shimmer()           # explosive risers wake the live-wire timer
+        self.update()                  # NO _update_height (decision D)
+
+    def has_trend(self) -> bool:
+        return self._trend is not None
+
+    def _trend_lane(self):
+        """The lane colors for the current trend (decision E). Returns
+        (line_color, fill_base) QColors. Riser=amber, faller=violet, flat=grey,
+        explosive=brighter amber."""
+        if self._trend is None:
+            return QColor(Colors.TEXT_MUTED), QColor(Colors.TEXT_MUTED)
+        sign = self._tape_slope_sign
+        if sign > 0:
+            return (QColor(self.TAPE_AMBER_HOT if self._trend_explosive else self.TAPE_AMBER),
+                    QColor(self.TAPE_AMBER))
+        if sign < 0:
+            # deeper violet the harder the fall (toward -1.0)
+            t = min(abs(self._trend), 1.0)
+            return (_lerp_color(self.TAPE_VIOLET, self.TAPE_VIOLET_DK, t),
+                    QColor(self.TAPE_VIOLET_DK))
+        return QColor(Colors.TEXT_MUTED), QColor(Colors.TEXT_MUTED)
+
+    def trend_accent(self) -> str:
+        """Hex accent for the trend dossier border (mirrors speed_accent)."""
+        if self._trend is None:
+            return "#9b8ccb"
+        line, _ = self._trend_lane()
+        return line.name()
 
     # ---- #5 THE THRESHOLD (the "cheapest door" band) ----
 
@@ -1806,6 +2013,7 @@ class PinnedModelCard(QWidget):
         crest_hover = self._benchmark is not None and self._crest_hit_rect.contains(pos)
         speed_hover = self._speed is not None and self._speed_hit_rect.contains(pos)
         door_hover = self._door is not None and self._door_hit_rect.contains(pos)
+        trend_hover = self._trend is not None and self._tape_hit_rect.contains(pos)
         _, seal_ident = self._seal_at(pos)
         _, pulse_ident = self._pulse_at(pos)
         _, wl_ident = self._waterline_at(pos)
@@ -1822,6 +2030,9 @@ class PinnedModelCard(QWidget):
         if door_hover != self._door_hover:
             self._door_hover = door_hover
             changed = True
+        if trend_hover != self._trend_hover:
+            self._trend_hover = trend_hover
+            changed = True
         if seal_ident != self._seal_hover_ident:
             self._seal_hover_ident = seal_ident
             changed = True
@@ -1834,6 +2045,7 @@ class PinnedModelCard(QWidget):
         self._waterline_hover_ident = wl_ident
         if changed or cursor_changed:
             if (icon_hover or crest_hover or speed_hover or door_hover
+                    or trend_hover
                     or seal_ident is not None or pulse_ident is not None
                     or wl_ident is not None):
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -1844,7 +2056,7 @@ class PinnedModelCard(QWidget):
 
     def leaveEvent(self, event):
         if (self._icon_hover or self._crest_hover or self._speed_hover
-                or self._door_hover
+                or self._door_hover or self._trend_hover
                 or self._seal_hover_ident is not None
                 or self._pulse_hover_ident is not None
                 or self._waterline_hover_ident is not None):
@@ -1852,6 +2064,7 @@ class PinnedModelCard(QWidget):
             self._crest_hover = False
             self._speed_hover = False
             self._door_hover = False
+            self._trend_hover = False
             self._seal_hover_ident = None
             self._pulse_hover_ident = None
             self._waterline_hover_ident = None
@@ -1870,6 +2083,9 @@ class PinnedModelCard(QWidget):
         if self._icon_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._icon_hit_rect.center().toPoint())
             self.info_clicked.emit(self.model_id, QPointF(global_pos))
+        elif self._trend is not None and self._tape_hit_rect.contains(pos):
+            global_pos = self.mapToGlobal(self._tape_hit_rect.center().toPoint())
+            self.trend_clicked.emit(self.model_id, QPointF(global_pos))
         elif self._benchmark is not None and self._crest_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._crest_hit_rect.center().toPoint())
             self.arena_clicked.emit(self.model_id, QPointF(global_pos))
@@ -1904,12 +2120,13 @@ class PinnedModelCard(QWidget):
         painter.setPen(QPen(Colors.BORDER, 1))
         painter.drawPath(path)
 
-        # === Header layout: name (elided) · best chip · (i) icon ===
-        # Reserve space right-to-left so the name never overlaps the chip
-        # or the icon, no matter how long the name is.
-
-        GAP_CHIP_TO_ICON = 10
-        GAP_NAME_TO_CHIP = 12
+        # === Header layout: name (elided) · inline ★ chip · [#7 TAPE] · (i) icon ===
+        # Reserve space right-to-left so the name never overlaps the chip, the
+        # Tape, or the icon, no matter how long the name is. #7 (decision C): the
+        # ★ best-chip RELOCATED inline (right of the name); THE TAPE now owns the
+        # far-right gutter the chip used to occupy.
+        GAP_CHIP_TO_ICON = self.GAP_CHIP_TO_ICON
+        GAP_NAME_TO_CHIP = self.GAP_NAME_TO_CHIP
 
         # Icon at the far right
         icon_right = w - self.PAD_X
@@ -1921,39 +2138,72 @@ class PinnedModelCard(QWidget):
             self.ICON_HIT, self.ICON_HIT,
         )
 
-        # Chip width via real font metrics
+        name_fm = QFontMetrics(Fonts.subheading())
+        baseline = self.PAD_Y + (self.HEADER_H + name_fm.ascent() - name_fm.descent()) / 2.0
+
+        # --- #7 THE TAPE geometry FIRST (right-to-left off the icon) so the name
+        #     boundary can reserve its gutter. Only when we have a trend; else the
+        #     gutter is free and the name/chip group reclaims it. ---
+        tape_left = None
+        tape_cx = tape_cy = 0.0
+        tape_pill = QRectF()
+        if self._trend is not None:
+            tf = Fonts.tiny(); tf.setBold(True)
+            tfm = QFontMetrics(tf)
+            stamp_w = tfm.horizontalAdvance(self._trend_stamp)
+            pill_w = self.TAPE_TRACE_W + self.TAPE_TRACE_GAP + stamp_w + self.TAPE_HPAD
+            tape_right = icon_x - GAP_CHIP_TO_ICON
+            tape_left = tape_right - pill_w
+            tape_cy = baseline - name_fm.ascent() * 0.32     # optical center of header text
+            tape_pill = QRectF(tape_left, tape_cy - self.TAPE_H / 2.0, pill_w, self.TAPE_H)
+            self._tape_hit_rect = QRectF(tape_left - 3, tape_cy - 9, pill_w + 6, 18)
+        else:
+            self._tape_hit_rect = QRectF()
+
+        # The right boundary of the elastic name+chip run: the Tape's left edge
+        # (minus the gap) when present, otherwise the old chip reservation.
+        group_right = ((tape_left - GAP_NAME_TO_CHIP) if tape_left is not None
+                       else (icon_x - GAP_CHIP_TO_ICON))
+
+        # Chip width via real font metrics (now drawn INLINE, right of the name).
         chip_text = f"★ {self._best.provider_name}" if self._best is not None else ""
         chip_font = Fonts.tiny()
         chip_fm = QFontMetrics(chip_font)
         chip_w = chip_fm.horizontalAdvance(chip_text) if chip_text else 0
 
-        # Chip placed left of icon
-        chip_right = icon_x - GAP_CHIP_TO_ICON
-        chip_left = chip_right - chip_w
-        if not chip_text:
-            chip_left = chip_right  # collapse to zero-width
-
-        # Name fills from PAD_X up to chip_left - gap, with eliding
+        # Name fills from PAD_X, leaving room for the inline chip + the gutter
+        # reservation. Keep the existing max(40,…) floor so a long name elides
+        # rather than colliding with the Tape. On a very narrow card the floored
+        # name + the inline chip can't BOTH fit before the gutter — in that case
+        # DROP the chip (it's a nice-to-have marker; the name + Tape are the
+        # priority), mirroring the speed band dropping its tier word when tight.
         name = self._display_model_name()
-        name_fm = QFontMetrics(Fonts.subheading())
-        name_max_w = max(40, int(chip_left - GAP_NAME_TO_CHIP - self.PAD_X))
+        if chip_text:
+            budget = int(group_right - chip_w - GAP_NAME_TO_CHIP - self.PAD_X)
+            if budget < 40:
+                chip_text = ""          # no room for name-floor AND chip → drop it
+                name_max_w = max(40, int(group_right - self.PAD_X))
+            else:
+                name_max_w = budget
+        else:
+            name_max_w = max(40, int(group_right - self.PAD_X))
         elided_name = name_fm.elidedText(name, Qt.TextElideMode.ElideRight, name_max_w)
-
-        # Shared baseline for the name and the ★ chip so the two different-size
-        # fonts sit on ONE line (AlignVCenter would center each line-box and
-        # leave the smaller chip riding ~2px high). Baseline is centered on the
-        # header band using the dominant (name) font's metrics.
-        baseline = self.PAD_Y + (self.HEADER_H + name_fm.ascent() - name_fm.descent()) / 2.0
+        name_right = self.PAD_X + name_fm.horizontalAdvance(elided_name)
 
         painter.setPen(Colors.TEXT_PRIMARY)
         painter.setFont(Fonts.subheading())
         painter.drawText(QPointF(self.PAD_X, baseline), elided_name)
 
-        # Chip (only if we have a best provider) — same baseline as the name
+        # Inline ★ chip — immediately right of the (elided) name, same baseline.
         if chip_text:
+            chip_left = name_right + GAP_NAME_TO_CHIP
             painter.setPen(Colors.CYAN)
             painter.setFont(chip_font)
             painter.drawText(QPointF(float(chip_left), baseline), chip_text)
+
+        # --- #7 THE TAPE cartouche (after the header text) ---
+        if self._trend is not None:
+            self._paint_tape(painter, tape_pill, tape_cy)
 
         # Info icon (cyan halo on hover)
         if self._icon_hover:
@@ -2579,6 +2829,84 @@ class PinnedModelCard(QWidget):
         painter.drawPath(p)
         painter.restore()
 
+    def _paint_tape(self, painter, pill, cy):
+        """#7 THE TAPE — the torn-ticker momentum cartouche. A notched-paper pill
+        holding a 3-point SLOPED trace (steeper = stronger, NOT a binary arrow) +
+        a stamped delta, in the amber(riser)/violet(faller)/grey(flat) lane. The
+        trace's slope encodes magnitude geometrically; explosive risers get a
+        ghost-double trace + a live-wire shimmer (the 'off the chart' tell, vs a
+        meaningless huge %). `pill` is the cartouche QRectF; `cy` its center y."""
+        line_col, _fill = self._trend_lane()
+        hover = self._trend_hover
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # --- pill backing (lane@26, hover 42) + stroke (lane@70, hover 130) ---
+        bg = QColor(line_col); bg.setAlpha(42 if hover else 26)
+        bpath = QPainterPath(); bpath.addRoundedRect(pill, 4, 4)
+        painter.fillPath(bpath, QBrush(bg))
+        bd = QColor(line_col); bd.setAlpha(130 if hover else 70)
+        painter.setPen(QPen(bd, 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(bpath)
+
+        # --- TWO torn-paper notch triangles on the pill's LEFT edge (the wire
+        #     tell that it's ripped-off ticker tape, beating a plain arrow) ---
+        nt = float(self.TAPE_NOTCH)
+        lx = pill.left()
+        notch = QColor(Colors.BG_CARD)
+        painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QBrush(notch))
+        for ny in (pill.top() + pill.height() * 0.30, pill.top() + pill.height() * 0.70):
+            tri = QPolygonF([QPointF(lx, ny - nt), QPointF(lx + nt, ny), QPointF(lx, ny + nt)])
+            painter.drawPolygon(tri)
+
+        # --- THE TRACE: position the cached UNIT shape into the left slot. y in
+        #     the unit shape grows downward (riser already descends left→right). ---
+        slot_l = pill.left() + self.TAPE_HPAD / 2.0
+        trace_h = self.TAPE_H - 6.0
+        top = cy - trace_h / 2.0
+        pts = [QPointF(slot_l + p.x() * self.TAPE_TRACE_W, top + p.y() * trace_h)
+               for p in self._tape_trace_pts]
+
+        def stroke_trace(color, width):
+            tp = QPainterPath(); tp.moveTo(pts[0])
+            for q in pts[1:]:
+                tp.lineTo(q)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawPath(tp)
+
+        # explosive: a faint ghost-trace offset +1.5px ('off the chart'); its
+        # alpha pulses on the shared shimmer timer (live wire), allocation-free.
+        if self._trend_explosive:
+            ghost = QColor(line_col)
+            a = int(70 + 70 * math.sin(self._shimmer * 2 * math.pi))
+            ghost.setAlpha(max(0, min(255, a)))
+            painter.save()
+            painter.translate(1.5, 1.5)
+            stroke_trace(ghost, 1.6)
+            painter.restore()
+
+        stroke_trace(line_col, 1.6)
+
+        # head dot on the rightmost (latest) tick; breathes for explosive risers.
+        head = pts[-1]
+        r = self.TAPE_DOT_R
+        if self._trend_explosive:
+            r = self.TAPE_DOT_R + 0.6 * math.sin(self._shimmer * 2 * math.pi)
+        painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QBrush(line_col))
+        painter.drawEllipse(head, r, r)
+
+        # --- THE STAMP: tiny bold, right of the trace, vertically centered ---
+        tf = Fonts.tiny(); tf.setBold(True)
+        painter.setFont(tf)
+        painter.setPen(line_col)
+        stamp_x = slot_l + self.TAPE_TRACE_W + self.TAPE_TRACE_GAP
+        painter.drawText(QRectF(stamp_x, pill.top(), pill.right() - stamp_x, pill.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         self._trend_stamp)
+        painter.restore()
+
     def _paint_door(self, painter, y):
         """#5 THE THRESHOLD — a hand-painted perspective DOOR-LEAF band. A stone
         jamb on the shared left rail marks the CURRENT (best) provider; a fake-
@@ -3034,6 +3362,92 @@ class PinnedModelCard(QWidget):
         if tp >= 0.75 and lp >= 0.75:
             return "Fast both ways — quick to first token and fast streaming."
         return ""
+
+    # ---- #7 THE TAPE dossier (week-over-week request-momentum read) ----
+
+    def trend_html(self, ident=None) -> str:
+        """The Tape dossier: a week-over-week headline ('+50% this week — you
+        picked a RISER'), the raw change read, a HONEST 2-point 'last 7d'
+        momentum ramp embedded as a data-URI <img> (we have ONE delta — NOT a
+        fabricated series), and a plain-English verdict that foreshadows #8 (the
+        derank watch). `ident` is accepted to match the other *_html signatures;
+        the tape is per-model, not per-row."""
+        ch = self._trend
+        if ch is None:
+            return ""
+        line_col, _ = self._trend_lane()
+        accent = _safe_color(line_col.name(), "#9b8ccb")
+        name = html.escape(self._display_model_name())
+        stamp = html.escape(self._trend_stamp)
+        explosive = self._trend_explosive
+        sign = self._tape_slope_sign
+
+        # Headline word + the precise change read.
+        if explosive:
+            word, wcol = "NEW ENTRANT", accent
+        elif sign > 0:
+            word, wcol = "RISER", accent
+        elif sign < 0:
+            word, wcol = "FALLER", accent
+        else:
+            word, wcol = "FLAT", "#a0a0c8"
+
+        # Honest precise read: a literal % for the normal band, a multiplier for
+        # the explosive band (matches the card stamp's honest-magnitude rule).
+        if explosive:
+            precise = f"{ch + 1:.1f}× last week's request volume"
+        elif sign == 0:
+            precise = f"{ch:+.1%} week-over-week (essentially flat)"
+        else:
+            precise = f"{ch:+.1%} week-over-week requests"
+
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+        out.append(
+            f"<div style='color:{wcol};font-size:9.5pt;font-weight:bold;margin-bottom:2px;'>"
+            f"&#9656; {stamp} this week &nbsp;·&nbsp; you picked a {word}</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+                   "Week-over-week request momentum · live from openrouter.ai</div>")
+
+        # The honest 2-point ramp, embedded as a data-URI image.
+        try:
+            pm = TrendRampWidget(ch, line_col).render_pixmap()
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            pm.save(buf, "PNG")
+            buf.close()
+            b64 = bytes(ba.toBase64()).decode("ascii")
+            out.append(
+                f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+                f"width='{TrendRampWidget.STRIP_W}' height='{TrendRampWidget.STRIP_H}'></div>")
+            out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+                       "&#9664; last week &nbsp;&nbsp;&nbsp; now &#9654;</div>")
+        except Exception:
+            log.debug("trend ramp render failed", exc_info=True)
+
+        out.append(
+            f"<div style='color:#c8c8e0;font-size:9pt;margin-bottom:6px;'>"
+            f"<span style='color:{accent};font-weight:bold;'>{html.escape(precise)}</span></div>")
+
+        verdict = self._trend_verdict(ch, sign, explosive)
+        out.append(
+            f"<div style='margin-top:2px;color:{accent};font-size:8.5pt;"
+            f"font-style:italic;'>{html.escape(verdict)}</div>")
+        out.append("<div style='margin-top:6px;color:#64648c;font-size:8pt;'>"
+                   "Share of week-over-week request growth · refreshed every 20 min</div>")
+        return "".join(out)
+
+    def _trend_verdict(self, ch, sign, explosive) -> str:
+        """Plain-English read that foreshadows #8 (the price/derank watch)."""
+        if explosive:
+            return "New entrant — treat as rocket-or-noise: a fresh listing can spike then fade."
+        if sign > 0:
+            return "Riser: more people are routing here than last week."
+        if sign < 0:
+            if ch <= -0.9:
+                return "Cratering: traffic has all but drained — watch for a derank."
+            return "Faller: traffic draining vs last week — watch for a derank."
+        return "Holding steady: request volume is roughly flat week-over-week."
 
     # ---- #5 THE THRESHOLD dossier (the FROM→THROUGH comparison + honesty line) --
 
