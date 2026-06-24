@@ -359,6 +359,34 @@ def test_uptime_history_aggregates():
     assert hist.outage_hours == 1   # one hour below 99%
 
 
+def test_uptime_outage_fixture_carries_a_real_catastrophe():
+    """The OUTAGE fixture (live Anthropic Opus 'anthropic' endpoint, captured
+    2026-06-23) carries a genuine ~31% gouge — the continuous-depth signal a
+    binary heat-strip throws away. Proves .worst/.outage_hours surface it."""
+    hist = parse_uptime_hourly(_load("fe_uptime_hourly_outage.json"))
+    assert len(hist) == 73
+    worst_date, worst_val = hist.worst
+    assert worst_val == pytest.approx(31.31, abs=0.5)     # the real catastrophe
+    assert worst_date == "2026-06-23 15:00:00"
+    # outage_hours == count of observed hours strictly below 99%.
+    assert hist.outage_hours == sum(
+        1 for v in hist.values if v is not None and v < 99.0)
+    assert hist.outage_hours == 27
+    # The worst hour sits at a known chronological index (oldest=0) — the row
+    # cardiogram test maps this index → an exact pixel x.
+    wi = next(i for i, (d, _v) in enumerate(hist.points) if d == worst_date)
+    assert wi == 57
+
+
+def test_uptime_clean_fixture_is_near_flawless_one_shallow_notch():
+    """The CLEAN fixture has exactly ONE sub-99 hour (a shallow 98.78% notch),
+    NOT a catastrophe — so it renders a shallow notch, never a floor-plunge."""
+    hist = parse_uptime_hourly(_load("fe_uptime_hourly.json"))
+    assert hist.outage_hours == 1
+    _wd, wv = hist.worst
+    assert wv == pytest.approx(98.78, abs=0.05)            # shallow, not deep
+
+
 def test_uptime_hourly_handles_nulls_and_empty():
     hist = parse_uptime_hourly({"data": {"history": [
         {"date": "h2", "uptime": None}, {"date": "h1", "uptime": 100},

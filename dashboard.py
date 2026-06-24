@@ -140,6 +140,7 @@ class Dashboard(QWidget):
     """The main dashboard popup window."""
 
     refresh_requested = Signal()
+    fetch_uptime_requested = Signal(str, str)   # (model_id, permaslug) — THE PULSE (#3)
 
     def __init__(self, history=None, settings=None, parent=None):
         super().__init__(parent)
@@ -175,6 +176,10 @@ class Dashboard(QWidget):
         # map needed to look a pinned model up in it. Both distributed to cards.
         self._speed_board = None
         self._permaslug_resolver = None
+        # THE PULSE (#3): per-model {ep_ident: UptimeHistory}, kept last-good so a
+        # transient fetch failure never blanks a card's cardiogram.
+        self._uptime_by_model = {}
+        self._uptime_popup_ctx = None    # (model_id, ident, anchor_y) or None
         # Provider logos (#2b): the shared cache + the open-dossier context so a
         # logo that arrives after the dossier opens can refresh it in place.
         self._logo_store = None
@@ -489,6 +494,7 @@ class Dashboard(QWidget):
                 card.arena_clicked.connect(self._on_arena_clicked)
                 card.trust_clicked.connect(self._on_trust_clicked)
                 card.speed_clicked.connect(self._on_speed_clicked)
+                card.uptime_clicked.connect(self._on_uptime_clicked)
                 if self._logo_store is not None:
                     card.set_logo_store(self._logo_store)
                 self._pinned_cards[mid] = card
@@ -514,6 +520,7 @@ class Dashboard(QWidget):
         self._distribute_benchmarks()
         self._distribute_provider_trust()
         self._distribute_speed()
+        self._distribute_uptime()
 
     def update_benchmarks(self, board):
         """Worker fetched the Arena board (or None). Hand each pinned card its
@@ -572,6 +579,56 @@ class Dashboard(QWidget):
             perma = resolver.permaslug(mid)
             standing = board.standing(perma) if perma else None
             card.set_speed(standing)
+
+    # ---- THE PULSE (#3 — per-endpoint 73h uptime) ----
+
+    def request_uptime_fetch(self):
+        """Resolve each pinned model's permaslug (we own the resolver) and ask
+        the worker to fan out its per-endpoint uptime fetch. No-ops cleanly
+        until the resolver has loaded — the slow timer will retry."""
+        resolver = self._permaslug_resolver
+        if resolver is None:
+            return
+        for mid in self._pinned_cards:
+            perma = resolver.permaslug(mid)
+            if perma:
+                self.fetch_uptime_requested.emit(mid, perma)
+
+    def update_uptime(self, model_id, histories):
+        """Worker reported per-endpoint uptime for one model (a possibly-empty
+        dict). Keep last-good so a transient failure never blanks the card."""
+        if histories:
+            self._uptime_by_model[model_id] = histories
+        self._distribute_uptime(model_id)
+        # Live-refresh an open Vitals dossier for this model in place.
+        self._maybe_refresh_uptime_popup(model_id)
+
+    def _distribute_uptime(self, only_model_id=None):
+        """Hand each pinned card its {ep_ident: UptimeHistory} dict."""
+        items = (self._uptime_by_model.items() if only_model_id is None
+                 else [(only_model_id, self._uptime_by_model.get(only_model_id))])
+        for mid, hists in items:
+            card = self._pinned_cards.get(mid)
+            if card is not None and hists is not None:
+                card.set_uptime(hists)
+
+    def _maybe_refresh_uptime_popup(self, model_id):
+        ctx = self._uptime_popup_ctx
+        if (ctx is None or self._provider_popup is None
+                or not self._provider_popup.isVisible()):
+            return
+        m, ident, anchor_y = ctx
+        if m != model_id or self._popup_model_id != "uptime:" + model_id + ":" + ident:
+            return
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        html_str = card.uptime_html(ident)
+        if not html_str:
+            return
+        self._provider_popup.set_accent(card.uptime_accent(ident))
+        self._provider_popup.show_beside(
+            html_str, self._dashboard_global_rect(), anchor_y)
 
     # ---- Provider logos (#2b) ----
 
@@ -826,6 +883,34 @@ class Dashboard(QWidget):
         anchor_y = int(global_anchor.y())
         self._trust_popup_ctx = (model_id, provider_ident, anchor_y)
         popup.set_accent(card.dossier_accent(provider_ident))
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
+        self._popup_model_id = key
+
+    def _on_uptime_clicked(self, model_id, ep_ident, global_anchor):
+        """A row's uptime cardiogram was clicked -> show its Vitals dossier
+        (the painted 73-bar strip). Mirrors _on_trust_clicked exactly."""
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        html_str = card.uptime_html(ep_ident)
+        if not html_str:
+            return
+        popup = self._ensure_provider_popup()
+        key = "uptime:" + model_id + ":" + ep_ident
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        anchor_y = int(global_anchor.y())
+        self._uptime_popup_ctx = (model_id, ep_ident, anchor_y)
+        popup.set_accent(card.uptime_accent(ep_ident))
         popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 

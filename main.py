@@ -60,6 +60,7 @@ class FetchTrigger(QObject):
     fetch_provider_trust = Signal() # provider privacy/trust posture (slow, no-auth)
     fetch_speed_board = Signal()    # rankings/performance fleet (slow, no-auth, #4)
     fetch_permaslug_resolver = Signal()  # catalog slug↔permaslug map (slow, no-auth)
+    fetch_uptime = Signal(str, str)  # (model_id, permaslug) — per-endpoint 73h uptime (#3)
     fetch_logo = Signal(str, str)   # (slug, url) — one provider logo, on demand
 
 
@@ -112,6 +113,7 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_provider_trust.connect(self.api_worker.fetch_provider_trust)
         self.trigger.fetch_speed_board.connect(self.api_worker.fetch_speed_board)
         self.trigger.fetch_permaslug_resolver.connect(self.api_worker.fetch_permaslug_resolver)
+        self.trigger.fetch_uptime.connect(self.api_worker.fetch_uptime)
         self.trigger.fetch_logo.connect(self.api_worker.fetch_logo)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
@@ -120,6 +122,7 @@ class OpenRouterPulse(QObject):
         self.api_worker.provider_trust_ready.connect(self._on_provider_trust)
         self.api_worker.speed_board_ready.connect(self._on_speed_board)
         self.api_worker.permaslug_resolver_ready.connect(self._on_permaslug_resolver)
+        self.api_worker.uptime_ready.connect(self._on_uptime)
         self.api_worker.logo_ready.connect(self._on_logo_ready)
         self.api_worker.error.connect(self._on_error)
 
@@ -139,6 +142,10 @@ class OpenRouterPulse(QObject):
         self.dashboard.refresh_endpoint_requested.connect(
             self.trigger.fetch_endpoints.emit
         )
+        # THE PULSE (#3): the dashboard owns the permaslug resolver, so it
+        # resolves each pinned model and asks the worker to fan out the
+        # per-endpoint uptime fetch (model_id, permaslug).
+        self.dashboard.fetch_uptime_requested.connect(self.trigger.fetch_uptime.emit)
 
         # -- Tray icon --
         self.tray = TrayIcon(self.settings)
@@ -194,6 +201,22 @@ class OpenRouterPulse(QObject):
                 lambda: self.trigger.fetch_speed_board.emit())
             self.speed_timer.start(20 * 60 * 1000)        # every 20 minutes
 
+        # THE PULSE (#3): per-endpoint 73h uptime cardiogram. PER-ENDPOINT, so
+        # this fans out — fetch sparingly (~20 min, mirroring the speed cadence)
+        # and cache hard (cards keep last-good). No-auth. Needs the permaslug
+        # resolver (shared with speed); the actual fan-out is kicked from
+        # _on_permaslug_resolver the moment the resolver lands (avoids a boot
+        # race), and the timer below keeps it fresh. Opt-out via show_uptime.
+        if getattr(self.settings, "show_uptime", True):
+            # Ensure the resolver IS fetched even if Speed is disabled (uptime
+            # depends on it too); idempotent with the speed block above. The
+            # actual uptime fan-out is kicked from _on_permaslug_resolver.
+            if not getattr(self.settings, "show_speed", True):
+                QTimer.singleShot(1500, lambda: self.trigger.fetch_permaslug_resolver.emit())
+            self.uptime_timer = QTimer(self)
+            self.uptime_timer.timeout.connect(self._fetch_all_uptime)
+            self.uptime_timer.start(20 * 60 * 1000)        # every 20 minutes
+
         # -- Pluggable sources (Claude, …): peers to OpenRouter --
         self._setup_sources()
 
@@ -228,6 +251,8 @@ class OpenRouterPulse(QObject):
         if getattr(self.settings, "show_speed", True):
             self.trigger.fetch_permaslug_resolver.emit()
             self.trigger.fetch_speed_board.emit()
+        if getattr(self.settings, "show_uptime", True):
+            self._fetch_all_uptime()
         # Peer sources (Claude/GPU/System) too — a manual refresh should
         # refetch everything, not just OpenRouter. force_refresh() lets a
         # source (e.g. Claude) break its usage-endpoint backoff and retry now.
@@ -248,9 +273,21 @@ class OpenRouterPulse(QObject):
         for mid in self.dashboard.tracked_models():
             self.trigger.fetch_endpoints.emit(mid)
 
+    def _fetch_all_uptime(self):
+        """Kick off the per-endpoint uptime fan-out for every pinned model. The
+        dashboard resolves each model's permaslug (it owns the resolver) and
+        emits fetch_uptime(model_id, permaslug) per model."""
+        self.dashboard.request_uptime_fetch()
+
     @Slot(str, object)
     def _on_endpoints(self, model_id, model_endpoints):
         self.dashboard.update_endpoints(model_id, model_endpoints)
+
+    @Slot(str, object)
+    def _on_uptime(self, model_id, histories):
+        log.debug("uptime: %s -> %d endpoints with history",
+                  model_id, len(histories) if histories else 0)
+        self.dashboard.update_uptime(model_id, histories)
 
     @Slot(object)
     def _on_models(self, models):
@@ -274,6 +311,12 @@ class OpenRouterPulse(QObject):
     def _on_permaslug_resolver(self, resolver):
         log.debug("permaslug resolver: %s entries", len(resolver) if resolver else 0)
         self.dashboard.update_permaslug_resolver(resolver)
+        # THE PULSE (#3): the per-endpoint uptime fan-out NEEDS this resolver to
+        # map each pinned model → permaslug → endpoint UUIDs. Kick it as soon as
+        # the resolver lands (the initial singleShot can race the catalog fetch
+        # and no-op); the dashboard de-dups cheaply and keeps last-good.
+        if resolver is not None and getattr(self.settings, "show_uptime", True):
+            self._fetch_all_uptime()
 
     @Slot(str, object, bool)
     def _on_logo_ready(self, slug, data, is_svg):

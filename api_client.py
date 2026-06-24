@@ -595,6 +595,7 @@ class APIWorker(QObject):
     provider_trust_ready = Signal(object)   # ProviderTrustBook | None  (no-auth)
     speed_board_ready = Signal(object)      # SpeedBoard | None  (no-auth, #4)
     permaslug_resolver_ready = Signal(object)  # PermaslugResolver | None (no-auth)
+    uptime_ready = Signal(str, object)      # (model_id, {ep_ident: UptimeHistory}) (no-auth, #3)
     logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
     error = Signal(str)
 
@@ -693,6 +694,48 @@ class APIWorker(QObject):
         except Exception:
             log.exception("permaslug resolver worker crashed")
             self.permaslug_resolver_ready.emit(None)
+
+    @Slot(str, str)
+    def fetch_uptime(self, model_id: str, permaslug: str):
+        """THE PULSE (#3): per-endpoint 73h uptime for one pinned model. Uptime
+        is PER-ENDPOINT, so this fans out — resolve the permaslug to its serving
+        endpoints (stats/endpoint), then fetch uptime-hourly per endpoint UUID.
+        No auth (frontend API). ALWAYS emits (an empty/partial dict on failure)
+        so cards keep their last-good cardiogram and never blank. Keys the dict
+        by the SAME ident the trust seals use (provider_slug a.k.a. the row tag)
+        so the right history lands on the right row across refreshes."""
+        histories = {}
+        try:
+            if not permaslug:
+                self.uptime_ready.emit(model_id, histories)
+                return
+            refs = self.frontend.get_endpoint_refs(permaslug)
+            # GUARD the resolver-returns-slug-unchanged 404: some models (e.g.
+            # anthropic/claude-3.5-sonnet) resolve to an unversioned slug whose
+            # stats/endpoint 404s → get_endpoint_refs returns [] (it never
+            # raises). We just emit an empty dict and skip — never crash.
+            got = 0
+            for ref in refs:
+                if not ref.id:
+                    continue
+                hist = self.frontend.get_uptime_hourly(ref.id)
+                if hist is None:
+                    continue
+                ident = ref.provider_slug or ref.provider_name
+                if not ident:
+                    continue
+                histories[ident] = hist
+                got += 1
+            log.info("uptime fetch for %s: %d endpoints, %d with history",
+                     model_id, len(refs), got)
+        except Exception:
+            log.exception("uptime worker crashed for %s", model_id)
+        # A single greppable INFO line on the dedicated pulse logger so the live
+        # boot check has something deterministic to assert lands.
+        logging.getLogger("pulse.openrouter").info(
+            "PULSE uptime landed for %s: %d endpoints with history",
+            model_id, len(histories))
+        self.uptime_ready.emit(model_id, histories)
 
     @Slot(str, str)
     def fetch_logo(self, slug: str, url: str):

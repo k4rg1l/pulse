@@ -3,6 +3,7 @@ OpenRouter Pulse - Custom Widgets
 Hand-drawn gauges, sparklines, stat cards, status badges.
 """
 import html
+import logging
 import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
@@ -13,15 +14,19 @@ from PySide6.QtGui import QCursor
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, Property, QEasingCurve,
     QRectF, QPointF, QPoint, QRect, Signal, QSize, QEvent,
+    QBuffer, QByteArray, QIODevice,
 )
 from PySide6.QtGui import (
     QPainter, QPen, QBrush, QColor, QConicalGradient,
     QRadialGradient, QLinearGradient, QPainterPath, QFont,
-    QFontMetrics,
+    QFontMetrics, QPolygonF, QPixmap, QImage,
 )
+import base64
 
 from theme import Colors, Fonts
 import theme_controller
+
+log = logging.getLogger("pulse.widgets")
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +47,17 @@ def _safe_color(value, fallback="#a0a0c8"):
     this guards the rich-text render boundary against any future code path
     feeding an attacker-controlled color into an attribute (CSS injection)."""
     return value if isinstance(value, str) and _HEX_COLOR.match(value) else fallback
+
+
+def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
+    """Linear blend a→b by t∈[0,1]. Returns a fresh QColor (callers that need
+    the allocation-free hot path must precompute, not call this in paint)."""
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+    )
 
 
 class ArcGauge(QWidget):
@@ -822,6 +838,150 @@ class ProviderPopup(QWidget):
 
 
 # ---------------------------------------------------------------------------
+#  THE PULSE — the dossier's painted 73-bar Vitals strip (#3)
+# ---------------------------------------------------------------------------
+class UptimeStripWidget(QWidget):
+    """The Vitals dossier's hero: 73 hourly bars rendered at full resolution
+    with a continuous green→amber→crimson depth ramp, a day axis, a "now"
+    marker, and the worst hour called out. This is the ONLY surface that can
+    show all 73 hours at once (the row glyph is a 36px summary). Rendered to a
+    QPixmap and embedded as a data-URI <img> in the single-QLabel ProviderPopup
+    (decision B — keeps the popup's single-label/adjustSize contract intact)."""
+
+    STRIP_W = 292
+    STRIP_H = 64
+    PAD = 8
+    CRIMSON = QColor(224, 70, 60)   # a darker "wound" red, dossier-only
+
+    def __init__(self, hist, parent=None):
+        super().__init__(parent)
+        self._hist = hist
+        self.setFixedSize(self.STRIP_W, self.STRIP_H)
+        # Test introspection.
+        self._strip_bar_xs = []
+        self._strip_worst_x = None
+
+    def _bar_color(self, v):
+        """The continuous depth ramp: green(>=99) → yellow(95-99) → crimson(<95,
+        deepest at <=40). The dossier keeps the continuous float — it is NOT a
+        binary heat cell."""
+        if v >= 99.0:
+            return QColor(Colors.GREEN)
+        if v >= 95.0:
+            t = (99.0 - v) / 4.0
+            return _lerp_color(QColor(Colors.GREEN), QColor(Colors.YELLOW), t)
+        t = (95.0 - v) / 55.0    # 95→0, 40→1
+        return _lerp_color(QColor(Colors.YELLOW), self.CRIMSON, t)
+
+    def render_pixmap(self) -> QPixmap:
+        pm = QPixmap(self.STRIP_W, self.STRIP_H)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        hist = self._hist
+        vals = hist.values if hist else []
+        n = len(vals)
+        pad = self.PAD
+        axis_font = Fonts.tiny()
+        fm = QFontMetrics(axis_font)
+        axis_h = fm.height() + 2
+        chart_top = 2.0
+        chart_bottom = self.STRIP_H - axis_h - 2.0
+        chart_h = chart_bottom - chart_top
+        span = max(1, n - 1)
+        inner_w = self.STRIP_W - 2 * pad
+
+        # 1. dim baseline frame.
+        frame = QColor(Colors.TEXT_MUTED)
+        frame.setAlpha(70)
+        p.setPen(QPen(frame, 1))
+        p.drawLine(QPointF(pad, chart_bottom), QPointF(self.STRIP_W - pad, chart_bottom))
+
+        if n == 0:
+            return
+        bar_w = max(2.0, inner_w / n - 1.0)
+        worst = hist.worst
+        # Only mark a worst bar when it's a REAL dip (<99%) — a flawless strip
+        # has no wound to call out (mirrors the row's outage-only worst dot), so
+        # crimson never appears on an all-green record.
+        mark_worst = bool(worst and worst[1] < 99.0)
+        worst_date = worst[0] if mark_worst else None
+
+        def x_of(i):
+            return pad + i * (inner_w / span)
+
+        self._strip_bar_xs = [x_of(i) for i in range(n)]
+        self._strip_worst_x = None
+
+        # 2. day-boundary ticks: drop a faint tick + a "Nd"/"now" label wherever
+        #    the YYYY-MM-DD prefix changes.
+        prev_day = None
+        p.setFont(axis_font)
+        for i, (date_str, _v) in enumerate(hist.points):
+            day = (date_str or "")[:10]
+            if day and day != prev_day:
+                prev_day = day
+                x = x_of(i)
+                tick = QColor(Colors.TEXT_MUTED)
+                tick.setAlpha(60)
+                p.setPen(QPen(tick, 1))
+                p.drawLine(QPointF(x, chart_top), QPointF(x, chart_bottom))
+
+        # 3. the 73 bars.
+        for i, (date_str, v) in enumerate(hist.points):
+            x = x_of(i)
+            if v is None:
+                # a gap: a hollow dotted bar in muted grey, NEVER red.
+                col = QColor(Colors.TEXT_MUTED)
+                p.setPen(QPen(col, 1, Qt.PenStyle.DotLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawLine(QPointF(x, chart_bottom), QPointF(x, chart_top + chart_h * 0.5))
+                continue
+            if v >= 90.0:
+                frac = (v - 90.0) / 10.0
+                frac = 0.0 if frac < 0.0 else 1.0 if frac > 1.0 else frac
+                top_y = chart_bottom - frac * chart_h
+            else:
+                top_y = chart_bottom - 0.10 * chart_h   # a tiny nub for a catastrophe
+            col = self._bar_color(v)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(col))
+            p.drawRect(QRectF(x - bar_w / 2, top_y, bar_w, chart_bottom - top_y))
+            if worst_date is not None and date_str == worst_date:
+                self._strip_worst_x = x
+                # crimson outline + a caret above the worst bar.
+                p.setPen(QPen(self.CRIMSON, 1))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(QRectF(x - bar_w / 2, top_y, bar_w, chart_bottom - top_y))
+                caret = QPolygonF([
+                    QPointF(x, chart_top + 1), QPointF(x - 3, chart_top - 3),
+                    QPointF(x + 3, chart_top - 3)])
+                p.setBrush(QBrush(self.CRIMSON))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawPolygon(caret)
+
+        # 4. the rightmost bar ("now") gets a cyan frame so "now" is unambiguous.
+        if n:
+            x = x_of(n - 1)
+            p.setPen(QPen(QColor(Colors.CYAN), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(x - bar_w / 2 - 1, chart_top, bar_w + 2, chart_h))
+
+
+# ---------------------------------------------------------------------------
 #  Pinned Model Card (per-provider health)
 # ---------------------------------------------------------------------------
 class PinnedModelCard(QWidget):
@@ -856,6 +1016,19 @@ class PinnedModelCard(QWidget):
     arena_clicked = Signal(str, QPointF)   # crest band clicked -> Fighter Card
     trust_clicked = Signal(str, str, QPointF)  # (model_id, provider_ident, anchor)
     speed_clicked = Signal(str, QPointF)   # speed band clicked -> Time Slip dossier
+    uptime_clicked = Signal(str, str, QPointF)  # (model_id, ep_ident, anchor) -> Vitals
+
+    # ---- THE PULSE (#3 — the 73h uptime cardiogram) geometry constants ----
+    # A health-keyed heartbeat painted in the existing UPTIME_W column. Adds NO
+    # height; lives in the ROW_H=22 row like latency/price. See uptime_spec.md.
+    UPTIME_W = 36
+    PULSE_AMP_UP = 2.0          # calm systole height above baseline
+    PULSE_FLOOR_MARGIN = 3.0    # px of headroom below baseline before the row edge
+    PULSE_DIP_FLOOR = 31.0      # the real worst (~31%) pins a plunge to the floor
+    PULSE_DIP_THRESH = 99.0     # an hour below this is a "dip" (matches outage_hours)
+    # A tiny systole shape so a clean record reads as ALIVE, not a flat bar.
+    # Liveness-only — deliberately small so it never implies a data event.
+    PULSE_BEAT = (0.0, 0.0, 0.0, 1.0, 0.35, 0.0, 0.0)
 
     def __init__(self, model_id, parent=None):
         super().__init__(parent)
@@ -887,6 +1060,25 @@ class PinnedModelCard(QWidget):
         self._crest_emblem_cx = 0.0      # Arena hexagon center x
         self._crest_content_x = 0.0      # Arena text column x
         self._speed_emblem_cx = 0.0      # speed bolt center x
+        # THE PULSE (#3) — per-endpoint 73h uptime histories, keyed by the SAME
+        # _ep_ident(ep) the trust seals use so the right history lands on the
+        # right row across refreshes. Empty → every row keeps the legacy %-chip.
+        self._uptime = {}                # {ep_ident: UptimeHistory}
+        self._uptime_alive = False       # any pinned endpoint is flawless → opt-in heartbeat
+        self._pulse_hits = []            # [(QRectF, ident, accent_hex)] per row
+        self._pulse_hover_ident = None
+        self._pulse_alpha = QColor(Colors.GREEN)   # preallocated; mutated for the heartbeat
+        # Per-row measured geometry, keyed by ident, built ONCE in set_uptime so
+        # the paint hot path only strokes cached objects (GC-disabled invariant).
+        self._pulse_cache = {}           # {ident: measured-pulse dict}
+        # Render introspection (set during paint of the LAST row drawn / per row
+        # during build) — measured by the deterministic test.
+        self._pulse_glyph_rect = QRectF()
+        self._pulse_baseline_y = 0.0
+        self._pulse_worst_pt = None      # QPointF | None
+        self._pulse_dip_xs = []          # list[float]
+        self._pulse_has_outage = False
+        self._pulse_avg = None
         # Shimmer phase is shared by the Arena crest sweep AND the elite speed
         # comet; the one timer runs whenever EITHER band wants it.
         self._shimmer = 0.0
@@ -913,7 +1105,9 @@ class PinnedModelCard(QWidget):
     # ---- Shimmer (shared by the Arena crest + the elite speed comet) ----
 
     def _wants_shimmer(self) -> bool:
-        return self._arena_elite or self._speed_elite
+        # The flawless-uptime "earned heartbeat" rides the SAME 55ms timer as
+        # the Arena sweep / elite speed comet — no new QTimer (decision C).
+        return self._arena_elite or self._speed_elite or self._uptime_alive
 
     def _sync_shimmer(self):
         """Run the one shared shimmer timer iff some band wants it AND we're
@@ -992,6 +1186,137 @@ class PinnedModelCard(QWidget):
     def _ep_ident(self, ep):
         """A stable per-row identity for the trust click target."""
         return ep.tag or ep.provider_name
+
+    # ---- THE PULSE (#3 — the per-row 73h uptime cardiogram) ----
+
+    def set_uptime(self, histories):
+        """histories: {ep_ident: UptimeHistory}. Per-endpoint hourly uptime
+        handed down by the dashboard. Builds the measure-once cardiogram geometry
+        for every endpoint ONCE here (the paint hot path only strokes the cached
+        objects — honors the GC-disabled / allocation-free-paint invariant), then
+        repaints. NEVER calls _update_height: this glyph lives in the existing
+        ROW_H row and adds no height (decision A — no reflow)."""
+        self._uptime = dict(histories or {})
+        self._pulse_cache = {}
+        alive = False
+        for ident, hist in self._uptime.items():
+            if hist is None:
+                continue
+            observed = [v for v in hist.values if v is not None]
+            # A flawless endpoint (no sub-99 hour over a full window) earns the
+            # opt-in heartbeat (decision C). len>=72 guards a too-short window.
+            if len(hist) >= 72 and hist.outage_hours == 0 and observed:
+                alive = True
+        self._uptime_alive = alive
+        self._sync_shimmer()
+        self.update()
+
+    def has_uptime(self) -> bool:
+        return bool(self._uptime)
+
+    def _uptime_for_ep(self, ep):
+        """The UptimeHistory for an endpoint row, or None."""
+        return self._uptime.get(self._ep_ident(ep)) if self._uptime else None
+
+    def _measure_pulse(self, glyph, hist):
+        """The SINGLE source of truth for the cardiogram geometry (paint + hit
+        rect + introspection all read this). Returns a dict, or None when there
+        is not enough observed data to draw a cardiogram (caller falls back to
+        the legacy %-chip). Pure geometry — no painting."""
+        vals = hist.values
+        n = len(vals)
+        observed = [(i, v) for i, v in enumerate(vals) if v is not None]
+        if n < 2 or len(observed) < 2:
+            return None
+
+        inner_left = glyph.left() + 1.0
+        inner_right = glyph.right() - 1.0
+        inner_w = inner_right - inner_left
+        y = glyph.top()
+        baseline_y = y + self.ROW_H * 0.5
+        floor_y = y + self.ROW_H - self.PULSE_FLOOR_MARGIN
+        down_span = floor_y - baseline_y
+        span = max(1, n - 1)
+        amp = self.PULSE_AMP_UP
+        beat = self.PULSE_BEAT
+        beat_len = len(beat)
+        thresh = self.PULSE_DIP_THRESH
+        denom = thresh - self.PULSE_DIP_FLOOR   # 99 - 31 = 68
+
+        def x_of(i):
+            return inner_left + i * (inner_w / span)
+
+        def y_of(i, v):
+            if v >= thresh:
+                return baseline_y - amp * beat[i % beat_len]
+            depth = (thresh - v) / denom
+            depth = 0.0 if depth < 0.0 else 1.0 if depth > 1.0 else depth
+            return baseline_y + depth * down_span
+
+        # Build polylines split on None gaps; collect dip x's + the worst point.
+        segments = []          # list[QPolygonF] — healthy/whole trace
+        red_runs = []          # list[QPolygonF] — contiguous runs that hold a dip
+        dip_xs = []
+        cur = QPolygonF()
+        run_has_dip = False
+        for i, v in enumerate(vals):
+            if v is None:
+                if not cur.isEmpty():
+                    segments.append(cur)
+                    if run_has_dip:
+                        red_runs.append(cur)
+                cur = QPolygonF()
+                run_has_dip = False
+                continue
+            px = x_of(i)
+            py = y_of(i, v)
+            cur.append(QPointF(px, py))
+            if v < thresh:
+                dip_xs.append((px, py, baseline_y))   # (x, trough_y, baseline_y)
+                run_has_dip = True
+        if not cur.isEmpty():
+            segments.append(cur)
+            if run_has_dip:
+                red_runs.append(cur)
+
+        worst_i, worst_v = min(observed, key=lambda iv: iv[1])
+        worst_pt = QPointF(x_of(worst_i), y_of(worst_i, worst_v))
+        has_outage = hist.outage_hours > 0
+        avg = hist.average
+
+        # Healthy-stroke base color: amber if the endpoint carries scars,
+        # else green; then desaturate by rolling average so a chronically
+        # wobbly endpoint reads subtly sick even with no single outage hour.
+        base = QColor(Colors.YELLOW) if has_outage else QColor(Colors.GREEN)
+        if avg is not None:
+            t = (99.9 - avg) / 4.0
+            t = 0.0 if t < 0.0 else 0.6 if t > 0.6 else t
+            base = _lerp_color(base, QColor(Colors.TEXT_MUTED), t)
+
+        return {
+            "segments": segments,
+            "red_runs": red_runs,
+            "dip_xs": dip_xs,
+            "worst_pt": worst_pt,
+            "has_outage": has_outage,
+            "avg": avg,
+            "baseline_y": baseline_y,
+            "base": base,
+            "glyph": QRectF(glyph),
+            "inner_left": inner_left,
+            "inner_w": inner_w,
+            "n": n,
+        }
+
+    def uptime_accent(self, ident) -> str:
+        """GREEN for a clean endpoint, RED when its worst hour < 95% — handed to
+        popup.set_accent() so the dossier border matches the verdict."""
+        hist = self._uptime.get(ident) if self._uptime else None
+        if hist is not None:
+            worst = hist.worst
+            if worst is not None and worst[1] < 95.0:
+                return "#ff4757"
+        return "#2ed573"
 
     # ---- Provider logos (#2b) ----
 
@@ -1294,12 +1619,20 @@ class PinnedModelCard(QWidget):
                 return rect, ident
         return None, None
 
+    def _pulse_at(self, pos):
+        """(rect, ident) of the uptime cardiogram under `pos`, or (None, None)."""
+        for rect, ident, _color in self._pulse_hits:
+            if rect.contains(pos):
+                return rect, ident
+        return None, None
+
     def mouseMoveEvent(self, event):
         pos = event.position()
         icon_hover = self._icon_hit_rect.contains(pos)
         crest_hover = self._benchmark is not None and self._crest_hit_rect.contains(pos)
         speed_hover = self._speed is not None and self._speed_hit_rect.contains(pos)
         _, seal_ident = self._seal_at(pos)
+        _, pulse_ident = self._pulse_at(pos)
         changed = False
         if icon_hover != self._icon_hover:
             self._icon_hover = icon_hover
@@ -1313,8 +1646,12 @@ class PinnedModelCard(QWidget):
         if seal_ident != self._seal_hover_ident:
             self._seal_hover_ident = seal_ident
             changed = True
+        if pulse_ident != self._pulse_hover_ident:
+            self._pulse_hover_ident = pulse_ident
+            changed = True
         if changed:
-            if icon_hover or crest_hover or speed_hover or seal_ident is not None:
+            if (icon_hover or crest_hover or speed_hover
+                    or seal_ident is not None or pulse_ident is not None):
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
                 self.unsetCursor()
@@ -1322,11 +1659,13 @@ class PinnedModelCard(QWidget):
 
     def leaveEvent(self, event):
         if (self._icon_hover or self._crest_hover or self._speed_hover
-                or self._seal_hover_ident is not None):
+                or self._seal_hover_ident is not None
+                or self._pulse_hover_ident is not None):
             self._icon_hover = False
             self._crest_hover = False
             self._speed_hover = False
             self._seal_hover_ident = None
+            self._pulse_hover_ident = None
             self.unsetCursor()
             self.update()
 
@@ -1335,6 +1674,9 @@ class PinnedModelCard(QWidget):
             return
         pos = event.position()
         seal_rect, seal_ident = self._seal_at(pos)
+        # The pulse hit-test is LAST so it can never steal a seal/band click —
+        # though the uptime column never geometrically overlaps them.
+        pulse_rect, pulse_ident = self._pulse_at(pos)
         if self._icon_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._icon_hit_rect.center().toPoint())
             self.info_clicked.emit(self.model_id, QPointF(global_pos))
@@ -1347,6 +1689,9 @@ class PinnedModelCard(QWidget):
         elif seal_ident is not None:
             global_pos = self.mapToGlobal(seal_rect.center().toPoint())
             self.trust_clicked.emit(self.model_id, seal_ident, QPointF(global_pos))
+        elif pulse_ident is not None:
+            global_pos = self.mapToGlobal(pulse_rect.center().toPoint())
+            self.uptime_clicked.emit(self.model_id, pulse_ident, QPointF(global_pos))
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -1507,6 +1852,7 @@ class PinnedModelCard(QWidget):
         name_max_w = lat_right - LATENCY_W - 8 - name_x
 
         self._seal_hits = []
+        self._pulse_hits = []
         for ep in self._endpoints.endpoints:
             is_best = self._best is ep
             p_trust, grade = self._trust_for_ep(ep)
@@ -1561,14 +1907,32 @@ class PinnedModelCard(QWidget):
                 lat_text,
             )
 
-            up_text, up_color = self._uptime_chip(ep.uptime)
-            painter.setPen(up_color)
-            painter.setFont(Fonts.mono_small())
-            painter.drawText(
-                QRectF(up_right - UPTIME_W, y, UPTIME_W, self.ROW_H),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                up_text,
-            )
+            # THE PULSE (#3): the 73h cardiogram in the uptime column. Falls
+            # back to the legacy %-chip when there's no (or too little) history
+            # so a failed/absent fetch never blanks the row.
+            up_glyph = QRectF(up_right - UPTIME_W, y, UPTIME_W, self.ROW_H)
+            ident = self._ep_ident(ep)
+            hist = self._uptime.get(ident) if self._uptime else None
+            measured = None
+            if hist is not None:
+                measured = self._pulse_cache.get(ident)
+                if measured is None:
+                    measured = self._measure_pulse(up_glyph, hist)
+                    self._pulse_cache[ident] = measured
+            if measured is not None:
+                hover = (self._pulse_hover_ident == ident)
+                self._paint_pulse(painter, measured, hover)
+                accent = self.uptime_accent(ident)
+                self._pulse_hits.append((QRectF(up_glyph), ident, accent))
+            else:
+                up_text, up_color = self._uptime_chip(ep.uptime)
+                painter.setPen(up_color)
+                painter.setFont(Fonts.mono_small())
+                painter.drawText(
+                    up_glyph,
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                    up_text,
+                )
 
             price_text = self._price(ep)
             painter.setPen(Colors.TEXT_ACCENT)
@@ -1582,6 +1946,86 @@ class PinnedModelCard(QWidget):
             y += self.ROW_H
 
         painter.end()
+
+    # ---- THE PULSE rendering (allocation-free: strokes cached geometry) ----
+
+    def _paint_pulse(self, painter, m, hover):
+        """Stroke ONE row's cached cardiogram. No allocation beyond reusing the
+        single preallocated self._pulse_alpha QColor for the heartbeat lift."""
+        baseline_y = m["baseline_y"]
+        inner_left = m["glyph"].left() + 1.0
+        inner_right = m["glyph"].right() - 1.0
+        base = m["base"]
+        has_outage = m["has_outage"]
+        # On hover, brighten the whole trace to full alpha + a faint halo.
+        stroke = QColor(base)
+        if hover:
+            stroke.setAlpha(255)
+
+        painter.save()
+        # Update the live introspection fields to the row currently painted so
+        # the deterministic test can read the last (single-row) card's geometry.
+        self._pulse_glyph_rect = m["glyph"]
+        self._pulse_baseline_y = baseline_y
+        self._pulse_worst_pt = m["worst_pt"]
+        self._pulse_dip_xs = [x for (x, _ty, _by) in m["dip_xs"]]
+        self._pulse_has_outage = has_outage
+        self._pulse_avg = m["avg"]
+
+        # 1. faint isoelectric baseline guide — a "monitor" feel.
+        guide = QColor(base)
+        guide.setAlpha(46)
+        painter.setPen(QPen(guide, 1))
+        painter.drawLine(QPointF(inner_left, baseline_y),
+                         QPointF(inner_right, baseline_y))
+
+        # 2. healthy/whole trace (round caps so the calm pulse looks alive).
+        pen = QPen(stroke, 1.4, Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        for seg in m["segments"]:
+            painter.drawPolyline(seg)
+
+        # 3. re-stroke any run that holds a dip in RED, on top.
+        red = QColor(Colors.RED)
+        if m["red_runs"]:
+            painter.setPen(QPen(red, 1.9, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            for run in m["red_runs"]:
+                painter.drawPolyline(run)
+
+        # 4. scar ticks: a 1px vertical drop from baseline to each trough
+        #    (guarantees a >=1px mark even when the hour is sub-pixel narrow).
+        if m["dip_xs"]:
+            painter.setPen(QPen(red, 1))
+            for (x, ty, by) in m["dip_xs"]:
+                painter.drawLine(QPointF(x, by), QPointF(x, ty))
+
+        # 5. worst dot: the single point the eye lands on.
+        if has_outage and m["worst_pt"] is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(red))
+            painter.drawEllipse(m["worst_pt"], 1.7, 1.7)
+
+        # 6. flawless heartbeat (opt-in, decision C): a tiny brightness ease on
+        #    the systole blip nearest the moving phase — only when this row is
+        #    flawless AND the shared shimmer is running. Mutates ONE preallocated
+        #    QColor (no new geometry / allocation).
+        if (not has_outage and self._uptime_alive
+                and self._shimmer_timer.isActive() and m["segments"]):
+            seg = m["segments"][0]
+            n_pts = seg.count()
+            if n_pts:
+                idx = int(self._shimmer * n_pts) % n_pts
+                p = seg.at(idx)
+                a = int(150 + 105 * math.sin(self._shimmer * 2 * math.pi))
+                self._pulse_alpha.setRgb(base.red(), base.green(), base.blue(),
+                                         max(0, min(255, a)))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(self._pulse_alpha))
+                painter.drawEllipse(p, 1.5, 1.5)
+
+        painter.restore()
 
     # ---- Arena crest rendering ----
 
@@ -2131,6 +2575,129 @@ class PinnedModelCard(QWidget):
         if tp >= 0.75 and lp >= 0.75:
             return "Fast both ways — quick to first token and fast streaming."
         return ""
+
+    # ---- THE PULSE dossier (#3 — the painted 73h "Vitals" strip + verdict) ----
+
+    def _longest_clean_streak(self, vals) -> int:
+        """Max run of consecutive >=99% hours (a None breaks the run)."""
+        best = cur = 0
+        for v in vals:
+            if v is not None and v >= 99.0:
+                cur += 1
+                best = max(best, cur)
+            else:
+                cur = 0
+        return best
+
+    def _uptime_provider_name(self, ident) -> str:
+        ep = self._ep_by_ident(ident)
+        if ep is not None:
+            return self._provider_label(ep)
+        return ident
+
+    def uptime_html(self, ident) -> str:
+        """The Vitals dossier: a verdict, the PAINTED 73h strip (embedded as a
+        data-URI <img> so the popup stays a single QLabel), a rhythm stat table,
+        and either a DEEPEST-DIP callout (outage) or a FLAWLESS banner (clean)."""
+        hist = self._uptime.get(ident) if self._uptime else None
+        if hist is None or len([v for v in hist.values if v is not None]) < 2:
+            return ""
+        name = html.escape(self._uptime_provider_name(ident))
+        vals = hist.values
+        avg = hist.average
+        latest = hist.latest
+        worst = hist.worst
+        outage = hist.outage_hours
+        n = len(hist)
+        flawless = (outage == 0 and n >= 72)
+
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+
+        # Verdict line, colored by health.
+        if flawless:
+            out.append(
+                "<div style='color:#2ed573;font-size:9.5pt;font-weight:bold;"
+                f"margin-bottom:2px;'>&#9829; FLAWLESS &nbsp;·&nbsp; {n}/{n} hours steady</div>")
+        elif outage == 0:
+            out.append(
+                "<div style='color:#2ed573;font-size:9.5pt;font-weight:bold;"
+                "margin-bottom:2px;'>CLEAN &nbsp;·&nbsp; no outage hours observed</div>")
+        else:
+            wv = worst[1] if worst else 0.0
+            wd = html.escape(str(worst[0])) if worst else "—"
+            out.append(
+                "<div style='color:#ff4757;font-size:9.5pt;font-weight:bold;"
+                f"margin-bottom:2px;'>{outage} OUTAGE HOUR{'' if outage == 1 else 'S'} "
+                f"&nbsp;·&nbsp; worst {wv:.0f}% on {wd}</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+                   "73-hour vitals · live from openrouter.ai</div>")
+
+        # The painted 73-bar strip, embedded as a data-URI image.
+        try:
+            pm = UptimeStripWidget(hist).render_pixmap()
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            pm.save(buf, "PNG")
+            buf.close()
+            b64 = bytes(ba.toBase64()).decode("ascii")
+            out.append(
+                f"<div style='margin-bottom:6px;'><img src='data:image/png;base64,{b64}' "
+                f"width='{UptimeStripWidget.STRIP_W}' height='{UptimeStripWidget.STRIP_H}'></div>")
+            out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+                       "&#9664; 73h ago &nbsp;&nbsp;&nbsp; now &#9654;</div>")
+        except Exception:
+            log.debug("uptime strip render failed", exc_info=True)
+
+        # Rhythm-strip stat table (speed_html's gauge_row idiom).
+        def stat(label, value, color="#f0f0ff"):
+            return (f"<tr>"
+                    f"<td style='padding:2px 14px 2px 0;color:#a0a0c8;white-space:nowrap;'>{label}</td>"
+                    f"<td align='right' style='padding:2px 0;color:{color};font-weight:bold;"
+                    f"white-space:nowrap;'>{value}</td></tr>")
+
+        def pct(v):
+            return f"{v:.2f}%" if v is not None else "—"
+
+        wcell = "—"
+        if worst is not None:
+            wcol = "#ff4757" if worst[1] < 95.0 else "#f0f0ff"
+            wcell = (f"<span style='color:{wcol};'>{worst[1]:.1f}% "
+                     f"<span style='color:#64648c;'>· {html.escape(str(worst[0]))}</span></span>")
+        streak = self._longest_clean_streak(vals)
+        rows = (
+            stat("Latest", pct(latest))
+            + stat("73h Average", pct(avg))
+            + f"<tr><td style='padding:2px 14px 2px 0;color:#a0a0c8;white-space:nowrap;'>Worst Hour</td>"
+              f"<td align='right' style='padding:2px 0;white-space:nowrap;'>{wcell}</td></tr>"
+            + stat("Outage Hours", str(outage), "#ff4757" if outage else "#2ed573")
+            + stat("Longest Clean Streak", f"{streak} h")
+        )
+        out.append(f"<table cellspacing='0' style='font-size:9pt;border-spacing:0;"
+                   f"margin-bottom:6px;'>{rows}</table>")
+
+        # Deepest-dip callout (outage) OR flawless-streak banner (clean).
+        if outage > 0 and worst is not None:
+            mins = round((100.0 - worst[1]) / 100.0 * 60)
+            out.append(
+                "<div style='background-color:#2a1416;border-left:3px solid #ff4757;"
+                "padding:5px 8px;margin-bottom:4px;'>"
+                "<span style='color:#ff6b78;font-weight:bold;font-size:8.5pt;'>DEEPEST DIP</span> "
+                f"<span style='color:#f0f0ff;font-size:9pt;'>&nbsp;{worst[1]:.0f}% "
+                f"<span style='color:#a0a0c8;'>· {html.escape(str(worst[0]))}</span></span><br>"
+                f"<span style='color:#a0a0c8;font-size:8pt;'>endpoint was down ~{mins} min "
+                "of that hour</span></div>")
+        else:
+            out.append(
+                "<div style='background-color:#13241a;border-left:3px solid #2ed573;"
+                "padding:5px 8px;margin-bottom:4px;'>"
+                "<span style='color:#2ed573;font-weight:bold;font-size:8.5pt;'>FLAWLESS STREAK</span> "
+                f"<span style='color:#c8c8e0;font-size:8.5pt;'>&nbsp;{streak} consecutive "
+                "healthy hours</span></div>")
+
+        out.append("<div style='margin-top:4px;color:#64648c;font-size:8pt;'>"
+                   "live from openrouter.ai · 73 hourly samples · refreshed every ~20 min</div>")
+        return "".join(out)
 
     # ---- helpers ----
 
