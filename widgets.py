@@ -32,6 +32,18 @@ def _safe_paint(widget):
     return widget.width() > 0 and widget.height() > 0
 
 
+import re as _re
+_HEX_COLOR = _re.compile(r"^#[0-9a-fA-F]{3,8}$")
+
+
+def _safe_color(value, fallback="#a0a0c8"):
+    """Whitelist a hex color before it's interpolated into a QLabel CSS
+    `style=` attribute. Trust-grade colors are hardcoded constants today, but
+    this guards the rich-text render boundary against any future code path
+    feeding an attacker-controlled color into an attribute (CSS injection)."""
+    return value if isinstance(value, str) and _HEX_COLOR.match(value) else fallback
+
+
 class ArcGauge(QWidget):
     """A large, animated circular arc gauge for credit balance."""
 
@@ -823,9 +835,11 @@ class PinnedModelCard(QWidget):
     PAD_Y = 8
     ICON_VISIBLE = 16   # rendered glyph
     ICON_HIT = 22       # hit area (slightly bigger for usability)
+    SEAL_W = 14         # the per-provider Trust Seal slot (The Ledger)
 
     info_clicked = Signal(str, QPointF)    # (model_id, global anchor pos)
     arena_clicked = Signal(str, QPointF)   # crest band clicked -> Fighter Card
+    trust_clicked = Signal(str, str, QPointF)  # (model_id, provider_ident, anchor)
 
     def __init__(self, model_id, parent=None):
         super().__init__(parent)
@@ -840,6 +854,10 @@ class PinnedModelCard(QWidget):
         self._benchmark = None
         self._crest_hit_rect = QRectF()
         self._crest_hover = False
+        # The Ledger — per-provider privacy/trust seals
+        self._provider_trust = None      # ProviderTrustBook or None
+        self._seal_hits = []             # [(QRectF, ident, accent_hex)] per row
+        self._seal_hover_ident = None
         self._shimmer = 0.0
         self._shimmer_on = False
         self._shimmer_timer = QTimer(self)
@@ -872,6 +890,28 @@ class PinnedModelCard(QWidget):
 
     def has_benchmark(self) -> bool:
         return self._benchmark is not None
+
+    # ---- The Ledger (per-provider trust seals) ----
+
+    def set_provider_trust(self, book):
+        """book: a ProviderTrustBook or None. Seals appear on each provider
+        row once a matching provider is found."""
+        self._provider_trust = book
+        self.update()
+
+    def _trust_for_ep(self, ep):
+        """(ProviderTrust, CustodyGrade) for an endpoint, or (None, None)."""
+        if self._provider_trust is None:
+            return None, None
+        p = self._provider_trust.lookup(name=ep.provider_name, tag=ep.tag)
+        if p is None:
+            return None, None
+        from frontend_client import custody_score
+        return p, custody_score(p)
+
+    def _ep_ident(self, ep):
+        """A stable per-row identity for the trust click target."""
+        return ep.tag or ep.provider_name
 
     def arena_accent(self) -> str:
         return self._benchmark.tier[1] if self._benchmark else "#00d2ff"
@@ -938,6 +978,14 @@ class PinnedModelCard(QWidget):
                 return f"{ep.context_length // 1_000_000}M"
             return f"{ep.context_length // 1000}k"
 
+        def trust_cell(ep):
+            _, g = self._trust_for_ep(ep)
+            if g is None:
+                return "<span style='color:#3a3a52;'>—</span>"
+            return (f"<span style='color:{_safe_color(g.color)};font-weight:bold;'>"
+                    f"{html.escape(g.grade)}</span>"
+                    f"<span style='color:#5a5a78;'> {int(g.score)}</span>")
+
         # Use nowrap on provider name so long region tags
         # (e.g. "Amazon Bedrock · eu-west-1") don't wrap and break row alignment.
         # Tight cell padding keeps rows visually compact.
@@ -954,6 +1002,7 @@ class PinnedModelCard(QWidget):
             rows.append(
                 f"<tr style='color:{row_color};'>"
                 f"<td style='padding:3px 18px 3px 0;white-space:nowrap;'>{star}{name}</td>"
+                f"<td align='center' style='padding:3px 12px;white-space:nowrap;'>{trust_cell(ep)}</td>"
                 f"<td align='right' style='padding:3px 12px;white-space:nowrap;'>{lat_cell(ep)}</td>"
                 f"<td align='right' style='padding:3px 12px;white-space:nowrap;'>{up_cell(ep)}</td>"
                 f"<td align='right' style='padding:3px 12px;white-space:nowrap;'>{tp_cell(ep)}</td>"
@@ -978,6 +1027,7 @@ class PinnedModelCard(QWidget):
             f"<table cellspacing='0' style='border-spacing:0;'>"
             f"<tr style='color:#64648c;font-size:8pt;'>"
             f"<th align='left' style='padding:3px 18px 6px 0;font-weight:600;'>PROVIDER</th>"
+            f"<th align='center' style='padding:3px 12px 6px 12px;font-weight:600;'>TRUST</th>"
             f"<th align='right' style='padding:3px 12px 6px 12px;font-weight:600;'>LAT</th>"
             f"<th align='right' style='padding:3px 12px 6px 12px;font-weight:600;'>UPTIME</th>"
             f"<th align='right' style='padding:3px 12px 6px 12px;font-weight:600;'>SPEED</th>"
@@ -988,12 +1038,148 @@ class PinnedModelCard(QWidget):
             f"{recommendation}"
         )
 
+    # ---- The Dossier (per-provider trust deep-dive popup) ----
+
+    def _ep_by_ident(self, ident):
+        if not self._endpoints:
+            return None
+        for ep in self._endpoints.endpoints:
+            if self._ep_ident(ep) == ident:
+                return ep
+        return None
+
+    def dossier_accent(self, ident) -> str:
+        ep = self._ep_by_ident(ident)
+        if ep is not None:
+            _, g = self._trust_for_ep(ep)
+            if g is not None:
+                return _safe_color(g.color, "#00d2ff")
+        return "#00d2ff"
+
+    def dossier_html(self, ident) -> str:
+        """The Custody dossier for one provider: the verdict, an auditable rap
+        sheet that sums to the Custody Score, and the jurisdiction trail."""
+        ep = self._ep_by_ident(ident)
+        if ep is None:
+            return ""
+        p, g = self._trust_for_ep(ep)
+        if p is None or g is None:
+            return ""
+
+        name = html.escape(p.name or ep.provider_name or "Provider")
+        mono = html.escape((p.name or "?")[:1].upper())
+        gcol = _safe_color(g.color)
+        grade = html.escape(g.grade)
+        score = int(g.score)
+        # Header: monogram chip + name + grade + score (logo arrives in #2b).
+        head = (
+            f"<table cellspacing='0'><tr>"
+            f"<td style='padding:0 8px 0 0;'>"
+            f"<span style='background-color:{gcol};color:#10101c;font-weight:bold;"
+            f"font-size:11pt;padding:2px 7px;border-radius:6px;'>{mono}</span></td>"
+            f"<td style='padding:0;'>"
+            f"<span style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</span><br>"
+            f"<span style='font-size:8pt;color:#64648c;'>Custody dossier · openrouter.ai</span>"
+            f"</td>"
+            f"<td align='right' style='padding:0 0 0 18px;'>"
+            f"<span style='font-size:15pt;font-weight:bold;color:{gcol};'>{grade}</span>"
+            f"<span style='font-size:9pt;color:#a0a0c8;'> &nbsp;{score}<span style='color:#5a5a78;'>/100</span></span>"
+            f"</td></tr></table>"
+        )
+
+        verdict = (
+            f"<div style='margin:6px 0 8px 0;color:#c8c8e0;font-size:9pt;'>"
+            f"{html.escape(self._trust_verdict(p))}</div>"
+        )
+
+        # Rap sheet: offenses (red, with deductions) + clean checks (green),
+        # then the sum so the score is auditable.
+        rows = []
+        for pen in g.penalties:
+            # Active harms strike in bright red; lesser deductions in amber.
+            col = "#f08a8a" if pen.offense else "#d9a96a"
+            rows.append(
+                f"<tr><td style='padding:1px 14px 1px 0;color:{col};white-space:nowrap;'>"
+                f"{html.escape(pen.label)}</td>"
+                f"<td align='right' style='padding:1px 0;color:{col};white-space:nowrap;'>{pen.delta}</td></tr>")
+        for pos in g.positives:
+            rows.append(
+                f"<tr><td style='padding:1px 14px 1px 0;color:#7fd99a;white-space:nowrap;'>"
+                f"&#10003; {html.escape(pos)}</td>"
+                f"<td align='right' style='padding:1px 0;color:#5a7a64;'>&nbsp;</td></tr>")
+        rap = (
+            f"<table cellspacing='0' style='font-size:8.5pt;border-spacing:0;'>"
+            f"{''.join(rows)}"
+            f"<tr><td colspan='2' style='border-top:1px solid #323250;padding-top:3px;'></td></tr>"
+            f"<tr><td style='padding:1px 14px 0 0;color:#a0a0c8;font-weight:bold;'>= Custody Score</td>"
+            f"<td align='right' style='padding:1px 0 0 0;color:{gcol};font-weight:bold;'>"
+            f"{score}/100 · {grade}</td></tr>"
+            f"</table>"
+        )
+
+        return f"{head}{verdict}{rap}{self._jurisdiction_html(p)}{self._dossier_footer(p)}"
+
+    def _trust_verdict(self, p) -> str:
+        hq = p.headquarters or "Unknown-HQ"
+        train = "trains on your prompts" if p.trains else "never trains"
+        if not p.retains:
+            ret = "zero retention"
+        elif p.retention_days:
+            ret = f"deletes prompts after {p.retention_days} days"
+        else:
+            ret = "retains prompts (term undisclosed)"
+        parts = [f"{hq}-based", train, ret]
+        if p.can_publish:
+            parts.append("may publish prompts")
+        return " · ".join(parts)
+
+    def _jurisdiction_html(self, p) -> str:
+        def chip(code, color="#2a2a44", fg="#c8c8e0"):
+            return (f"<span style='background-color:{color};color:{fg};font-size:8pt;"
+                    f"font-weight:bold;padding:1px 6px;border-radius:4px;'>"
+                    f"{html.escape(code)}</span>")
+        hq = p.headquarters or "??"
+        bits = [f"<span style='color:#64648c;font-size:8pt;'>HQ</span> {chip(hq)}"]
+        if p.datacenters:
+            cross = any(c != p.headquarters for c in p.datacenters)
+            dc_chips = " ".join(
+                chip(c, "#4a3a1a" if c != p.headquarters else "#2a2a44",
+                     "#ffd277" if c != p.headquarters else "#c8c8e0")
+                for c in p.datacenters)
+            bits.append(f"<span style='color:#64648c;font-size:8pt;'>&nbsp;&nbsp;servers</span> {dc_chips}")
+            if cross:
+                bits.append("<span style='color:#ffd277;font-size:8pt;'>&nbsp;· prompt leaves home jurisdiction</span>")
+        elif not p.datacenters_known:
+            bits.append("<span style='color:#7a7a96;font-size:8pt;'>&nbsp;&nbsp;servers undisclosed</span>")
+        return f"<div style='margin-top:8px;'>{''.join(bits)}</div>"
+
+    def _dossier_footer(self, p) -> str:
+        notes = []
+        if not p.retains:
+            notes.append("prompts never stored")
+        elif p.retention_days:
+            notes.append(f"prompt deleted in {p.retention_days} days")
+        if p.byok_enabled:
+            notes.append("BYOK available")
+        if not notes:
+            return ""
+        return (f"<div style='margin-top:6px;color:#64648c;font-size:8pt;'>"
+                f"{html.escape(' · '.join(notes))}</div>")
+
     # ---- mouse handling for the info icon ----
+
+    def _seal_at(self, pos):
+        """(rect, ident) of the Trust Seal under `pos`, or (None, None)."""
+        for rect, ident, _color in self._seal_hits:
+            if rect.contains(pos):
+                return rect, ident
+        return None, None
 
     def mouseMoveEvent(self, event):
         pos = event.position()
         icon_hover = self._icon_hit_rect.contains(pos)
         crest_hover = self._benchmark is not None and self._crest_hit_rect.contains(pos)
+        _, seal_ident = self._seal_at(pos)
         changed = False
         if icon_hover != self._icon_hover:
             self._icon_hover = icon_hover
@@ -1001,17 +1187,21 @@ class PinnedModelCard(QWidget):
         if crest_hover != self._crest_hover:
             self._crest_hover = crest_hover
             changed = True
+        if seal_ident != self._seal_hover_ident:
+            self._seal_hover_ident = seal_ident
+            changed = True
         if changed:
-            if icon_hover or crest_hover:
+            if icon_hover or crest_hover or seal_ident is not None:
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
                 self.unsetCursor()
             self.update()
 
     def leaveEvent(self, event):
-        if self._icon_hover or self._crest_hover:
+        if self._icon_hover or self._crest_hover or self._seal_hover_ident is not None:
             self._icon_hover = False
             self._crest_hover = False
+            self._seal_hover_ident = None
             self.unsetCursor()
             self.update()
 
@@ -1019,12 +1209,16 @@ class PinnedModelCard(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
+        seal_rect, seal_ident = self._seal_at(pos)
         if self._icon_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._icon_hit_rect.center().toPoint())
             self.info_clicked.emit(self.model_id, QPointF(global_pos))
         elif self._benchmark is not None and self._crest_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._crest_hit_rect.center().toPoint())
             self.arena_clicked.emit(self.model_id, QPointF(global_pos))
+        elif seal_ident is not None:
+            global_pos = self.mapToGlobal(seal_rect.center().toPoint())
+            self.trust_clicked.emit(self.model_id, seal_ident, QPointF(global_pos))
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -1164,11 +1358,15 @@ class PinnedModelCard(QWidget):
         price_right = w - self.PAD_X
         up_right = price_right - PRICE_W - GAP
         lat_right = up_right - UPTIME_W - GAP
-        name_x = self.PAD_X + 14
+        # Leave the left slot for the per-provider Trust Seal (or the ★ marker
+        # when no trust data is available).
+        name_x = self.PAD_X + self.SEAL_W + 3
         name_max_w = lat_right - LATENCY_W - 8 - name_x
 
+        self._seal_hits = []
         for ep in self._endpoints.endpoints:
             is_best = self._best is ep
+            p_trust, grade = self._trust_for_ep(ep)
 
             if is_best:
                 hi_path = QPainterPath()
@@ -1179,7 +1377,20 @@ class PinnedModelCard(QWidget):
                 hi = QColor(Colors.CYAN)
                 hi.setAlpha(18)
                 painter.fillPath(hi_path, QBrush(hi))
+                # A 2px gold accent at the row's left edge marks the best
+                # provider without fighting the seal for the left slot.
+                painter.fillRect(QRectF(self.PAD_X - 4, y + 3, 2, self.ROW_H - 6),
+                                 QBrush(QColor("#ffd23f")))
 
+            if grade is not None:
+                seal_box = QRectF(self.PAD_X, y + (self.ROW_H - 16) / 2, self.SEAL_W, 16)
+                hover = (self._seal_hover_ident == self._ep_ident(ep))
+                self._paint_trust_seal(painter, seal_box, grade, hover)
+                self._seal_hits.append(
+                    (QRectF(self.PAD_X - 2, y, self.SEAL_W + 4, self.ROW_H),
+                     self._ep_ident(ep), grade.color))
+            elif is_best:
+                # No trust data — fall back to the classic ★ best marker.
                 painter.setPen(Colors.CYAN)
                 painter.setFont(Fonts.body())
                 painter.drawText(
@@ -1363,6 +1574,80 @@ class PinnedModelCard(QWidget):
             painter.setBrush(QColor(255, 255, 255, 95))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPath(sweep)
+        painter.restore()
+
+    # ---- Trust Seal rendering (The Ledger) ----
+
+    @staticmethod
+    def _shield_path(cx, top, w, h):
+        """A heraldic shield: rounded-top rectangle tapering to a bottom point."""
+        p = QPainterPath()
+        left, right = cx - w / 2, cx + w / 2
+        r = 2.0
+        p.moveTo(left, top + r)
+        p.quadTo(left, top, left + r, top)
+        p.lineTo(right - r, top)
+        p.quadTo(right, top, right, top + r)
+        p.lineTo(right, top + h * 0.52)
+        p.quadTo(right, top + h * 0.82, cx, top + h)
+        p.quadTo(left, top + h * 0.82, left, top + h * 0.52)
+        p.closeSubpath()
+        return p
+
+    def _paint_trust_seal(self, painter, box, grade, hover=False):
+        """A small painted shield carrying the provider's letter grade plus
+        rim notches for active offenses. Fixed geometry (independent of font)
+        so it never clips; the grade letter is font-metric-centered."""
+        color = QColor(grade.color)
+        cx = box.center().x()
+        sw, sh = 11.0, 14.0
+        top = box.center().y() - sh / 2
+        shield = self._shield_path(cx, top, sw, sh)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # S-tier (and hover) earn a soft outer glow — calm, not animated.
+        if grade.is_top or hover:
+            glow = QColor(color)
+            glow.setAlpha(70 if hover else 45)
+            painter.setPen(QPen(glow, 2.4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(self._shield_path(cx, top - 1, sw + 2.2, sh + 2.2))
+
+        body = QColor(color)
+        body.setAlpha(64 if hover else 42)
+        painter.setBrush(QBrush(body))
+        painter.setPen(QPen(color, 1.3))
+        painter.drawPath(shield)
+
+        # Offense notches: small card-colored bites out of the right rim, one
+        # per active harm (capped at 4). A clean S/A seal has none.
+        n = grade.notch_count
+        if n:
+            painter.setBrush(QBrush(Colors.BG_CARD))
+            painter.setPen(Qt.PenStyle.NoPen)
+            right = cx + sw / 2
+            for i in range(n):
+                ny = top + 2.5 + i * 2.6
+                nick = QPainterPath()
+                nick.moveTo(right + 0.5, ny)
+                nick.lineTo(right - 2.0, ny + 1.1)
+                nick.lineTo(right + 0.5, ny + 2.2)
+                nick.closeSubpath()
+                painter.fillPath(nick, QBrush(Colors.BG_CARD))
+
+        # Grade letter, font-metric-centered.
+        lf = QFont(Fonts.tiny())
+        lf.setBold(True)
+        lf.setPointSize(8)
+        painter.setFont(lf)
+        painter.setPen(QColor(color).lighter(125))
+        fm = QFontMetrics(lf)
+        letter = grade.grade
+        lw = fm.horizontalAdvance(letter)
+        painter.drawText(QPointF(cx - lw / 2.0, top + sh * 0.56 + fm.ascent() / 2.0 - 1),
+                         letter)
         painter.restore()
 
     def arena_html(self) -> str:

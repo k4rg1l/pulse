@@ -1,0 +1,467 @@
+{
+ "data": [
+  {
+   "name": "Anthropic",
+   "slug": "anthropic",
+   "displayName": "Anthropic",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "retentionDays": 30,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.anthropic.com/legal/commercial-terms",
+    "privacyPolicyURL": "https://www.anthropic.com/legal/privacy",
+    "requiresUserIDs": true
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "/images/icons/Anthropic.svg"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "anthropic"
+  },
+  {
+   "name": "OpenAI",
+   "slug": "openai",
+   "displayName": "OpenAI",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "privacyPolicyURL": "https://openai.com/policies/privacy-policy/",
+    "requiresUserIDs": true
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "/images/icons/OpenAI.svg",
+    "className": "invert-0 dark:invert"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_responses"
+  },
+  {
+   "name": "Google",
+   "slug": "google-vertex",
+   "displayName": "Google Vertex",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://cloud.google.com/terms/",
+    "privacyPolicyURL": "https://cloud.google.com/terms/cloud-privacy-notice",
+    "requiresUserIDs": true
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "/images/icons/GoogleVertex.svg"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "gemini"
+  },
+  {
+   "name": "Google AI Studio",
+   "slug": "google-ai-studio",
+   "displayName": "Google AI Studio",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "retentionDays": 55,
+    "canPublish": false,
+    "termsOfServiceURL": "https://cloud.google.com/terms/",
+    "privacyPolicyURL": "https://cloud.google.com/terms/cloud-privacy-notice"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "/images/icons/GoogleAIStudio.svg"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "gemini"
+  },
+  {
+   "name": "DeepInfra",
+   "slug": "deepinfra",
+   "displayName": "DeepInfra",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://deepinfra.com/terms",
+    "privacyPolicyURL": "https://deepinfra.com/privacy"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "/images/icons/DeepInfra.webp"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Together",
+   "slug": "together",
+   "displayName": "Together",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.together.ai/terms-of-service",
+    "privacyPolicyURL": "https://www.together.ai/privacy"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://www.together.ai/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "DeepSeek",
+   "slug": "deepseek",
+   "displayName": "DeepSeek",
+   "dataPolicy": {
+    "training": true,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "termsOfServiceURL": "https://chat.deepseek.com/downloads/DeepSeek%20Terms%20of%20Use.html",
+    "privacyPolicyURL": "https://chat.deepseek.com/downloads/DeepSeek%20Privacy%20Policy.html"
+   },
+   "datacenters": null,
+   "headquarters": "CN",
+   "icon": {
+    "url": "/images/icons/DeepSeek.png"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "deepseek"
+  },
+  {
+   "name": "Nvidia",
+   "slug": "nvidia",
+   "displayName": "NVIDIA",
+   "dataPolicy": {
+    "training": true,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "termsOfServiceURL": "https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf",
+    "privacyPolicyURL": "https://www.nvidia.com/en-us/about-nvidia/privacy-policy/"
+   },
+   "datacenters": [
+    "US"
+   ],
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://www.nvidia.com/en-us/&size=256"
+   },
+   "byokEnabled": false,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Moonshot AI",
+   "slug": "moonshotai",
+   "displayName": "Moonshot AI",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://platform.moonshot.ai/docs/agreement/modeluse",
+    "privacyPolicyURL": "https://platform.moonshot.ai/docs/agreement/userprivacy"
+   },
+   "datacenters": [
+    "SG"
+   ],
+   "headquarters": "SG",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://moonshot.ai&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Z.AI",
+   "slug": "z-ai",
+   "displayName": "Z.ai",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://chat.z.ai/legal-agreement/terms-of-service",
+    "privacyPolicyURL": "https://chat.z.ai/legal-agreement/privacy-policy"
+   },
+   "datacenters": [
+    "SG"
+   ],
+   "headquarters": "SG",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://z.ai/model-api&size=256",
+    "className": "invert-0 dark:invert"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Cerebras",
+   "slug": "cerebras",
+   "displayName": "Cerebras",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.cerebras.ai/terms-of-service",
+    "privacyPolicyURL": "https://www.cerebras.ai/privacy-policy"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://www.cerebras.ai/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "SambaNova",
+   "slug": "sambanova",
+   "displayName": "SambaNova",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://sambanova.ai/terms-and-conditions",
+    "privacyPolicyURL": "https://sambanova.ai/privacy-policy"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://sambanova.ai/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Novita",
+   "slug": "novita",
+   "displayName": "NovitaAI",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://novita.ai/legal/terms-of-service",
+    "privacyPolicyURL": "https://novita.ai/legal/privacy-policy"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://novita.ai/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "BaseTen",
+   "slug": "baseten",
+   "displayName": "Baseten",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.baseten.co/terms-and-conditions",
+    "privacyPolicyURL": "https://www.baseten.co/privacy-policy"
+   },
+   "datacenters": null,
+   "headquarters": "US",
+   "icon": {
+    "url": "/images/icons/baseten-favicon.svg"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Arcee AI",
+   "slug": "arcee-ai",
+   "displayName": "Arcee AI",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false
+   },
+   "datacenters": [
+    "US"
+   ],
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://www.arcee.ai/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Morph",
+   "slug": "morph",
+   "displayName": "Morph",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.morphllm.com/privacy/tos",
+    "privacyPolicyURL": "https://morphllm.com/privacy"
+   },
+   "datacenters": [
+    "US"
+   ],
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://morphllm.com&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Stealth",
+   "slug": "stealth",
+   "displayName": "Stealth",
+   "dataPolicy": {
+    "training": true,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "requiresUserIDs": true
+   },
+   "datacenters": null,
+   "headquarters": null,
+   "icon": {
+    "url": "/images/icons/Stealth.svg",
+    "className": "invert-0 dark:invert"
+   },
+   "byokEnabled": false,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "WandB",
+   "slug": "wandb",
+   "displayName": "Weights & Biases",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "termsOfServiceURL": "https://site.wandb.ai/terms/",
+    "privacyPolicyURL": "https://wandb.ai/site/privacy/"
+   },
+   "datacenters": [
+    "US"
+   ],
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://wandb.ai/home&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Ionstream",
+   "slug": "ionstream",
+   "displayName": "Ionstream",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://ionstream.ai/terms-and-conditions/",
+    "privacyPolicyURL": "https://ionstream.ai/privacy-policy/"
+   },
+   "datacenters": [
+    "US"
+   ],
+   "headquarters": "US",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://huggingface.co/&size=256"
+   },
+   "byokEnabled": false,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "AI21",
+   "slug": "ai21",
+   "displayName": "AI21",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.ai21.com/terms-of-service/",
+    "privacyPolicyURL": "https://www.ai21.com/privacy-policy/"
+   },
+   "datacenters": null,
+   "headquarters": "IL",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ai21.com/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "Minimax",
+   "slug": "minimax",
+   "displayName": "MiniMax",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": true,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.minimax.io/platform/protocol/terms-of-service",
+    "privacyPolicyURL": "https://www.minimax.io/platform/protocol/privacy-policy"
+   },
+   "datacenters": [
+    "US"
+   ],
+   "headquarters": "SG",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://minimaxi.com/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  },
+  {
+   "name": "NextBit",
+   "slug": "nextbit",
+   "displayName": "NextBit",
+   "dataPolicy": {
+    "training": false,
+    "trainingOpenRouter": false,
+    "retainsPrompts": false,
+    "canPublish": false,
+    "termsOfServiceURL": "https://www.nextbit256.com/docs/terms-of-service",
+    "privacyPolicyURL": "https://www.nextbit256.com/docs/privacy-policy"
+   },
+   "datacenters": [
+    "ES"
+   ],
+   "headquarters": "ES",
+   "icon": {
+    "url": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://nextbit256.com/&size=256"
+   },
+   "byokEnabled": true,
+   "pricingStrategy": "openai_chat_completions"
+  }
+ ]
+}

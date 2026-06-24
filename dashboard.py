@@ -169,6 +169,8 @@ class Dashboard(QWidget):
 
         # Arena (model benchmark standings), distributed to pinned cards
         self._benchmark_board = None
+        # The Ledger (per-provider privacy/trust posture), distributed to cards
+        self._provider_trust_book = None
 
         self._build_ui()
 
@@ -475,6 +477,7 @@ class Dashboard(QWidget):
                 card = PinnedModelCard(mid, self._pinned_container)
                 card.info_clicked.connect(self._on_info_clicked)
                 card.arena_clicked.connect(self._on_arena_clicked)
+                card.trust_clicked.connect(self._on_trust_clicked)
                 self._pinned_cards[mid] = card
                 self._pinned_layout.addWidget(card)
 
@@ -496,6 +499,7 @@ class Dashboard(QWidget):
             if wanted else ""
         )
         self._distribute_benchmarks()
+        self._distribute_provider_trust()
 
     def update_benchmarks(self, board):
         """Worker fetched the Arena board (or None). Hand each pinned card its
@@ -511,6 +515,20 @@ class Dashboard(QWidget):
         for mid, card in self._pinned_cards.items():
             entry = board.lookup(mid, card.display_name())
             card.set_benchmark(entry)
+
+    def update_provider_trust(self, book):
+        """Worker fetched The Ledger (or None). Hand the book to every pinned
+        card; cards keep their last-good seals if book is None."""
+        if book is not None:
+            self._provider_trust_book = book
+        self._distribute_provider_trust()
+
+    def _distribute_provider_trust(self):
+        book = self._provider_trust_book
+        if book is None:
+            return
+        for card in self._pinned_cards.values():
+            card.set_provider_trust(book)
 
     def update_endpoints(self, model_id, model_endpoints):
         """Worker reported new data (or None for failure) for one pinned model."""
@@ -665,6 +683,35 @@ class Dashboard(QWidget):
         popup.set_accent(card.arena_accent())
         popup.show_beside(
             card.arena_html(),
+            self._dashboard_global_rect(),
+            int(global_anchor.y()),
+        )
+        self._popup_model_id = key
+
+    def _on_trust_clicked(self, model_id, provider_ident, global_anchor):
+        """A provider's Trust Seal was clicked -> show its Custody dossier."""
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        html_str = card.dossier_html(provider_ident)
+        if not html_str:
+            return
+        popup = self._ensure_provider_popup()
+        key = "trust:" + model_id + ":" + provider_ident
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        popup.set_accent(card.dossier_accent(provider_ident))
+        popup.show_beside(
+            html_str,
             self._dashboard_global_rect(),
             int(global_anchor.y()),
         )

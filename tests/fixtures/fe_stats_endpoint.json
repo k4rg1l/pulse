@@ -1,0 +1,88 @@
+{
+ "data": [
+  {
+   "id": "37ca59bb-cb63-4806-a46e-7ad51de3ec2f",
+   "name": "Google | anthropic/claude-4.8-opus-20260528",
+   "provider_name": "Google",
+   "provider_slug": "google-vertex/global",
+   "provider_display_name": "Google Vertex",
+   "provider_region": "global",
+   "is_deranked": false,
+   "is_disabled": false,
+   "is_hidden": false,
+   "status": 0,
+   "variant": "standard",
+   "model_variant_permaslug": "anthropic/claude-4.8-opus-20260528"
+  },
+  {
+   "id": "dfc0e5bd-d703-4fe2-a7bb-655eb95d5441",
+   "name": "Anthropic | anthropic/claude-4.8-opus-20260528",
+   "provider_name": "Anthropic",
+   "provider_slug": "anthropic",
+   "provider_display_name": "Anthropic",
+   "provider_region": null,
+   "is_deranked": false,
+   "is_disabled": false,
+   "is_hidden": false,
+   "status": 0,
+   "variant": "standard",
+   "model_variant_permaslug": "anthropic/claude-4.8-opus-20260528"
+  },
+  {
+   "id": "b0d3beaa-5ff7-4666-a749-b1bb2b14c916",
+   "name": "Anthropic | anthropic/claude-4.8-opus-20260528",
+   "provider_name": "Anthropic",
+   "provider_slug": "anthropic/2",
+   "provider_display_name": "Claude Platform on AWS",
+   "provider_region": null,
+   "is_deranked": false,
+   "is_disabled": false,
+   "is_hidden": false,
+   "status": 0,
+   "variant": "standard",
+   "model_variant_permaslug": "anthropic/claude-4.8-opus-20260528"
+  },
+  {
+   "id": "82bbe0e6-ec8a-48c2-9593-86c3ccb86e54",
+   "name": "Amazon Bedrock | anthropic/claude-4.8-opus-20260528",
+   "provider_name": "Amazon Bedrock",
+   "provider_slug": "amazon-bedrock/eu-west-1",
+   "provider_display_name": "Amazon Bedrock",
+   "provider_region": "eu-west-1",
+   "is_deranked": false,
+   "is_disabled": false,
+   "is_hidden": false,
+   "status": 0,
+   "variant": "standard",
+   "model_variant_permaslug": "anthropic/claude-4.8-opus-20260528"
+  },
+  {
+   "id": "31ea1e5f-504e-4f9a-9156-3e8c9ed288e5",
+   "name": "Google | anthropic/claude-4.8-opus-20260528",
+   "provider_name": "Google",
+   "provider_slug": "google-vertex/europe",
+   "provider_display_name": "Google Vertex (Europe)",
+   "provider_region": "europe-west1",
+   "is_deranked": false,
+   "is_disabled": false,
+   "is_hidden": false,
+   "status": 0,
+   "variant": "standard",
+   "model_variant_permaslug": "anthropic/claude-4.8-opus-20260528"
+  },
+  {
+   "id": "c17fb1eb-dbda-4889-971f-1f15f517da90",
+   "name": "Amazon Bedrock | anthropic/claude-4.8-opus-20260528",
+   "provider_name": "Amazon Bedrock",
+   "provider_slug": "amazon-bedrock/us",
+   "provider_display_name": "Amazon Bedrock (US)",
+   "provider_region": "us-east-1",
+   "is_deranked": false,
+   "is_disabled": false,
+   "is_hidden": false,
+   "status": 0,
+   "variant": "standard",
+   "model_variant_permaslug": "anthropic/claude-4.8-opus-20260528"
+  }
+ ]
+}

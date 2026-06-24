@@ -1,0 +1,44 @@
+{
+ "data": [
+  {
+   "slug": "anthropic/claude-opus-4.8-fast",
+   "permaslug": "anthropic/claude-4.8-opus-fast-20260528",
+   "name": "Anthropic: Claude Opus 4.8 (Fast)"
+  },
+  {
+   "slug": "anthropic/claude-opus-4.8",
+   "permaslug": "anthropic/claude-4.8-opus-20260528",
+   "name": "Anthropic: Claude Opus 4.8"
+  },
+  {
+   "slug": "openai/gpt-5.2",
+   "permaslug": "openai/gpt-5.2-20251211",
+   "name": "OpenAI: GPT-5.2"
+  },
+  {
+   "slug": "deepseek/deepseek-v3.2",
+   "permaslug": "deepseek/deepseek-v3.2-20251201",
+   "name": "DeepSeek: DeepSeek V3.2"
+  },
+  {
+   "slug": "google/gemini-3.1-flash-image",
+   "permaslug": "google/gemini-3.1-flash-image-20260528",
+   "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image)"
+  },
+  {
+   "slug": "google/gemini-3-pro-image",
+   "permaslug": "google/gemini-3-pro-image-20260528",
+   "name": "Google: Nano Banana Pro (Gemini 3 Pro Image)"
+  },
+  {
+   "slug": "cohere/north-mini-code",
+   "permaslug": "cohere/north-mini-code-20260617",
+   "name": "Cohere: North Mini Code (free)"
+  },
+  {
+   "slug": "z-ai/glm-5.2",
+   "permaslug": "z-ai/glm-5.2-20260616",
+   "name": "Z.ai: GLM 5.2"
+  }
+ ]
+}

@@ -592,11 +592,16 @@ class APIWorker(QObject):
     providers_ready = Signal(object)
     endpoints_ready = Signal(str, object)   # (model_id, ModelEndpoints|None)
     benchmarks_ready = Signal(object)       # BenchmarkBoard | None
+    provider_trust_ready = Signal(object)   # ProviderTrustBook | None  (no-auth)
     error = Signal(str)
 
     def __init__(self):
         super().__init__()
         self.client = APIClient()
+        # The no-auth frontend client (foundation F2) rides on the same worker
+        # thread; it carries its own session (no key, browser-ish UA).
+        from frontend_client import FrontendClient
+        self.frontend = FrontendClient()
 
     @Slot()
     def fetch_key_info(self):
@@ -651,6 +656,17 @@ class APIWorker(QObject):
         except Exception:
             log.exception("benchmarks worker crashed")
             self.benchmarks_ready.emit(None)
+
+    @Slot()
+    def fetch_provider_trust(self):
+        """Fetch the no-auth all-providers trust/privacy posture (The Ledger).
+        Always emits (None on failure) so cards keep their last-good seals."""
+        try:
+            book = self.frontend.get_provider_trust()
+            self.provider_trust_ready.emit(book)
+        except Exception:
+            log.exception("provider trust worker crashed")
+            self.provider_trust_ready.emit(None)
 
     @Slot(str)
     def fetch_endpoints(self, model_id: str):

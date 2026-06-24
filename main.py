@@ -57,6 +57,7 @@ class FetchTrigger(QObject):
     fetch_endpoints = Signal(str)   # model_id
     fetch_models = Signal()         # full catalog for the picker
     fetch_benchmarks = Signal()     # Arena standings (slow cadence)
+    fetch_provider_trust = Signal() # provider privacy/trust posture (slow, no-auth)
 
 
 class OpenRouterPulse(QObject):
@@ -105,10 +106,12 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_endpoints.connect(self.api_worker.fetch_endpoints)
         self.trigger.fetch_models.connect(self.api_worker.fetch_models)
         self.trigger.fetch_benchmarks.connect(self.api_worker.fetch_benchmarks)
+        self.trigger.fetch_provider_trust.connect(self.api_worker.fetch_provider_trust)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
         self.api_worker.models_ready.connect(self._on_models)
         self.api_worker.benchmarks_ready.connect(self._on_benchmarks)
+        self.api_worker.provider_trust_ready.connect(self._on_provider_trust)
         self.api_worker.error.connect(self._on_error)
 
         self.api_thread.start()
@@ -150,6 +153,15 @@ class OpenRouterPulse(QObject):
                 lambda: self.trigger.fetch_benchmarks.emit())
             self.benchmarks_timer.start(6 * 3600 * 1000)   # every 6 hours
 
+        # Provider trust posture (The Ledger): no-auth, very slow-moving — fetch
+        # once shortly after launch, then refresh every 12 hours. Opt-out setting.
+        if getattr(self.settings, "show_trust_seals", True):
+            QTimer.singleShot(1400, lambda: self.trigger.fetch_provider_trust.emit())
+            self.trust_timer = QTimer(self)
+            self.trust_timer.timeout.connect(
+                lambda: self.trigger.fetch_provider_trust.emit())
+            self.trust_timer.start(12 * 3600 * 1000)   # every 12 hours
+
         # -- Pluggable sources (Claude, …): peers to OpenRouter --
         self._setup_sources()
 
@@ -179,6 +191,8 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_models.emit()
         if getattr(self.settings, "show_arena", True):
             self.trigger.fetch_benchmarks.emit()
+        if getattr(self.settings, "show_trust_seals", True):
+            self.trigger.fetch_provider_trust.emit()
         # Peer sources (Claude/GPU/System) too — a manual refresh should
         # refetch everything, not just OpenRouter. force_refresh() lets a
         # source (e.g. Claude) break its usage-endpoint backoff and retry now.
@@ -210,6 +224,11 @@ class OpenRouterPulse(QObject):
     @Slot(object)
     def _on_benchmarks(self, board):
         self.dashboard.update_benchmarks(board)
+
+    @Slot(object)
+    def _on_provider_trust(self, book):
+        log.debug("provider trust: %s providers", len(book) if book else 0)
+        self.dashboard.update_provider_trust(book)
 
     @Slot(object)
     def _on_key_info(self, key_info):
