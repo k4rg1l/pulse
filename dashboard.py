@@ -35,6 +35,7 @@ from widgets import (
     ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
     ModelPicker, ProviderPopup, SpendSpectrum, ReceiptStubList,
     build_receipt_html, receipt_accent_hex,
+    RebateStub, build_rebate_html, rebate_accent_hex,
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
@@ -447,6 +448,13 @@ class Dashboard(QWidget):
         self.spend_receipts.receipt_clicked.connect(self._on_receipt_clicked)
         spend_layout.addWidget(self.spend_receipts)
 
+        # #12 THE REBATE STUB — the torn money-back coupon directly below the
+        # receipts (the discount line at the foot of the tape). Owns GREEN. The
+        # whole strip opens the per-model rebate breakdown popup.
+        self.spend_savings = RebateStub(self)
+        self.spend_savings.rebate_clicked.connect(self._on_savings_clicked)
+        spend_layout.addWidget(self.spend_savings)
+
         self._or_layout.addWidget(self._spend_container)
 
         # Keep-last-good store + initial state. On a keyless machine the worker
@@ -462,6 +470,7 @@ class Dashboard(QWidget):
         if not self._spend_unlocked:
             self.spend_spectrum.set_locked()
             self.spend_receipts.set_locked()
+            self.spend_savings.set_locked()
             self._spend_header.right_label.setText("locked")
 
     def _toggle_spend_collapsed(self):
@@ -504,6 +513,36 @@ class Dashboard(QWidget):
             return
         anchor_y = int(global_anchor.y())
         popup.set_accent(receipt_accent_hex(receipt))
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
+        self._popup_model_id = key
+
+    def _on_savings_clicked(self, global_anchor):
+        """#12 THE REBATE STUB: the strip was clicked -> render the per-model
+        rebate breakdown to a pixmap and show it in the shared popup. Mirrors
+        _on_receipt_clicked (keyed, debounced, toggle-hide). GREEN accent (the
+        savings role). No popup when locked / no cache rebate in range."""
+        popup = self._ensure_provider_popup()
+        key = "savings"
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        savings = None
+        board = getattr(self, "_spend_board", None)
+        if board is not None:
+            savings = board.savings
+        html_str = build_rebate_html(savings)
+        if not html_str:
+            return
+        anchor_y = int(global_anchor.y())
+        popup.set_accent(rebate_accent_hex(savings))
         popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 
@@ -638,12 +677,16 @@ class Dashboard(QWidget):
                 self.spend_spectrum.set_locked()
                 if getattr(self, "spend_receipts", None) is not None:
                     self.spend_receipts.set_locked()
+                if getattr(self, "spend_savings", None) is not None:
+                    self.spend_savings.set_locked()
                 self._spend_header.right_label.setText("locked")
             return
 
         self.spend_spectrum.set_data(board.spectrum)
         if getattr(self, "spend_receipts", None) is not None:
             self.spend_receipts.set_data(board.receipts)
+        if getattr(self, "spend_savings", None) is not None:
+            self.spend_savings.set_data(board.savings)
         # Headline in the (collapsible) section header's right_label.
         sp = board.spectrum
         if sp.is_empty:

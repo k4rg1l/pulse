@@ -6333,3 +6333,634 @@ def receipt_accent_hex(receipt) -> str:
         col = Colors.RED if receipt.stamp_dir > 0 else Colors.GREEN
         return col.name()
     return theme_controller.accent().name()
+
+
+# ===========================================================================
+#  #12 THE REBATE STUB — the torn money-back coupon at the foot of the receipt
+# ===========================================================================
+def _fmt_tok_count(n: int) -> str:
+    """Compact token count ('6.5K', '6.1M', '254')."""
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+class RebateStub(QWidget):
+    """THE REBATE STUB (#12): a single ~44px full-width perforated 'rebate stub'
+    directly below #10's receipt stubs — the realized cache CREDIT (the NEGATIVE
+    usage_cache, already applied to the balance) drawn as a literal money-back
+    coupon, NOT a flat stat line.
+
+    Three blocks in one measure-then-paint pass (PinnedModelCard idiom; one
+    _measure() feeds both the cached geometry and setFixedHeight==REBATE_H so
+    nothing clips):
+      LEFT   — the GREEN rebate amount ('$16.28') in mono_medium with a faint
+               ghosted minus + an up-left 'money returned' chevron, label
+               'CACHING REBATE · 7D'. GREEN is this widget's EXCLUSIVE role.
+      CENTER — a hand-painted hit-rate HALF-ARC (a 180° GREEN sweep ∝ hit_rate,
+               a miniature echo of the balance ArcGauge) + '93.6% HIT'.
+      RIGHT  — a slim PURPLE vertical capsule METER filled to the reasoning
+               count normalized vs the period max + '6.5K rsn tok' + the italic
+               footnote 'tokens, not $' (so we never imply a reasoning dollar).
+
+    Motion: a ONE-TIME count-up on the amount AND the arc sweep share ONE held
+    QPropertyAnimation on a distinct `display_amount` float (NOT a QWidget
+    builtin) — 0→1 OutCubic, re-gated by a signature compare so a 15-min
+    identical poll doesn't re-animate; skipped when animations are off / hidden.
+
+    Click → rebate_clicked(global_anchor) opens the per-model rebate breakdown
+    in the shared ProviderPopup.
+    """
+
+    rebate_clicked = Signal(QPointF)
+
+    # -- geometry constants (the measure pass positions content WITHIN this) --
+    REBATE_H = 44        # the locked stub silhouette height (TEST_PLAN a)
+    PAD_X = 14
+    PERF_PITCH = 7.0     # perforation dot pitch across the top tear line
+    PERF_D = 3.0         # perforation dot diameter (r=1.5)
+    ARC_BOX = 60         # the centered half-arc box width
+    ARC_R = 22.0         # half-arc radius
+    METER_W = 8          # the purple reasoning capsule width
+    METER_H = 24         # the purple reasoning capsule height
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._savings = None       # Savings | None
+        self._locked = False
+        self._signature = None
+        self._display_amount = 1.0  # 0..1 count-up/arc-sweep factor (animated once)
+        # Cached geometry (rebuilt in set_data/resize) — never alloc in paint.
+        self._left_rect = QRectF()      # the amount block
+        self._arc_box = QRectF()        # the centered half-arc box
+        self._meter_rect = QRectF()     # the purple capsule
+        self._right_block_left = 0.0    # left edge of the right (meter+label) block
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hover = False
+
+        # ONE held animation (ArcGauge idiom) — never per-frame alloc.
+        self._anim = QPropertyAnimation(self, b"display_amount")
+        self._anim.setDuration(600)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()
+        self._build_geometry()
+        theme_controller.changed.connect(self._on_theme_changed)
+
+    # -- the count-up Property (distinct name; NOT a QWidget builtin) --
+    def get_display_amount(self):
+        return self._display_amount
+
+    def set_display_amount(self, v):
+        self._display_amount = float(v)
+        self.update()
+
+    display_amount = Property(float, get_display_amount, set_display_amount)
+
+    def _on_theme_changed(self):
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, savings):
+        """savings: a Savings (board.savings) or None (keep last-good)."""
+        if savings is None:
+            return
+        self._locked = False
+        self._savings = savings
+        sig = self._compute_signature(savings)
+        first_or_changed = (sig != self._signature)
+        self._signature = sig
+        self._measure()
+        self._build_geometry()
+        # One-time count-up only on first populated render / when the numbers
+        # change (a 15-min identical poll is silent). Honor the animations flag.
+        if first_or_changed and not savings.is_empty:
+            self._start_count_up()
+        else:
+            self._display_amount = 1.0
+        self.update()
+
+    def set_locked(self):
+        """No management key: the same 44px stub silhouette greyed (perforation
+        + outline TEXT_MUTED, NO green); amount slot = padlock + the canonical
+        unlock copy; arc + meter draw as empty outlines only. ZERO fake $."""
+        self._locked = True
+        self._savings = None
+        self._signature = None
+        self._display_amount = 1.0
+        self._measure()
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Count-up animation (amount + arc sweep share ONE held animation)
+    # ------------------------------------------------------------------
+    def _start_count_up(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on or not self.isVisible():
+            self._display_amount = 1.0
+            return
+        self._display_amount = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    @staticmethod
+    def _compute_signature(savings):
+        if savings is None:
+            return None
+        return (round(savings.total_rebate, 4),
+                round(savings.hit_rate_pct, 2),
+                int(savings.reasoning_total))
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint and setFixedHeight==44 — no clip)
+    # ------------------------------------------------------------------
+    def _measure(self):
+        # The stub silhouette is a fixed 44px (the locked + populated heights
+        # match so the section never jumps when a key is added). Content blocks
+        # are positioned WITHIN this height by font metrics in _build_geometry.
+        self.setFixedHeight(self.REBATE_H)
+
+    def _left_block_w(self) -> int:
+        # amount glyph width budget + the chevron + margins.
+        fm = QFontMetrics(Fonts.mono_medium())
+        return fm.horizontalAdvance("$00.00") + 10 + 16
+
+    def _right_block_w(self) -> int:
+        # the purple capsule + the widest reasoning label ('6.5K rsn tok').
+        fm = QFontMetrics(Fonts.tiny())
+        label_w = fm.horizontalAdvance("000.0K rsn tok")
+        return self.METER_W + 8 + label_w + self.PAD_X
+
+    def _build_geometry(self):
+        h = self.REBATE_H
+        w = max(1, self.width())
+        # LEFT amount block (label above + amount glyph), left-padded.
+        left_w = self._left_block_w()
+        self._left_rect = QRectF(self.PAD_X, 0, left_w, h)
+        # RIGHT block (capsule + reasoning label), right-aligned.
+        right_w = self._right_block_w()
+        self._right_block_left = w - right_w
+        # the capsule sits at the right block's left edge, vertically centered.
+        meter_top = (h - self.METER_H) / 2.0 + 3  # +3 to clear the perforation
+        self._meter_rect = QRectF(self._right_block_left, meter_top,
+                                  self.METER_W, self.METER_H)
+        # CENTER half-arc box, centered between the left + right blocks.
+        mid_lo = self._left_rect.right()
+        mid_hi = self._right_block_left
+        cx = (mid_lo + mid_hi) / 2.0
+        self._arc_box = QRectF(cx - self.ARC_BOX / 2.0, 4,
+                               self.ARC_BOX, h - 8)
+
+    def resizeEvent(self, event):
+        self._build_geometry()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint (allocation-light: cached rects + cached strokes)
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_body_and_perforation(p)
+        if self._locked:
+            self._paint_locked(p)
+        else:
+            self._paint_populated(p)
+        p.end()
+
+    def _paint_body_and_perforation(self, p):
+        """The rounded-rect coupon body + the PERFORATED top tear line (dots in
+        TEXT_MUTED, plus two half-circle notches cut at the left/right edges in
+        the PANEL'S ACTUAL BACKGROUND color — decision D — so the stub reads as
+        torn off the receipt above instead of letting the scroll show through)."""
+        w = self.width()
+        h = self.height()
+        # resting border lifts to the panel accent on hover (PointingHand).
+        border = theme_controller.accent() if (self._hover and not self._locked) \
+            else Colors.BORDER
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(0, 0, w, h), 10, 10)
+        p.fillPath(body, QBrush(Colors.BG_CARD))
+        p.setPen(QPen(border, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(body)
+
+        # The two edge notches at the tear line — filled with the panel bg so the
+        # rounded card looks torn (NOT transparent; the scroll content is dark
+        # Colors.BG_DARK behind the transparent container).
+        notch_y = 6.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(Colors.BG_DARK))
+        p.drawEllipse(QPointF(0, notch_y), 4.0, 4.0)
+        p.drawEllipse(QPointF(w, notch_y), 4.0, 4.0)
+
+        # The perforation dots across the top tear line (evenly distributed).
+        dot = QColor(Colors.TEXT_MUTED)
+        dot.setAlpha(230)
+        p.setBrush(QBrush(dot))
+        inner = w - 16
+        steps = max(1, round(inner / self.PERF_PITCH))
+        for i in range(steps + 1):
+            x = 8 + inner * i / steps
+            p.drawEllipse(QPointF(x, notch_y), self.PERF_D / 2.0,
+                          self.PERF_D / 2.0)
+
+    # -- the three populated blocks -----------------------------------------
+    def _paint_populated(self, p):
+        sv = self._savings
+        if sv is None:
+            return
+        f = self._display_amount
+        self._paint_amount(p, sv, f)
+        self._paint_hit_arc(p, sv, f)
+        self._paint_reasoning_meter(p, sv)
+
+    def _paint_amount(self, p, sv, f):
+        r = self._left_rect
+        f_label = Fonts.label()
+        f_amt = Fonts.mono_medium()
+        fm_label = QFontMetrics(f_label)
+        fm_amt = QFontMetrics(f_amt)
+        # vertical stack: label on top, amount below, centered in the stub.
+        block_h = fm_label.height() + 2 + fm_amt.height()
+        top = (self.REBATE_H - block_h) / 2.0 + 3   # +3 to clear the perforation
+        # label 'CACHING REBATE · 7D'
+        p.setPen(Colors.TEXT_MUTED)
+        p.setFont(f_label)
+        p.drawText(QRectF(r.left(), top, r.width(), fm_label.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   "CACHING REBATE · 7D")
+        # the amount, counting up over f. A faint ghosted minus precedes it; an
+        # up-left chevron (filled QPolygonF) sits to its left = 'money returned'.
+        amt = sv.total_rebate * f
+        amt_txt = f"${amt:,.2f}"
+        amt_y = top + fm_label.height() + 2
+        # chevron (5px, up-left) to the left of the amount.
+        chev_cx = r.left() + 4.0
+        chev_cy = amt_y + fm_amt.height() / 2.0
+        chev = QPolygonF([
+            QPointF(chev_cx + 4, chev_cy - 4),
+            QPointF(chev_cx - 4, chev_cy),
+            QPointF(chev_cx + 4, chev_cy + 4),
+        ])
+        green = Colors.GREEN
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(green))
+        p.drawPolygon(chev)
+        # faint ghosted minus (the negative-usage credit becomes a + for the user)
+        amt_left = chev_cx + 9
+        ghost = QColor(Colors.TEXT_MUTED); ghost.setAlpha(120)
+        p.setFont(f_amt)
+        p.setPen(QPen(ghost))
+        minus_w = fm_amt.horizontalAdvance("-")
+        p.drawText(QRectF(amt_left, amt_y, minus_w, fm_amt.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "-")
+        # the GREEN amount
+        p.setPen(QPen(green))
+        p.drawText(QRectF(amt_left + minus_w, amt_y,
+                          r.right() - (amt_left + minus_w), fm_amt.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   amt_txt)
+
+    def _paint_hit_arc(self, p, sv, f):
+        """A 180° half-arc (a miniature ArcGauge echo): a TEXT_MUTED track + a
+        GREEN sweep proportional to hit_rate (0..100), with '93.6% HIT' under
+        it. The swept span is stored on self for the test (TEST_PLAN d)."""
+        box = self._arc_box
+        cx = box.center().x()
+        cy = box.top() + box.height() * 0.46
+        r = self.ARC_R
+        arc_rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        # 180° track from 180°→0° (a top half-arc).
+        start_angle = 180 * 16
+        track_pen = QPen(QColor(Colors.TEXT_MUTED), 3, Qt.PenStyle.SolidLine,
+                         Qt.PenCapStyle.RoundCap)
+        track = QColor(Colors.TEXT_MUTED); track.setAlpha(90)
+        track_pen.setColor(track)
+        p.setPen(track_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(arc_rect, start_angle, -180 * 16)
+        # GREEN sweep ∝ hit_rate (×f for the one-time sweep). Stored for the test.
+        frac = max(0.0, min(1.0, sv.hit_rate_pct / 100.0)) * f
+        self._arc_swept_deg = 180.0 * frac
+        span = int(-180 * 16 * frac)
+        p.setPen(QPen(Colors.GREEN, 3, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        p.drawArc(arc_rect, start_angle, span)
+        # '93.6%' + 'HIT' centered under the arc.
+        f_tiny = Fonts.tiny()
+        fm = QFontMetrics(f_tiny)
+        p.setFont(f_tiny)
+        p.setPen(Colors.TEXT_PRIMARY)
+        pct_txt = f"{sv.hit_rate_pct:.1f}%"
+        p.drawText(QRectF(cx - box.width() / 2.0, cy + 1, box.width(),
+                          fm.height()),
+                   Qt.AlignmentFlag.AlignHCenter, pct_txt)
+        p.setPen(Colors.TEXT_MUTED)
+        p.drawText(QRectF(cx - box.width() / 2.0, cy + 1 + fm.height(),
+                          box.width(), fm.height()),
+                   Qt.AlignmentFlag.AlignHCenter, "HIT")
+
+    def _paint_reasoning_meter(self, p, sv):
+        """A slim PURPLE vertical capsule filled to the reasoning count
+        normalized vs the period max (guarded /0 → a tidy zero-height capsule),
+        '6.5K rsn tok' + the italic footnote 'tokens, not $'. PURPLE only, so we
+        never imply a reasoning dollar figure (decision D)."""
+        m = self._meter_rect
+        # capsule track
+        track = QColor(Colors.TEXT_MUTED); track.setAlpha(60)
+        cap = QPainterPath()
+        cap.addRoundedRect(m, self.METER_W / 2.0, self.METER_W / 2.0)
+        p.fillPath(cap, QBrush(track))
+        # fill: normalized vs the period's max single-day reasoning (guarded /0).
+        ref = sv.reasoning_ref
+        frac = (sv.reasoning_total / ref) if ref > 0 else 0.0
+        frac = max(0.0, min(1.0, frac))
+        if frac > 0.0:
+            fill_h = m.height() * frac
+            fill_rect = QRectF(m.left(), m.bottom() - fill_h, m.width(), fill_h)
+            fill = QPainterPath()
+            fill.addRoundedRect(fill_rect, self.METER_W / 2.0, self.METER_W / 2.0)
+            p.fillPath(fill, QBrush(Colors.PURPLE))
+        # labels to the right of the capsule.
+        f_tiny = Fonts.tiny()
+        fm = QFontMetrics(f_tiny)
+        lx = m.right() + 8
+        lw = self.width() - self.PAD_X - lx
+        count_txt = f"{_fmt_tok_count(sv.reasoning_total)} rsn tok"
+        # the count label (the real info), top-aligned to the capsule.
+        p.setFont(f_tiny)
+        p.setPen(Colors.PURPLE)
+        p.drawText(QRectF(lx, m.top() - 1, lw, fm.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   count_txt)
+        # the italic 'tokens, not $' footnote below it.
+        f_it = Fonts.tiny(); f_it.setItalic(True)
+        p.setFont(f_it)
+        note = QColor(Colors.TEXT_MUTED)
+        p.setPen(QPen(note))
+        p.drawText(QRectF(lx, m.top() - 1 + fm.height(), lw, fm.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   "tokens, not $")
+
+    def _paint_locked(self, p):
+        """Greyed silhouette: padlock + unlock copy where the amount is; the arc
+        + meter as empty outlines only. NO green, ZERO fake numbers."""
+        # amount slot -> padlock + the canonical unlock copy (decision E).
+        r = self._left_rect
+        msg = SPEND_UNLOCK_BASE + " cache savings"
+        f_body = Fonts.body()
+        fm = QFontMetrics(f_body)
+        # the copy spans toward the center (it's the dominant locked element).
+        copy_left = r.left() + 18
+        copy_w = self.width() - self.PAD_X - copy_left
+        msg = fm.elidedText(msg, Qt.TextElideMode.ElideRight, int(copy_w))
+        cy = self.REBATE_H / 2.0 + 3
+        _paint_padlock(p, r.left() + 7, cy, 13, Colors.TEXT_MUTED)
+        p.setPen(Colors.TEXT_MUTED)
+        p.setFont(f_body)
+        p.drawText(QRectF(copy_left, 0, copy_w, self.REBATE_H),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   msg)
+        # the arc as an empty outline (track only, no green).
+        box = self._arc_box
+        cx = box.center().x()
+        acy = box.top() + box.height() * 0.46
+        rr = self.ARC_R
+        track = QColor(Colors.TEXT_MUTED); track.setAlpha(70)
+        p.setPen(QPen(track, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(cx - rr, acy - rr, 2 * rr, 2 * rr), 180 * 16, -180 * 16)
+        # the meter as an empty capsule outline (no purple fill).
+        m = self._meter_rect
+        cap = QColor(Colors.TEXT_MUTED); cap.setAlpha(70)
+        p.setPen(QPen(cap, 1))
+        p.drawRoundedRect(m, self.METER_W / 2.0, self.METER_W / 2.0)
+
+    # ------------------------------------------------------------------
+    #  Interaction — the whole strip opens the per-model rebate breakdown
+    # ------------------------------------------------------------------
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._locked or self._savings is None:
+            super().mousePressEvent(event)
+            return
+        gpos = event.globalPosition() if hasattr(event, "globalPosition") \
+            else QPointF(self.mapToGlobal(event.pos()))
+        self.rebate_clicked.emit(gpos)
+
+
+class RebateBreakdownStrip(QWidget):
+    """The per-model rebate breakdown (#12 click-through), rendered to a QPixmap
+    and embedded as a data-URI <img> in the shared ProviderPopup (UptimeStrip
+    idiom). A 7-day sparkline of daily abs(usage_cache) on top, then one GREEN
+    bar per model that saved (abs(usage_cache)) with its cached-token count +
+    per-model hit-rate, sorted by savings desc; footer 'Realized credit, already
+    applied to your balance.'
+
+    Honest by construction: every dollar is a realized cache CREDIT; the bar
+    length encodes abs(usage_cache) (NEVER a fabricated figure). The model names
+    are QPainter-drawn here (injection-safe); the HTML wrapper html.escapes them.
+    devicePixelRatio-aware so the text stays crisp on HiDPI.
+    """
+
+    STRIP_W = 300
+
+    def __init__(self, savings, parent=None):
+        super().__init__(parent)
+        self._sv = savings
+        self._rows = list(getattr(savings, "models", ()) or [])
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _row_h(self) -> int:
+        return QFontMetrics(Fonts.tiny()).height() + 8
+
+    def _measure_height(self) -> int:
+        spark_h = 22
+        n = max(1, len(self._rows))
+        footer_h = QFontMetrics(Fonts.tiny()).height() + 6
+        return int(8 + spark_h + n * self._row_h() + footer_h + 8)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        w = self.STRIP_W
+        f_tiny = Fonts.tiny()
+        f_mono = Fonts.mono_small()
+        fm_tiny = QFontMetrics(f_tiny)
+        pad = 12
+        y = 8.0
+
+        # 1) the 7-day daily abs(usage_cache) sparkline (GREEN gradient line).
+        spark = list(getattr(self._sv, "spark", ()) or [])
+        spark_h = 18.0
+        spark_rect = QRectF(pad, y, w - 2 * pad, spark_h)
+        if len(spark) >= 2 and max(spark) > 0:
+            mn, mx = min(spark), max(spark)
+            rng = (mx - mn) if mx != mn else 1.0
+            pts = []
+            n = len(spark)
+            for i, v in enumerate(spark):
+                px = spark_rect.left() + spark_rect.width() * i / (n - 1)
+                py = spark_rect.bottom() - spark_rect.height() * (v - mn) / rng
+                pts.append(QPointF(px, py))
+            path = QPainterPath()
+            path.moveTo(pts[0])
+            for q in pts[1:]:
+                path.lineTo(q)
+            p.setPen(QPen(Colors.GREEN, 1.6, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+            p.setBrush(QBrush(Colors.GREEN))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(pts[-1], 2.0, 2.0)
+        y += spark_h + 4
+
+        # 2) one GREEN bar per model that saved (abs(usage_cache)).
+        row_h = self._row_h()
+        max_rebate = max((r.rebate for r in self._rows), default=0.0)
+        name_w = 96.0
+        bar_left = pad + name_w + 6
+        bar_max_w = (w - pad) - bar_left - 64   # leave room for the $ at the end
+        for r in self._rows:
+            ry = y
+            # model short-name (elided), muted.
+            p.setFont(f_tiny)
+            p.setPen(Colors.TEXT_SECONDARY)
+            name = fm_tiny.elidedText(r.short_name, Qt.TextElideMode.ElideRight,
+                                      int(name_w))
+            p.drawText(QRectF(pad, ry, name_w, row_h),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       name)
+            # GREEN bar ∝ abs(usage_cache).
+            frac = (r.rebate / max_rebate) if max_rebate > 0 else 0.0
+            bar_w = max(2.0, bar_max_w * frac)
+            bar_cy = ry + row_h / 2.0
+            bar_rect = QRectF(bar_left, bar_cy - 4, bar_w, 8)
+            track = QColor(Colors.GREEN); track.setAlpha(40)
+            p.fillPath(_rounded(bar_rect, 4), QBrush(track))
+            p.fillPath(_rounded(bar_rect, 4), QBrush(Colors.GREEN))
+            # the $ rebate at the row's right edge, GREEN mono.
+            p.setFont(f_mono)
+            p.setPen(Colors.GREEN)
+            p.drawText(QRectF(bar_left, ry, (w - pad) - bar_left, row_h),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                       f"-${r.rebate:,.2f}")
+            # the cached-token count + per-model hit-rate, faint under the name.
+            sub = f"{_fmt_tok_count(r.cached_tokens)} cached · {r.hit_rate_pct:.0f}% hit"
+            faint = QColor(Colors.TEXT_MUTED)
+            p.setFont(f_tiny)
+            p.setPen(QPen(faint))
+            # draw the sub-line just below the bar baseline (compact second line)
+            p.drawText(QRectF(bar_left, bar_cy + 2, bar_max_w, fm_tiny.height()),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       sub)
+            y += row_h
+
+        # 3) footer — the realized-credit clarifier.
+        y += 2
+        foot = QColor(Colors.GREEN)
+        p.setFont(f_tiny)
+        p.setPen(QPen(foot))
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm_tiny.height() + 4),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
+                   "Realized credit, already applied to your balance.")
+
+
+def _rounded(rect: QRectF, r: float) -> QPainterPath:
+    path = QPainterPath()
+    path.addRoundedRect(rect, r, r)
+    return path
+
+
+def build_rebate_html(savings) -> str:
+    """The per-model rebate dossier for the ProviderPopup: a header + the painted
+    breakdown pixmap embedded as a data-URI <img> (single-QLabel contract). Every
+    API-sourced string (model short-names) is html.escape'd before it enters the
+    HTML wrapper (decision D); the pixmap text itself is QPainter-drawn so it's
+    injection-safe by construction. Returns '' when there's nothing to show."""
+    if savings is None or savings.is_empty:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— NO CACHE REBATE IN RANGE —</div>")
+    # html.escape the names even though they only appear in the (safe) pixmap —
+    # belt-and-suspenders per decision D (any name that reaches the wrapper).
+    top_name = html.escape(savings.models[0].short_name) if savings.models else ""
+    out = [f"<div style='font-size:11pt;font-weight:bold;color:#2ed573;'>"
+           f"Caching rebated you ${savings.total_rebate:,.2f}</div>"]
+    out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+               f"{savings.hit_rate_pct:.1f}% cache hit · 7-day · ground truth"
+               f"{(' · top: ' + top_name) if top_name else ''}</div>")
+    try:
+        strip = RebateBreakdownStrip(savings)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{RebateBreakdownStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("rebate strip render failed", exc_info=True)
+    out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
+               "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
+    return "".join(out)
+
+
+def rebate_accent_hex(savings) -> str:
+    """The popup border accent for the rebate dossier — always GREEN (the
+    savings role this widget owns exclusively in the zone). Returns a #rrggbb."""
+    return Colors.GREEN.name()

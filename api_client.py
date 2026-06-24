@@ -1016,17 +1016,165 @@ def build_receipts(rows: list) -> tuple:
     return tuple(receipts)
 
 
+# --- #12 THE REBATE STUB (cache & reasoning savings) -------------------------
+
+@dataclass(frozen=True)
+class SavingsModel:
+    """One model's rebate breakdown row for the per-model popup (#12)."""
+    model_id: str
+    short_name: str
+    rebate: float          # abs(usage_cache) summed over the range ($, a CREDIT)
+    cached_tokens: int     # cache-read tokens summed over the range (a COUNT)
+    hit_rate_pct: float    # request-weighted hit-rate for this model, [0,100]
+    reasoning_tokens: int  # reasoning tokens summed (a COUNT, NEVER a $)
+
+
+@dataclass(frozen=True)
+class Savings:
+    """#12 THE REBATE STUB payload — derived from QUERY A's SAME day rows (no new
+    query). The headline `total_rebate` is the realized cache CREDIT already
+    applied to the balance, NOT a hypothetical.
+
+    Honesty contract baked in (decision B):
+      - usage_cache is NEGATIVE = a saving (occasionally POSITIVE on a 1-request
+        day) -> total_rebate = Σ abs(usage_cache).
+      - cache_hit_rate is a 0..1 FRACTION -> ×100 AT PARSE so the label reads
+        "93.6%", never "0.94%". hit_rate_pct is in [0,100].
+      - cached_tokens/reasoning_tokens/request_count are STRINGS -> _as_int.
+      - reasoning_total is a COUNT (no reasoning-$ metric exists) -> it drives
+        ONLY the purple meter + the count label, NEVER a dollar figure.
+    `spark` is the daily abs(usage_cache) series (chronological) for the popup
+    sparkline; `reasoning_ref` is the max single-day reasoning count, the
+    normalize basis for the meter fill (guarded /0)."""
+    total_rebate: float          # Σ abs(usage_cache) over the range ($)
+    hit_rate_pct: float          # request-weighted mean hit-rate, [0,100]
+    reasoning_total: int         # Σ reasoning_tokens over the range (a COUNT)
+    models: tuple                # tuple[SavingsModel] sorted by rebate desc
+    spark: tuple                 # tuple[float] daily abs(usage_cache) (chrono)
+    reasoning_ref: int           # max daily reasoning count (meter normalize)
+
+    @property
+    def is_empty(self) -> bool:
+        # No realized cache credit AND no reasoning activity in the range. A real
+        # populated-zero (key present, no cache activity) — NOT the locked state.
+        return self.total_rebate <= 0.0 and self.reasoning_total <= 0
+
+
+def build_savings(rows: list) -> Savings:
+    """Pure builder for #12 — the cache rebate + hit-rate + reasoning totals from
+    QUERY A's SAME day rows (decision A: NO new query). Returns a Savings.
+
+    - total_rebate = Σ abs(usage_cache) (decision B: negative=saving; abs handles
+      an occasional positive 1-request day; only cache rows with cached_tokens>0
+      or usage_cache!=0 contribute to the rebate sum).
+    - hit_rate_pct = REQUEST-WEIGHTED mean of per-model cache_hit_rate ×100, in
+      [0,100], guarded /0 (a row's weight is its request_count; hit_rate is a
+      0..1 fraction multiplied by 100 here, ONCE).
+    - reasoning_total = Σ reasoning_tokens (a COUNT).
+    - per-model breakdown sorted by rebate desc; spark = daily abs(usage_cache).
+    """
+    rows = rows or []
+    # Per-model roll-up + a per-day abs(usage_cache) series for the sparkline.
+    bucket_order: list = []
+    seen_buckets = set()
+    per_model: dict = defaultdict(lambda: {
+        "rebate": 0.0, "cached": 0, "reason": 0,
+        # request-weighted hit-rate accumulators (Σ hit*reqs / Σ reqs).
+        "hit_wsum": 0.0, "hit_wreq": 0,
+    })
+    day_rebate: dict = defaultdict(float)   # bucket -> Σ abs(usage_cache)
+    day_reason: dict = defaultdict(int)     # bucket -> Σ reasoning_tokens
+
+    # Global request-weighted hit-rate accumulators.
+    g_hit_wsum = 0.0
+    g_hit_wreq = 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        bk = _bucket_key(row)
+        bucket = row.get(bk) if bk else None
+        model = row.get("model") or ""
+        ucache = _as_float(row.get("usage_cache"))
+        cached = _as_int(row.get("cached_tokens"))
+        reason = _as_int(row.get("reasoning_tokens"))
+        hit = _as_float(row.get("cache_hit_rate"))   # 0..1 fraction
+        reqs = _as_int(row.get("request_count"))
+        if bucket is not None and bucket not in seen_buckets:
+            seen_buckets.add(bucket)
+            bucket_order.append(bucket)
+
+        # Only count cache ACTIVITY toward the rebate (decision B): a row with no
+        # cached tokens AND a zero usage_cache contributes nothing.
+        rebate = abs(ucache) if (cached > 0 or ucache != 0.0) else 0.0
+        agg = per_model[model]
+        agg["rebate"] += rebate
+        agg["cached"] += cached
+        agg["reason"] += reason
+        # Request-weighted hit-rate: weight each row's fraction by its requests.
+        if reqs > 0:
+            agg["hit_wsum"] += hit * reqs
+            agg["hit_wreq"] += reqs
+            g_hit_wsum += hit * reqs
+            g_hit_wreq += reqs
+        if bucket is not None:
+            day_rebate[bucket] += rebate
+            day_reason[bucket] += reason
+
+    bucket_order.sort()  # chronological (ISO date strings sort correctly)
+    total_rebate = sum(v["rebate"] for v in per_model.values())
+    reasoning_total = sum(v["reason"] for v in per_model.values())
+    # ×100 ONCE, here at parse (decision B) -> a [0,100] percent, guarded /0.
+    hit_rate_pct = (g_hit_wsum / g_hit_wreq * 100.0) if g_hit_wreq > 0 else 0.0
+    hit_rate_pct = max(0.0, min(100.0, hit_rate_pct))
+
+    # Per-model breakdown, heaviest rebate first (rhymes with #9/#10 ordering).
+    ordered = sorted(per_model.keys(),
+                     key=lambda m: (-per_model[m]["rebate"], m))
+    models = tuple(
+        SavingsModel(
+            model_id=m,
+            short_name=_short_model(m),
+            rebate=per_model[m]["rebate"],
+            cached_tokens=per_model[m]["cached"],
+            hit_rate_pct=max(0.0, min(100.0, (
+                per_model[m]["hit_wsum"] / per_model[m]["hit_wreq"] * 100.0
+            ) if per_model[m]["hit_wreq"] > 0 else 0.0)),
+            reasoning_tokens=per_model[m]["reason"],
+        )
+        for m in ordered
+        # popup shows models that actually saved or reasoned (no $0/0-tok rows)
+        if per_model[m]["rebate"] > 0.0 or per_model[m]["reason"] > 0
+    )
+
+    spark = tuple(day_rebate.get(b, 0.0) for b in bucket_order)
+    # Meter normalize basis = max single-day reasoning count (guarded /0 in the
+    # widget; 0 here means a tidy zero-height capsule, never a divide-by-zero).
+    reasoning_ref = max((day_reason.get(b, 0) for b in bucket_order), default=0)
+
+    return Savings(
+        total_rebate=total_rebate,
+        hit_rate_pct=hit_rate_pct,
+        reasoning_total=reasoning_total,
+        models=models,
+        spark=spark,
+        reasoning_ref=reasoning_ref,
+    )
+
+
 def build_spend_board(rows: list, granularity: str = "day", start: str = "",
                       end: str = "", range_label: str = "Last 7 Days",
                       truncated: bool = False) -> SpendBoard:
-    """Build the aggregate SpendBoard from QUERY A's rows. #9's .spectrum and
-    #10's .receipts are populated from the SAME rows (no new query); later
-    features' slots stay empty until they ride this same cached envelope."""
+    """Build the aggregate SpendBoard from QUERY A's rows. #9's .spectrum,
+    #10's .receipts AND #12's .savings are all populated from the SAME rows (no
+    new query); later features' slots stay empty until they ride this same
+    cached envelope."""
     spectrum = build_spend_spectrum(rows, granularity=granularity,
                                     truncated=truncated)
     receipts = build_receipts(rows)
-    return SpendBoard(spectrum=spectrum, receipts=receipts, start=start,
-                      end=end, range_label=range_label)
+    savings = build_savings(rows)
+    return SpendBoard(spectrum=spectrum, receipts=receipts, savings=savings,
+                      start=start, end=end, range_label=range_label)
 
 
 class AnalyticsClient:
@@ -1150,6 +1298,15 @@ class AnalyticsClient:
                 n_stamped = sum(1 for r in rcs if r.has_stamp)
                 log.info("receipts: %d models, top $/call=$%.4f, stamped=%d",
                          len(rcs), top_pc, n_stamped)
+            except Exception:
+                pass
+            # #12 savings INFO line (no secret — rebate $, hit %, reasoning count).
+            try:
+                sv = board.savings
+                if sv is not None:
+                    log.info("savings: rebate=$%.2f, hit=%.1f%%, rsn=%d tok",
+                             sv.total_rebate, sv.hit_rate_pct,
+                             sv.reasoning_total)
             except Exception:
                 pass
             return board
