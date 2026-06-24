@@ -1129,6 +1129,7 @@ class PinnedModelCard(QWidget):
     uptime_clicked = Signal(str, str, QPointF)  # (model_id, ep_ident, anchor) -> Vitals
     fees_clicked = Signal(str, str, QPointF)  # #6 (model_id, ep_ident, anchor) -> Waterline
     trend_clicked = Signal(str, QPointF)   # #7 THE TAPE clicked -> week-over-week dossier
+    drift_clicked = Signal(str, QPointF)   # #8 THE FAULT LINE clicked -> Seismograph dossier
 
     # ---- #7 THE TAPE (the torn-ticker momentum cartouche) geometry constants ----
     # A compact "ripped off the wire" cartouche pinned in the header RIGHT gutter
@@ -1161,6 +1162,23 @@ class PinnedModelCard(QWidget):
     # A tiny systole shape so a clean record reads as ALIVE, not a flat bar.
     # Liveness-only — deliberately small so it never implies a data event.
     PULSE_BEAT = (0.0, 0.0, 0.0, 1.0, 0.35, 0.0, 0.0)
+
+    # ---- #8 THE FAULT LINE (price-drift seismograph) geometry constants ----
+    # A vertical zig-zag crack etched down the card's LEFT EDGE (x in [2,9], a
+    # 7px channel LEFT of the seal column at PAD_X=14 / _icon_col_cx=21), painted
+    # over the rounded BG path and clipped to it, ONLY when a drift exists. Plus
+    # per-row tremor ticks at PAD_X-4 (nudged to PAD_X-2 on a best row, to clear
+    # the gold accent). Adds ZERO height (decision E): set_drift never reflows.
+    FAULT_X_MIN = 2.0           # crack channel left bound
+    FAULT_X_MAX = 9.0           # crack channel right bound (= PAD_X-5)
+    FAULT_Y_MARGIN = 12.0       # vertical inset from top/bottom (inside the r=10 corners)
+    FAULT_EPI_R = 4.0           # epicenter diamond half-size
+    TICK_W = 2.0                # per-row tremor tick width
+    # Two-pole lane (decision G): seismic-amber (adverse) / quartz-violet
+    # (favorable). Warmer/oranger than #5's brass-amber and #7's hot-amber, and
+    # region-separated (card EDGE, not band / header gutter).
+    FAULT_AMBER = QColor(0xff, 0x9e, 0x3d)    # ADVERSE — price rose / deranked
+    FAULT_VIOLET = QColor(0xb0, 0x7c, 0xff)   # FAVORABLE — price fell / cheaper appeared
 
     def __init__(self, model_id, parent=None):
         super().__init__(parent)
@@ -1249,6 +1267,20 @@ class PinnedModelCard(QWidget):
         self._tape_hit_rect = QRectF()    # introspection: the clickable cartouche box
         self._tape_trace_pts = []         # introspection: 3 QPointF (UNIT shape, 0..1)
         self._tape_slope_sign = 0         # introspection: +1 riser / -1 faller / 0 flat
+        # #8 THE FAULT LINE — the price-drift seismograph crack on the card edge.
+        # _drift is a price_drift.DriftResult or None (None / magnitude 0 ->
+        # paint NOTHING, zero pixels, zero height — the silent-degrade contract,
+        # decision E). The crack geometry (zig-zag QPainterPath + per-row tick
+        # rects + epicenter) is MEASURED ONCE in _measure_drift, cached in
+        # _drift_geom (cleared in set_drift), so the paint hot path only strokes
+        # cached objects (allocation-free paint, GC-disabled invariant).
+        self._drift = None                # price_drift.DriftResult | None
+        self._show_drift = True           # gated by settings.show_drift (main.py)
+        self._drift_fresh = False         # rides the shimmer for ONE refresh, then static
+        self._drift_geom = None           # measured-once geometry dict | None
+        self._drift_hits = []             # [(QRectF, ident)] tremor-tick + edge-band click targets
+        self._drift_hover = False         # cursor-only (no repaint), mirrors the waterline
+        self._drift_alpha = QColor(self.FAULT_AMBER)  # preallocated; alpha breathes when fresh
         # Shimmer phase is shared by the Arena crest sweep AND the elite speed
         # comet; the one timer runs whenever EITHER band wants it.
         self._shimmer = 0.0
@@ -1284,8 +1316,11 @@ class PinnedModelCard(QWidget):
         # the Arena sweep / elite speed comet — no new QTimer (decision C). #7's
         # explosive-riser "live wire" (ghost-trace pulse + breathing head-dot)
         # reuses it too via _trend_explosive — ordinary risers/fallers stay static.
+        # #8: a FRESH drift (just detected, unacknowledged) breathes its
+        # epicenter diamond + Δ glyph on the SAME timer (decision E) — once
+        # acknowledge() clears _drift_fresh the crack goes static (still drawn).
         return (self._arena_elite or self._speed_elite or self._uptime_alive
-                or self._trend_explosive)
+                or self._trend_explosive or self._drift_fresh)
 
     def _sync_shimmer(self):
         """Run the one shared shimmer timer iff some band wants it AND we're
@@ -1518,6 +1553,254 @@ class PinnedModelCard(QWidget):
         (distinct from Speed cyan / the door amber / Pulse green)."""
         from api_client import WATERLINE_SURFACE
         return WATERLINE_SURFACE
+
+    # ---- #8 THE FAULT LINE (the price-drift seismograph) ----
+
+    def set_drift(self, result):
+        """result: a price_drift.DriftResult or None. None OR magnitude 0 -> the
+        card paints NOTHING (no crack, no ticks, no hit rects, no Δ) — the
+        silent-degrade contract (decision E). A live drift stays etched until the
+        dashboard pushes a None/quiet result (the next QUIET snapshot) or
+        acknowledge() is followed by a quiet re-diff.
+
+        NEVER calls _update_height (the crack is an EDGE overlay, zero height,
+        decision E — explicit, like set_uptime). Clears the cached geometry so
+        _measure_drift rebuilds it once on the next paint; stores the fresh flag
+        and syncs the shimmer (a fresh drift breathes its epicenter/Δ)."""
+        if result is not None and getattr(result, "magnitude", 0.0) <= 0.0:
+            result = None                        # treat magnitude 0 as quiet
+        self._drift = result if self._show_drift else None
+        self._drift_fresh = bool(self._drift is not None
+                                 and getattr(self._drift, "is_fresh", False))
+        self._drift_geom = None                  # invalidate cache (re-measure once)
+        self._sync_shimmer()
+        self.update()                            # NO _update_height (decision E)
+
+    def acknowledge(self):
+        """The Seismograph dossier opened (decision E (iv)): clear the fresh
+        flag so the epicenter/Δ shimmer stops, but LEAVE the crack drawn — it
+        persists until the dashboard's store rolls a quiet baseline and pushes
+        set_drift(None). The dashboard's store.acknowledge() is the durable half
+        (writes the baseline to disk so the same drift never re-fires)."""
+        if not self._drift_fresh:
+            return
+        self._drift_fresh = False
+        self._sync_shimmer()
+        self.update()
+
+    def has_drift(self) -> bool:
+        return self._drift is not None and self._drift.magnitude > 0.0
+
+    def set_show_drift(self, show: bool):
+        """Settings gate (show_drift). When off the card paints no crack, ticks
+        or Δ and records no hit rects (decision G). #8 carries no fetch (it rides
+        the endpoints diff), so this is the gate point; mirrors set_show_fees."""
+        show = bool(show)
+        if show == self._show_drift:
+            return
+        self._show_drift = show
+        if not show:
+            self.set_drift(None)                 # gated off -> paint nothing
+        else:
+            self._drift_geom = None
+            self.update()
+
+    def drift_accent(self) -> str:
+        """The dominant pole's hex for the Seismograph dossier border (mirrors
+        speed_accent): seismic-amber for adverse drift, quartz-violet for
+        favorable."""
+        from price_drift import FAVORABLE
+        if self._drift is not None and self._drift.direction == FAVORABLE:
+            return self.FAULT_VIOLET.name()
+        return self.FAULT_AMBER.name()
+
+    def _drift_color(self) -> QColor:
+        """The fault-line QColor for the current dominant direction."""
+        from price_drift import FAVORABLE
+        if self._drift is not None and self._drift.direction == FAVORABLE:
+            return self.FAULT_VIOLET
+        return self.FAULT_AMBER
+
+    def _tremor_color(self, direction) -> QColor:
+        """A per-row tick's QColor by ITS OWN direction (a row can move opposite
+        to the card's net pole)."""
+        from price_drift import FAVORABLE
+        return self.FAULT_VIOLET if direction == FAVORABLE else self.FAULT_AMBER
+
+    def _measure_drift(self, w, h, row_geom):
+        """The SINGLE source of truth for the fault-line geometry (paint + hit
+        rects + introspection all read this). Pure geometry — no painting.
+
+        Builds, ONCE per (drift, size): the zig-zag crack QPainterPath in the
+        x in [FAULT_X_MIN, FAULT_X_MAX] channel from y=FAULT_Y_MARGIN to
+        y=h-FAULT_Y_MARGIN (kink count + amplitude scaled by magnitude, decision
+        F), the epicenter diamond at the largest tremor's y, and a 2px tick rect
+        per moved row (nudged inboard on a best row). `row_geom` is a list of
+        (ident, y_top, is_best) for the CURRENT provider rows (so ticks land on
+        the exact rows that moved). Returns a dict cached in self._drift_geom."""
+        d = self._drift
+        mag = max(0.0, min(1.0, d.magnitude))
+        # decision F: kinks = clamp(3 + round(mag*6), 3, 9); amp = clamp(2+mag*5, 2, 7)
+        kinks = max(3, min(9, 3 + round(mag * 6)))
+        amp = max(2.0, min(7.0, 2.0 + mag * 5.0))
+
+        y_top = self.FAULT_Y_MARGIN
+        y_bot = max(y_top + 1.0, h - self.FAULT_Y_MARGIN)
+        # x oscillates symmetrically inside [FAULT_X_MIN, FAULT_X_MAX] around the
+        # channel mid; amplitude is clamped so it can never leave the channel.
+        x_mid = (self.FAULT_X_MIN + self.FAULT_X_MAX) / 2.0
+        half = (self.FAULT_X_MAX - self.FAULT_X_MIN) / 2.0
+        a = min(amp, half)                       # never exceed the 7px channel
+
+        n = kinks
+        path = QPainterPath()
+        pts = []
+        for i in range(n + 1):
+            t = i / float(n)
+            y = y_top + t * (y_bot - y_top)
+            # alternate left/right of the channel mid; a small phase so the
+            # endpoints sit near the mid (a crack that starts/ends at the spine)
+            x = x_mid + (a if (i % 2 == 0) else -a)
+            if i == 0:
+                x = x_mid
+            elif i == n:
+                x = x_mid
+            pts.append(QPointF(x, y))
+        path.moveTo(pts[0])
+        for p in pts[1:]:
+            path.lineTo(p)
+
+        # Epicenter: the y of the LARGEST tremor's row if we can place it on a
+        # known row; else the vertical centre of the crack. x sits on the spine
+        # mid so the diamond reads as the crack's origin.
+        epi_y = (y_top + y_bot) / 2.0
+        if d.tremors and row_geom:
+            top_ident = d.tremors[0].ident
+            for ident, ry, _best in row_geom:
+                if ident == top_ident:
+                    epi_y = ry + self.ROW_H / 2.0
+                    break
+        epi = QPointF(x_mid, max(y_top, min(y_bot, epi_y)))
+
+        # Per-row tremor ticks: a 2px vertical bar y+3..y+ROW_H-3 at PAD_X-4, or
+        # PAD_X-2 on a best row (the coexistence nudge — clear the gold accent).
+        # Keyed by ident so the row loop can paint each one in O(1) (layering it
+        # over the best-row highlight) without re-deriving geometry.
+        ticks = {}          # {ident: (QRectF, QColor)}
+        tdir = {t.ident: t.direction for t in d.tremors}
+        for ident, ry, is_best in row_geom:
+            if ident not in d.moved_rows:
+                continue
+            tx = (self.PAD_X - 2) if is_best else (self.PAD_X - 4)
+            rect = QRectF(tx, ry + 3, self.TICK_W, self.ROW_H - 6)
+            ticks[ident] = (rect, self._tremor_color(tdir.get(ident, d.direction)))
+
+        # the fault path's bounding rect (introspection / hit testing)
+        bbox = path.boundingRect()
+        return {
+            "path": path, "bbox": bbox, "epi": epi, "ticks": ticks,
+            "kinks": kinks, "amp": amp, "y_top": y_top, "y_bot": y_bot,
+        }
+
+    def _drift_row_geom(self, w, h):
+        """Replicate the band-stack y math to get each provider row's top y +
+        best flag BEFORE the row loop runs (so the crack's epicenter + the tick
+        rects can be measured up-front). Pure — mirrors the paintEvent stack
+        accumulation exactly. Returns [(ident, y_top, is_best)]."""
+        if not self._endpoints or not self._endpoints.endpoints:
+            return []
+        y = self.PAD_Y + self.HEADER_H
+        bands = 0
+        if self._benchmark is not None:
+            y += self.CREST_H; bands += 1
+        if self._speed is not None:
+            if bands:
+                y += self.BAND_GAP
+            y += self.SPEED_H; bands += 1
+        if self._door is not None:
+            if bands:
+                y += self.BAND_GAP
+            y += self.DOOR_H; bands += 1
+        if bands:
+            y += self.ROWS_GAP
+        out = []
+        for ep in self._endpoints.endpoints:
+            out.append((self._ep_ident(ep), y, self._best is ep))
+            y += self.ROW_H
+        return out
+
+    def _paint_fault_line(self, painter, w, h):
+        """Paint the seismograph crack down the card's LEFT EDGE + the epicenter
+        diamond + the fresh-Δ glyph, all clipped to the rounded BG path so the
+        crack stays inside the corners (decision F). Per-row tremor TICKS are
+        painted in the row loop (so they layer over the best-row highlight),
+        reading the same cached geometry. Guarded by has_drift() at the call
+        site — paints NOTHING when quiet (decision E). Records the clickable
+        edge-band + tick hit rects into self._drift_hits."""
+        d = self._drift
+        row_geom = self._drift_row_geom(w, h)
+        geom = self._measure_drift(w, h, row_geom)
+        self._drift_geom = geom
+        color = self._drift_color()
+
+        # Hit rects: the whole left-edge band (0..PAD_X-2) PLUS each tick rect.
+        self._drift_hits = [(QRectF(0, 0, self.PAD_X - 2, h), None)]
+        for ident, (rect, _c) in geom["ticks"].items():
+            self._drift_hits.append((QRectF(rect), ident))
+
+        painter.save()
+        bg = QPainterPath()
+        bg.addRoundedRect(QRectF(0, 0, w, h), 10, 10)
+        painter.setClipPath(bg)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        # FRESH state breathes the crack's alpha on the shared shimmer (decision
+        # E); static otherwise. Mutate the ONE preallocated QColor (allocation-
+        # free, mirrors _pulse_alpha).
+        if self._drift_fresh and self._shimmer_timer.isActive():
+            a = int(150 + 80 * math.sin(self._shimmer * 2 * math.pi))   # ~70..230
+        else:
+            a = 230
+
+        # (1) soft glow pass — 3px, lower alpha
+        self._drift_alpha.setRgb(color.red(), color.green(), color.blue(),
+                                 min(110, int(a * 0.45)))
+        painter.setPen(QPen(self._drift_alpha, 3.0, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(geom["path"])
+        # (2) crisp trace — 1.5px, high alpha
+        self._drift_alpha.setRgb(color.red(), color.green(), color.blue(), a)
+        painter.setPen(QPen(self._drift_alpha, 1.5, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(geom["path"])
+
+        # epicenter diamond (filled) + a 1px ring at the largest tremor's y
+        epi = geom["epi"]
+        r = self.FAULT_EPI_R
+        diamond = QPolygonF([
+            QPointF(epi.x(), epi.y() - r), QPointF(epi.x() + r, epi.y()),
+            QPointF(epi.x(), epi.y() + r), QPointF(epi.x() - r, epi.y()),
+        ])
+        self._drift_alpha.setRgb(color.red(), color.green(), color.blue(), a)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self._drift_alpha))
+        painter.drawPolygon(diamond)
+        ring = QColor(color.red(), color.green(), color.blue(), min(160, a))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ring, 1.0))
+        painter.drawEllipse(epi, r + 2.0, r + 2.0)
+        painter.restore()
+
+        # (3) FRESH-Δ glyph at top-left (3, PAD_Y+ascent) — only while unacked.
+        if self._drift_fresh:
+            painter.save()
+            dfont = Fonts.tiny()
+            dfm = QFontMetrics(dfont)
+            self._drift_alpha.setRgb(color.red(), color.green(), color.blue(), a)
+            painter.setPen(QPen(self._drift_alpha))
+            painter.setFont(dfont)
+            painter.drawText(QPointF(3, self.PAD_Y + dfm.ascent()), "Δ")  # Δ
+            painter.restore()
 
     # ---- Shared left rail ----
     # The crest + speed band emblems sit in the SAME column as each provider
@@ -2007,6 +2290,24 @@ class PinnedModelCard(QWidget):
                 return rect, ident
         return None, None
 
+    def _drift_at(self, pos):
+        """The fault-line click rect under `pos` (the whole left-edge band PLUS
+        each tremor tick), or None. A tick is checked FIRST so a click on a
+        tremor returns that tick's tighter rect (a nicer popup anchor); the broad
+        edge band is the fallback. Empty when quiet (no _drift_hits)."""
+        if not self._drift_hits:
+            return None
+        band = None
+        for rect, ident in self._drift_hits:
+            if ident is None:
+                band = rect            # the edge band (checked last as fallback)
+                continue
+            if rect.contains(pos):
+                return rect
+        if band is not None and band.contains(pos):
+            return band
+        return None
+
     def mouseMoveEvent(self, event):
         pos = event.position()
         icon_hover = self._icon_hit_rect.contains(pos)
@@ -2014,6 +2315,7 @@ class PinnedModelCard(QWidget):
         speed_hover = self._speed is not None and self._speed_hit_rect.contains(pos)
         door_hover = self._door is not None and self._door_hit_rect.contains(pos)
         trend_hover = self._trend is not None and self._tape_hit_rect.contains(pos)
+        drift_hover = self._drift_at(pos) is not None
         _, seal_ident = self._seal_at(pos)
         _, pulse_ident = self._pulse_at(pos)
         _, wl_ident = self._waterline_at(pos)
@@ -2039,13 +2341,16 @@ class PinnedModelCard(QWidget):
         if pulse_ident != self._pulse_hover_ident:
             self._pulse_hover_ident = pulse_ident
             changed = True
-        # The waterline is static (decision E defers the hover glint) — track the
-        # hovered price cell only to show the hand cursor; it triggers no repaint.
-        cursor_changed = (wl_ident != self._waterline_hover_ident)
+        # The waterline + the fault line are static (decision E — the crack only
+        # breathes when fresh, on its own timer) — track the hovered price cell /
+        # crack only to show the hand cursor; neither triggers a repaint.
+        cursor_changed = (wl_ident != self._waterline_hover_ident
+                          or drift_hover != self._drift_hover)
         self._waterline_hover_ident = wl_ident
+        self._drift_hover = drift_hover
         if changed or cursor_changed:
             if (icon_hover or crest_hover or speed_hover or door_hover
-                    or trend_hover
+                    or trend_hover or drift_hover
                     or seal_ident is not None or pulse_ident is not None
                     or wl_ident is not None):
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -2056,7 +2361,7 @@ class PinnedModelCard(QWidget):
 
     def leaveEvent(self, event):
         if (self._icon_hover or self._crest_hover or self._speed_hover
-                or self._door_hover or self._trend_hover
+                or self._door_hover or self._trend_hover or self._drift_hover
                 or self._seal_hover_ident is not None
                 or self._pulse_hover_ident is not None
                 or self._waterline_hover_ident is not None):
@@ -2065,6 +2370,7 @@ class PinnedModelCard(QWidget):
             self._speed_hover = False
             self._door_hover = False
             self._trend_hover = False
+            self._drift_hover = False
             self._seal_hover_ident = None
             self._pulse_hover_ident = None
             self._waterline_hover_ident = None
@@ -2095,6 +2401,13 @@ class PinnedModelCard(QWidget):
         elif self._door is not None and self._door_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._door_hit_rect.center().toPoint())
             self.door_clicked.emit(self.model_id, QPointF(global_pos))
+        elif (drift_rect := self._drift_at(pos)) is not None:
+            # #8 THE FAULT LINE — the left-edge crack band OR a per-row tremor
+            # tick. Tested BEFORE the seal so a tremor tick (which nudges to
+            # PAD_X-2, grazing the seal column) always opens the Seismograph
+            # rather than the row's Custody dossier.
+            global_pos = self.mapToGlobal(drift_rect.center().toPoint())
+            self.drift_clicked.emit(self.model_id, QPointF(global_pos))
         elif seal_ident is not None:
             global_pos = self.mapToGlobal(seal_rect.center().toPoint())
             self.trust_clicked.emit(self.model_id, seal_ident, QPointF(global_pos))
@@ -2119,6 +2432,16 @@ class PinnedModelCard(QWidget):
         painter.fillPath(path, QBrush(Colors.BG_CARD))
         painter.setPen(QPen(Colors.BORDER, 1))
         painter.drawPath(path)
+
+        # #8 THE FAULT LINE — the price-drift seismograph crack, painted right
+        # after the BG path (clipped to it) and BEFORE the header so it reads as
+        # a fracture in the card's own casing. Paints NOTHING when quiet (no
+        # drift / magnitude 0) — the silent-degrade contract (decision E). Per-
+        # row tremor ticks are layered in the row loop below; this also measures
+        # + caches the geometry both halves read.
+        self._drift_hits = []
+        if self.has_drift():
+            self._paint_fault_line(painter, w, h)
 
         # === Header layout: name (elided) · inline ★ chip · [#7 TAPE] · (i) icon ===
         # Reserve space right-to-left so the name never overlaps the chip, the
@@ -2329,6 +2652,16 @@ class PinnedModelCard(QWidget):
                 # provider without fighting the seal for the left slot.
                 painter.fillRect(QRectF(self.PAD_X - 4, y + 3, 2, self.ROW_H - 6),
                                  QBrush(QColor("#ffd23f")))
+
+            # #8 THE FAULT LINE — per-row tremor tick on the EXACT providers that
+            # moved (the spatial read a toast can't do). Layered AFTER the gold
+            # accent so the +2px-inboard nudge (decision F) reads clearly on a
+            # best row. Reads the geometry measured once in _paint_fault_line.
+            if self._drift_geom is not None:
+                tick = self._drift_geom["ticks"].get(self._ep_ident(ep))
+                if tick is not None:
+                    trect, tcolor = tick
+                    painter.fillRect(trect, QBrush(tcolor))
 
             if grade is not None:
                 seal_box = QRectF(self.PAD_X, y + (self.ROW_H - 16) / 2, self.SEAL_W, 16)
@@ -3802,6 +4135,111 @@ class PinnedModelCard(QWidget):
 
         out.append("<div style='margin-top:4px;color:#64648c;font-size:8pt;'>"
                    "live from openrouter.ai · 73 hourly samples · refreshed every ~20 min</div>")
+        return "".join(out)
+
+    # ---- #8 THE FAULT LINE dossier (the Seismograph read-out) ----
+
+    @staticmethod
+    def _drift_ago(ts) -> str:
+        """A coarse 'since {relative time}' phrase for a unix ts (the baseline /
+        last-quiet reading). 'just now' under a minute; else m/h/d."""
+        if not ts:
+            return "the last reading"
+        import time as _t
+        dt = max(0.0, _t.time() - ts)
+        if dt < 60:
+            return "just now"
+        if dt < 3600:
+            return f"{int(dt // 60)} min ago"
+        if dt < 86400:
+            return f"{int(dt // 3600)} h ago"
+        return f"{int(dt // 86400)} d ago"
+
+    @staticmethod
+    def _drift_ts_str(ts) -> str:
+        if not ts:
+            return "—"
+        import time as _t
+        return _t.strftime("%b %d, %H:%M", _t.localtime(ts))
+
+    def drift_html(self, ident=None) -> str:
+        """The SEISMOGRAPH dossier: a header ('since {relative time}'), one line
+        per tremor (price up/down · cheaper appeared · deranked) with a tiny
+        inline width-scaled magnitude bar colored by ITS direction, and a 'last
+        quiet reading {ts}' footer. `ident` is accepted to match the other
+        *_html signatures; the drift is per-model. Empty string when quiet.
+
+        Every API-sourced provider name is HTML-escaped (mirrors door_html)."""
+        from price_drift import (FAVORABLE, KIND_PRICE_UP, KIND_PRICE_DOWN,
+                                  KIND_CHEAPER, KIND_DERANK)
+        d = self._drift
+        if d is None or d.magnitude <= 0.0:
+            return ""
+        net_accent = self.drift_accent()
+        amber = self.FAULT_AMBER.name()
+        violet = self.FAULT_VIOLET.name()
+        name = html.escape(self._display_model_name())
+
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+        verdict = ("PRICES SHIFTED — WATCH" if d.direction != FAVORABLE
+                   else "FAVORABLE DRIFT")
+        out.append(
+            f"<div style='color:{net_accent};font-size:9.5pt;font-weight:bold;"
+            f"margin-bottom:2px;'>&#9651; SEISMOGRAPH &nbsp;·&nbsp; {verdict}</div>")
+        out.append(
+            f"<div style='color:#64648c;font-size:8pt;margin-bottom:8px;'>"
+            f"since {html.escape(self._drift_ago(d.baseline_ts))} · "
+            f"{len(d.moved_rows)} provider{'' if len(d.moved_rows) == 1 else 's'} moved "
+            f"· live from openrouter.ai</div>")
+
+        def money(per_tok):
+            mtok = per_tok * 1_000_000
+            return f"${mtok:.3f}/Mtok"
+
+        def bar(mag, col):
+            n = max(2, min(24, int(round(mag * 24))))
+            return (f"<span style='background-color:{col};color:{col};'>"
+                    f"{'&nbsp;' * n}</span>")
+
+        rows = []
+        for t in d.tremors:
+            col = violet if t.direction == FAVORABLE else amber
+            pname = html.escape(t.name or t.ident)
+            if t.kind == KIND_PRICE_UP:
+                glyph = "&#9650;"   # ▲
+                desc = (f"{money(t.old)} &#8594; {money(t.new)} "
+                        f"<span style='color:{col};'>+{abs(t.rel) * 100:.0f}%</span>")
+            elif t.kind == KIND_PRICE_DOWN:
+                glyph = "&#9660;"   # ▼
+                desc = (f"{money(t.old)} &#8594; {money(t.new)} "
+                        f"<span style='color:{col};'>-{abs(t.rel) * 100:.0f}%</span>")
+            elif t.kind == KIND_CHEAPER:
+                glyph = "&#9660;"   # ▼
+                desc = (f"now <b style='color:{col};'>CHEAPEST</b> at {money(t.new)} "
+                        f"<span style='color:#64648c;'>(under {money(t.old)})</span>")
+            elif t.kind == KIND_DERANK:
+                glyph = "&#9888;"   # ⚠
+                desc = f"<b style='color:{col};'>DERANKED</b> by the router"
+            else:
+                glyph = "&#9651;"
+                desc = ""
+            rows.append(
+                f"<tr>"
+                f"<td style='padding:3px 8px 3px 0;color:{col};font-weight:bold;"
+                f"white-space:nowrap;vertical-align:top;'>{glyph}</td>"
+                f"<td style='padding:3px 10px 3px 0;color:#f0f0ff;font-weight:bold;"
+                f"white-space:nowrap;vertical-align:top;'>{pname}</td>"
+                f"<td style='padding:3px 0;color:#c8c8e0;font-size:8.5pt;"
+                f"white-space:nowrap;vertical-align:top;'>{desc}"
+                f"<br>{bar(t.magnitude, col)}</td>"
+                f"</tr>")
+        out.append("<table cellspacing='0' style='border-spacing:0;font-size:9pt;"
+                   "margin-bottom:6px;'>" + "".join(rows) + "</table>")
+
+        out.append(
+            f"<div style='margin-top:4px;color:#64648c;font-size:8pt;'>"
+            f"Last quiet reading: {html.escape(self._drift_ts_str(d.baseline_ts))} "
+            f"· crack persists until you open this · refreshed with endpoints</div>")
         return "".join(out)
 
     # ---- helpers ----

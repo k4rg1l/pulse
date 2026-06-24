@@ -178,6 +178,15 @@ class Dashboard(QWidget):
         # #6 THE WATERLINE gate (settings.show_hidden_fees). Same idiom: #6 has no
         # fetch (rides the endpoints payload), so this is its only gate point.
         self._show_fees = bool(getattr(settings, "show_hidden_fees", True)) if settings else True
+        # #8 THE FAULT LINE gate (settings.show_drift) + the persisted price store.
+        # #8 rides the endpoints diff (no fetch); the dashboard OWNS the store
+        # (the baseline-update policy is stateful — decision C says it lives in
+        # the orchestration layer, NOT the card). Loaded once; persisted after
+        # each observe()/acknowledge() (atomic, BOM-tolerant — mirrors history).
+        self._show_drift = bool(getattr(settings, "show_drift", True)) if settings else True
+        from price_drift import PriceSnapshotStore
+        self._price_store = PriceSnapshotStore.load()
+        self._drift_popup_ctx = None     # (model_id, anchor_y) or None
         # Speed Percentile (#4): the fleet performance board + the slug→permaslug
         # map needed to look a pinned model up in it. Both distributed to cards.
         self._speed_board = None
@@ -507,8 +516,10 @@ class Dashboard(QWidget):
                 card.door_clicked.connect(self._on_door_clicked)
                 card.uptime_clicked.connect(self._on_uptime_clicked)
                 card.fees_clicked.connect(self._on_fees_clicked)
+                card.drift_clicked.connect(self._on_drift_clicked)
                 card.set_show_door(self._show_door)   # #5 settings gate
                 card.set_show_fees(self._show_fees)   # #6 settings gate
+                card.set_show_drift(self._show_drift)  # #8 settings gate
                 if self._logo_store is not None:
                     card.set_logo_store(self._logo_store)
                 self._pinned_cards[mid] = card
@@ -586,6 +597,16 @@ class Dashboard(QWidget):
         self._show_fees = bool(show)
         for card in self._pinned_cards.values():
             card.set_show_fees(self._show_fees)
+
+    # ---- #8 THE FAULT LINE (the price-drift gate) ----
+
+    def set_show_drift(self, show: bool):
+        """Apply the settings.show_drift gate to every pinned card (and remember
+        it for cards created later). #8 carries no fetch (it rides the endpoints
+        diff), so toggling this is how the seismograph crack is shown/hidden."""
+        self._show_drift = bool(show)
+        for card in self._pinned_cards.values():
+            card.set_show_drift(self._show_drift)
 
     # ---- Speed Percentile (#4) ----
 
@@ -743,6 +764,49 @@ class Dashboard(QWidget):
         if card is not None:
             card.set_endpoints(model_endpoints)
             self._prewarm_logos()
+            self._apply_drift(model_id, model_endpoints)
+
+    def _apply_drift(self, model_id, model_endpoints):
+        """#8 THE FAULT LINE — diff the just-landed endpoints vs the stored
+        baseline, apply the baseline-update policy (decision C), persist the
+        store, and push the result to the card. A failed fetch (None) or the
+        gate being off is a no-op (the card keeps last-good). The store.observe()
+        returns None for first-sight / quiet (the card then paints nothing)."""
+        if not self._show_drift:
+            return
+        if model_endpoints is None or not getattr(model_endpoints, "endpoints", None):
+            return                       # failed fetch → keep last-good crack
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        try:
+            result = self._price_store.observe(model_id, model_endpoints.endpoints)
+            self._price_store.save()     # persist baseline roll / fresh flag
+        except Exception:
+            logging.getLogger("pulse.drift").warning(
+                "drift observe failed for %s", model_id, exc_info=True)
+            return
+        card.set_drift(result)
+        # Live-refresh an open Seismograph dossier for this model in place.
+        self._maybe_refresh_drift_popup(model_id)
+
+    def _maybe_refresh_drift_popup(self, model_id):
+        ctx = self._drift_popup_ctx
+        if (ctx is None or self._provider_popup is None
+                or not self._provider_popup.isVisible()):
+            return
+        m, anchor_y = ctx
+        if m != model_id or self._popup_model_id != "drift:" + model_id:
+            return
+        card = self._pinned_cards.get(model_id)
+        if card is None:
+            return
+        html_str = card.drift_html()
+        if not html_str:
+            return
+        self._provider_popup.set_accent(card.drift_accent())
+        self._provider_popup.show_beside(
+            html_str, self._dashboard_global_rect(), anchor_y)
 
     def update_model_catalog(self, models):
         """Worker fetched the full /api/v1/models list; feed it to the picker."""
@@ -974,6 +1038,50 @@ class Dashboard(QWidget):
             int(global_anchor.y()),
         )
         self._popup_model_id = key
+
+    def _on_drift_clicked(self, model_id, global_anchor):
+        """#8 THE FAULT LINE was clicked -> show the SEISMOGRAPH dossier AND
+        ACKNOWLEDGE the drift (decision C iv): write current as the new baseline
+        + clear fresh, then PERSIST so the same drift never re-fires. The crack
+        clears on the next refresh (current-vs-current -> quiet -> set_drift
+        None). Acknowledge fires only on the SHOW path (not toggle-hide / a
+        debounced reopen) so a quick double-click doesn't ack-then-reopen-empty."""
+        card = self._pinned_cards.get(model_id)
+        if card is None or not card.has_drift():
+            return
+        popup = self._ensure_provider_popup()
+        key = "drift:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        html_str = card.drift_html()
+        if not html_str:
+            return
+        popup.set_accent(card.drift_accent())
+        popup.show_beside(html_str, self._dashboard_global_rect(),
+                          int(global_anchor.y()))
+        self._popup_model_id = key
+        self._drift_popup_ctx = (model_id, int(global_anchor.y()))
+        # ACKNOWLEDGE (durable): write current as the new baseline + clear the
+        # fresh flag, persist to disk. The card stops the fresh shimmer now; the
+        # crack itself persists until the next quiet re-diff clears it.
+        eps = (card._endpoints.endpoints
+               if getattr(card, "_endpoints", None) is not None else [])
+        try:
+            self._price_store.acknowledge(model_id, eps)
+            self._price_store.save()
+        except Exception:
+            logging.getLogger("pulse.drift").warning(
+                "drift acknowledge failed for %s", model_id, exc_info=True)
+        card.acknowledge()
 
     def _on_trust_clicked(self, model_id, provider_ident, global_anchor):
         """A provider's Trust Seal was clicked -> show its Custody dossier."""
