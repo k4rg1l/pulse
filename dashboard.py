@@ -33,7 +33,8 @@ from config import (
 from widgets import (
     ArcGauge, StatCard, SectionHeader, BurnRateBar, GradientStrip,
     ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
-    ModelPicker, ProviderPopup, SpendSpectrum,
+    ModelPicker, ProviderPopup, SpendSpectrum, ReceiptStubList,
+    build_receipt_html, receipt_accent_hex,
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
@@ -439,6 +440,13 @@ class Dashboard(QWidget):
         self.spend_spectrum.spike_clicked.connect(self._on_spend_spike_clicked)
         spend_layout.addWidget(self.spend_spectrum)
 
+        # #10 THE TILL ROLL — per-model receipt stubs directly under the hero.
+        # The whole stub row opens its full thermal receipt; #9's legend rows are
+        # an additional entry point into the SAME receipt (shared IA).
+        self.spend_receipts = ReceiptStubList(self)
+        self.spend_receipts.receipt_clicked.connect(self._on_receipt_clicked)
+        spend_layout.addWidget(self.spend_receipts)
+
         self._or_layout.addWidget(self._spend_container)
 
         # Keep-last-good store + initial state. On a keyless machine the worker
@@ -453,6 +461,7 @@ class Dashboard(QWidget):
             self._spend_unlocked = False
         if not self._spend_unlocked:
             self.spend_spectrum.set_locked()
+            self.spend_receipts.set_locked()
             self._spend_header.right_label.setText("locked")
 
     def _toggle_spend_collapsed(self):
@@ -461,13 +470,42 @@ class Dashboard(QWidget):
         self._spend_container.setVisible(not self._spend_collapsed)
 
     def _on_spend_band_clicked(self, model_id, global_anchor):
-        # #10 receipt popup attaches here later. Wired now (no-op) so the signal
-        # is live before #10 ships.
-        log.debug("spend band clicked: %s", model_id)
+        # #9's legend/band row is an entry point into #10's receipt for the same
+        # model (shared IA — the band and the stub open the SAME thermal receipt).
+        self._on_receipt_clicked(model_id, global_anchor)
 
     def _on_spend_spike_clicked(self, t0_iso, t1_iso):
         # #11 autopsy attaches here later. Wired now (no-op).
         log.debug("spend spike clicked: %s..%s", t0_iso, t1_iso)
+
+    def _on_receipt_clicked(self, model_id, global_anchor):
+        """#10 THE TILL ROLL: a stub (or #9's legend row) was clicked -> render
+        the full thermal RECEIPT to a pixmap and show it in the shared popup.
+        Mirrors _on_uptime_clicked (keyed, debounced, toggle-hide). When locked /
+        no receipt on file, the popup reads '— NO RECEIPT ON FILE —'."""
+        popup = self._ensure_provider_popup()
+        key = "receipt:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        receipt = None
+        if getattr(self, "spend_receipts", None) is not None:
+            receipt = self.spend_receipts.receipt_for(model_id)
+        html_str = build_receipt_html(receipt)
+        if not html_str:
+            return
+        anchor_y = int(global_anchor.y())
+        popup.set_accent(receipt_accent_hex(receipt))
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
+        self._popup_model_id = key
 
     def _build_pinned_models(self):
         self._pinned_header = SectionHeader("Pinned Models")
@@ -598,10 +636,14 @@ class Dashboard(QWidget):
             # chrome (still honest, no fake $).
             if not getattr(self, "_spend_unlocked", False):
                 self.spend_spectrum.set_locked()
+                if getattr(self, "spend_receipts", None) is not None:
+                    self.spend_receipts.set_locked()
                 self._spend_header.right_label.setText("locked")
             return
 
         self.spend_spectrum.set_data(board.spectrum)
+        if getattr(self, "spend_receipts", None) is not None:
+            self.spend_receipts.set_data(board.receipts)
         # Headline in the (collapsible) section header's right_label.
         sp = board.spectrum
         if sp.is_empty:

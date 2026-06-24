@@ -5,6 +5,7 @@ Handles all communication with OpenRouter API endpoints.
 import logging
 import re
 import requests
+import statistics
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -843,16 +844,189 @@ def build_spend_spectrum(rows: list, granularity: str = "day",
     )
 
 
+# --- #10 THE TILL ROLL noise-gate floors -------------------------------------
+# A "PRICE UP / DOWN" stamp fires only when ALL gates pass, so a 1-request day
+# at a weird $/call can't trigger a false alarm. Floors picked from the LIVE
+# data (the real spike day was 95 requests / ~$0.046 a call; the noise days are
+# 1-6 requests). MIN_STAMP_REQUESTS=10 keeps the 95-req spike but kills 1-6 req
+# days; MIN_STAMP_PERCALL=$0.0005 is below the real spike yet above haiku noise.
+RECEIPT_SPIKE_MULT = 2.0          # latest >= 2x median -> "PRICE UP"
+RECEIPT_DROP_MULT = 0.5           # latest <= 0.5x median -> "PRICE DOWN" (green)
+RECEIPT_MIN_STAMP_REQUESTS = 10   # latest-day request_count floor
+RECEIPT_MIN_STAMP_PERCALL = 0.0005  # latest-day $/call absolute floor
+RECEIPT_MIN_HISTORY_DAYS = 7      # need a full week before a median is trustworthy
+
+
+@dataclass(frozen=True)
+class Receipt:
+    """One model's per-call receipt (#10 THE TILL ROLL).
+
+    All money is from REAL analytics totals — NEVER a fabricated per-line split.
+    The line items show real AVERAGE token COUNTS per call (input/output/
+    reasoning); the only itemized $ are the cache CREDIT (abs(usage_cache)/calls,
+    a saving) and the SUBTOTAL/CALL (total_usage/calls). `spark` is the 7 daily
+    $/call values for the micro-sparkline. The stamp (`stamp_mult` + `stamp_dir`)
+    fires only through the noise gate; `young` suppresses it on a <7-day account.
+    """
+    model_id: str
+    short_name: str
+    total_usage: float            # range total $ (ties back to #9)
+    request_count: int            # range total calls
+    per_call: float               # avg $/call over the range (guarded /0)
+    # per-call AVERAGE token counts (NO $ — decision A)
+    avg_prompt_tok: int
+    avg_completion_tok: int
+    avg_reasoning_tok: int
+    avg_cached_tok: int
+    cache_credit_per_call: float  # abs(usage_cache)/calls (a GREEN credit)
+    spark: tuple                  # tuple[float] daily $/call (chronological)
+    # the always-on tripwire stamp
+    stamp_mult: float             # latest/median multiplier (0.0 when no stamp)
+    stamp_dir: int                # +1 PRICE UP, -1 PRICE DOWN, 0 none
+    young: bool                   # <7 days of history -> stamp suppressed
+
+    @property
+    def has_stamp(self) -> bool:
+        return self.stamp_dir != 0
+
+    @property
+    def is_empty(self) -> bool:
+        return self.request_count <= 0 and self.total_usage <= 0.0
+
+
+def build_receipts(rows: list) -> tuple:
+    """Pure builder for #10 — per-model receipts from QUERY A's SAME day rows
+    (no new query). Returns a tuple[Receipt] in descending-spend order (so a
+    receipt stub stacks under #9's matching legend row).
+
+    Honesty contract (decision A): per-call line items are real AVERAGE token
+    COUNTS; the only itemized $ are the cache credit (abs(usage_cache)/calls) and
+    the subtotal/call (total_usage/calls). No total_usage is split across
+    input/output by token share. The stamp (decision B) compares the latest-day
+    $/call to the median of the prior days and fires only when latest >= 2x (or
+    <= 0.5x) median AND latest request_count >= MIN_STAMP_REQUESTS AND latest
+    $/call >= MIN_STAMP_PERCALL; a <7-day account suppresses the stamp (`young`).
+    """
+    rows = rows or []
+    # Gather per-(model,bucket) day cells + per-model range totals.
+    bucket_order: list = []
+    seen_buckets = set()
+    per_model: dict = defaultdict(lambda: {
+        "usage": 0.0, "reqs": 0, "prompt": 0, "compl": 0,
+        "reason": 0, "cached": 0, "ucache": 0.0,
+    })
+    # (model,bucket) -> {usage, reqs} so we can derive the daily $/call series.
+    day_cell: dict = defaultdict(lambda: {"usage": 0.0, "reqs": 0})
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        bk = _bucket_key(row)
+        bucket = row.get(bk) if bk else None
+        model = row.get("model") or ""
+        usage = _as_float(row.get("total_usage"))
+        reqs = _as_int(row.get("request_count"))
+        if bucket is not None and bucket not in seen_buckets:
+            seen_buckets.add(bucket)
+            bucket_order.append(bucket)
+        agg = per_model[model]
+        agg["usage"] += usage
+        agg["reqs"] += reqs
+        agg["prompt"] += _as_int(row.get("tokens_prompt"))
+        agg["compl"] += _as_int(row.get("tokens_completion"))
+        agg["reason"] += _as_int(row.get("reasoning_tokens"))
+        agg["cached"] += _as_int(row.get("cached_tokens"))
+        agg["ucache"] += _as_float(row.get("usage_cache"))
+        if bucket is not None:
+            c = day_cell[(model, bucket)]
+            c["usage"] += usage
+            c["reqs"] += reqs
+
+    bucket_order.sort()  # chronological (ISO date strings sort correctly)
+    n_days = len(bucket_order)
+
+    # Descending-spend order so a stub sits under #9's matching legend row.
+    ordered_models = sorted(
+        per_model.keys(),
+        key=lambda m: (-per_model[m]["usage"], m),
+    )
+
+    def _percall(usage: float, reqs: int) -> float:
+        return (usage / reqs) if reqs > 0 else 0.0
+
+    receipts = []
+    for model in ordered_models:
+        agg = per_model[model]
+        reqs = agg["reqs"]
+        usage = agg["usage"]
+        per_call = _percall(usage, reqs)
+        # The 7-tick daily $/call series, aligned chronologically (0 where the
+        # model had no calls that day — a guarded divide).
+        spark = []
+        for b in bucket_order:
+            c = day_cell.get((model, b))
+            spark.append(_percall(c["usage"], c["reqs"]) if c else 0.0)
+
+        # --- the noise-gated stamp (decision B) ---
+        stamp_mult = 0.0
+        stamp_dir = 0
+        # Need a full week of history before trusting a median basis.
+        young = n_days < RECEIPT_MIN_HISTORY_DAYS
+        if not young and n_days >= 2:
+            latest_cell = day_cell.get((model, bucket_order[-1]))
+            latest_pc = (_percall(latest_cell["usage"], latest_cell["reqs"])
+                         if latest_cell else 0.0)
+            latest_reqs = latest_cell["reqs"] if latest_cell else 0
+            prior = spark[:-1]
+            # Median over prior days where the model actually had calls (a $0
+            # day with no calls is not a real cheaper "price", just silence).
+            prior_active = [v for v in prior if v > 0.0]
+            gates_ok = (
+                latest_reqs >= RECEIPT_MIN_STAMP_REQUESTS
+                and latest_pc >= RECEIPT_MIN_STAMP_PERCALL
+                and len(prior_active) >= 1
+            )
+            if gates_ok:
+                med = statistics.median(prior_active)
+                if med > 0.0:
+                    mult = latest_pc / med
+                    if mult >= RECEIPT_SPIKE_MULT:
+                        stamp_mult = mult
+                        stamp_dir = 1
+                    elif mult <= RECEIPT_DROP_MULT:
+                        stamp_mult = mult
+                        stamp_dir = -1
+
+        receipts.append(Receipt(
+            model_id=model,
+            short_name=_short_model(model),
+            total_usage=usage,
+            request_count=reqs,
+            per_call=per_call,
+            avg_prompt_tok=(agg["prompt"] // reqs) if reqs > 0 else 0,
+            avg_completion_tok=(agg["compl"] // reqs) if reqs > 0 else 0,
+            avg_reasoning_tok=(agg["reason"] // reqs) if reqs > 0 else 0,
+            avg_cached_tok=(agg["cached"] // reqs) if reqs > 0 else 0,
+            cache_credit_per_call=_percall(abs(agg["ucache"]), reqs),
+            spark=tuple(spark),
+            stamp_mult=stamp_mult,
+            stamp_dir=stamp_dir,
+            young=young,
+        ))
+    return tuple(receipts)
+
+
 def build_spend_board(rows: list, granularity: str = "day", start: str = "",
                       end: str = "", range_label: str = "Last 7 Days",
                       truncated: bool = False) -> SpendBoard:
-    """Build the aggregate SpendBoard from QUERY A's rows. #9's .spectrum is
-    populated; later features' slots stay empty until they ride this same
-    cached envelope."""
+    """Build the aggregate SpendBoard from QUERY A's rows. #9's .spectrum and
+    #10's .receipts are populated from the SAME rows (no new query); later
+    features' slots stay empty until they ride this same cached envelope."""
     spectrum = build_spend_spectrum(rows, granularity=granularity,
                                     truncated=truncated)
-    return SpendBoard(spectrum=spectrum, start=start, end=end,
-                      range_label=range_label)
+    receipts = build_receipts(rows)
+    return SpendBoard(spectrum=spectrum, receipts=receipts, start=start,
+                      end=end, range_label=range_label)
 
 
 class AnalyticsClient:
@@ -969,6 +1143,15 @@ class AnalyticsClient:
                 range_label="Last 7 Days",
                 truncated=bool(meta.get("truncated")),
             )
+            # #10 receipts INFO line (no secret — counts + top $/call only).
+            try:
+                rcs = board.receipts
+                top_pc = max((r.per_call for r in rcs), default=0.0)
+                n_stamped = sum(1 for r in rcs if r.has_stamp)
+                log.info("receipts: %d models, top $/call=$%.4f, stamped=%d",
+                         len(rcs), top_pc, n_stamped)
+            except Exception:
+                pass
             return board
         except Exception:
             log.exception("get_spend_board crashed")

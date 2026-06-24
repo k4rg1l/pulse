@@ -182,8 +182,9 @@ def test_build_spend_board_reserves_later_slots():
     assert isinstance(board, SpendBoard)
     assert board.spectrum.total == pytest.approx(4.12)
     assert board.start == "s" and board.end == "e"
-    # later-feature slots reserved/empty (#10/#12/#13/#14 fill them later)
-    assert board.receipts == ()
+    # #10 THE TILL ROLL now rides Query A -> .receipts is populated from the SAME
+    # rows (one Receipt per active model). The OTHER feature slots stay reserved.
+    assert len(board.receipts) == 2
     assert board.savings is None and board.ghosts is None and board.budget is None
 
 
