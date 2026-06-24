@@ -144,7 +144,10 @@ You orchestrate these steps; workers execute the code-bearing ones:
    `dashboard` distribute → card. Gate behind a `show_*` setting.
 4. **Deterministic `qapp` test** that *measures* the rendered result + a brief live
    boot check (worker reports the structured log lines / measured geometry).
-5. **THE COMMIT RITUAL (you own this — it is gate-enforced):**
+5. **Independent acceptance review (§7.5.3) — THEN the commit ritual.** First, with
+   the feature reported "done", spawn a FRESH acceptance agent that adversarially
+   verifies it against its roadmap entry + the Definition of Done (§7.5.2). Only on
+   PASS do you commit. The commit ritual (you own it — gate-enforced):
    a. `git add -A` (stage exactly what you intend; the gate refuses `git add -a`).
    b. Spawn a **Sonnet** review agent: "Security-review this staged diff
       (`git diff --staged`); report concrete findings + severity." Resolve real
@@ -200,9 +203,61 @@ your messages). One line per roadmap feature:
 #5 Pricing …          [building    worker=ag_… ]
 #6 …                  [todo]
 ```
-States: `todo → designing → building → validating → committed`. After each commit,
-update it. This is what lets you stay context-lean: the ledger + the roadmap doc
-are the source of truth, not your scrollback.
+States: `todo → designing → building → validating → committed`, or
+`blocked:<exact reason>` (a real, surfaced blocker — never a quiet skip). After each
+commit, update it. This is what lets you stay context-lean: the ledger + the roadmap
+doc are the source of truth, not your scrollback. **Every roadmap item must reach
+`committed` or an explicitly-surfaced `blocked:…` — nothing may sit unaccounted.**
+
+---
+
+## 7.5 Completeness contract — the WHOLE roadmap ships, properly (READ THIS)
+
+The user's #1 requirement: **build the entire finalized roadmap, every feature, to
+the same WILD bar — with the same enthusiasm they built each feature by hand.
+Nothing lazily skipped, stubbed, faked, or declared done early.** Enforce it
+mechanically; do not rely on good intentions:
+
+1. **Canonical checklist first.** Before building anything, spawn a worker to
+   extract EVERY item from `docs/OPENROUTER-ROADMAP.md` — all waves, all features,
+   all shared foundations — into a numbered checklist. That IS your ledger. If the
+   roadmap lists it, it's on the list. Nothing is dropped silently, ever.
+
+2. **Definition of Done (ALL must hold before a feature is `committed`):**
+   pure parser + captured fixture + passing unit tests · the WILD render (NOT the
+   obvious version) wired end-to-end + gated by `show_*` · a deterministic `qapp`
+   test that *measures* the result · a live boot check whose log lines you saw ·
+   full `pytest` green · passed the independent acceptance review · committed.
+
+3. **Independent acceptance review — do NOT trust the builder's self-report.** After
+   a builder says "done", spawn a SEPARATE fresh agent that adversarially verifies,
+   against the roadmap entry: does it actually do what the roadmap intends? are the
+   tests real, present, and passing (not vacuous)? did the live check truly happen?
+   does the render meet the WILD bar (not a number/stub/placeholder/TODO)? was
+   anything faked or left half-done? It returns PASS or a concrete defect list.
+   Only commit on PASS. This is the gate against plausible-but-wrong "done".
+
+4. **WILD-bar gate.** For each feature, critique the proposed render first: is this
+   the obvious implementation? If yes, redesign before building (run a small design
+   panel if the wild idea isn't obvious). Cite the bar: Arena / Ledger / Speed.
+
+5. **No skipping — EVER.** Hard, expensive (N× requests), or blocked features are
+   NOT skipped. Either build it fully, or build it to **degrade gracefully** (correct
+   UI, honest empty/locked state, ZERO fake data) AND record `blocked:<exact reason>`
+   AND surface it to the user. "Too hard / too many requests / needs a management
+   key" is not a reason to skip — solve it (cache, batch, sample-with-an-honest-note;
+   for management-key/Analytics features that need org-routed usage to populate,
+   build the real UI + a clear locked/empty state and flag it). A blocked item is
+   reported loudly, never buried.
+
+6. **No premature victory.** You may NOT declare Phase A complete until: every
+   checklist item is `committed` or an explicitly-surfaced `blocked:…`; the full
+   suite is green; and a **final completeness audit** (a worker that diffs the
+   roadmap doc against the branch `git log`) returns ZERO unaccounted features.
+   Post that audit to the user as your Phase-A sign-off.
+
+7. **Honesty above all.** Report blocked/deferred items loudly; never mark done what
+   you can't show. Hold every feature to the exact standard the user did by hand.
 
 ---
 
