@@ -39,7 +39,9 @@ from widgets import (
     GhostVeil, build_seance_html, ghost_accent_hex,
     BudgetHourglass, build_budget_html, budget_accent_hex,
     build_autopsy_html, autopsy_accent_hex,
+    ValueAssayWidget, build_assay_certificate_html, assay_accent_hex,
 )
+import value_assay
 from nav_rail import NavRail
 from source_panel import SourcePanel
 
@@ -208,6 +210,12 @@ class Dashboard(QWidget):
         # logo that arrives after the dossier opens can refresh it in place.
         self._logo_store = None
         self._trust_popup_ctx = None     # (model_id, ident, anchor_y) or None
+        # Wave 3 INSIGHTS zone: the keep-last-good board for the mgmt widgets
+        # (#16/#17/#18) + the always-live #15 anchor. #15 rides _distribute_value
+        # off self._benchmark_board + each card's endpoints (NO new fetch); the
+        # board scaffold (set in _build_insights_section) carries the mgmt slots.
+        self._insights_board = None
+        self._value_assay = None         # #15 ValueAssayWidget (None if zone off)
 
         self._build_ui()
 
@@ -506,6 +514,60 @@ class Dashboard(QWidget):
         self._spend_header.set_collapsed(self._spend_collapsed)
         self._spend_container.setVisible(not self._spend_collapsed)
 
+    def _build_insights_section(self):
+        """Wave 3 INSIGHTS zone — a NEW collapsible section mounted BETWEEN the
+        Models board and Quick Links, built byte-for-byte on the Spend zone. Its
+        first/top widget is #15 THE ASSAY (the always-live USER-key anchor that
+        renders even when the mgmt features below are locked, so the zone is never
+        blank). #16/#17/#18 addWidget below #15 LATER in this same container (the
+        scaffold leaves their slots open). A collapsible header carries a live
+        one-line headline in its right_label ("standard: <model> ×N.N" / "locked")."""
+        self._insights_header = SectionHeader("Insights")
+        self._insights_header.set_collapsible(True)
+        self._insights_header.clicked.connect(self._toggle_insights_collapsed)
+        self._insights_collapsed = False
+        self._or_layout.addWidget(self._insights_header)
+
+        # One container holds the whole zone (so the header can collapse it and
+        # the later mgmt strips just addWidget below #15). spacing=10 per the IA.
+        self._insights_container = QWidget()
+        self._insights_container.setStyleSheet("background: transparent;")
+        insights_layout = QVBoxLayout(self._insights_container)
+        insights_layout.setContentsMargins(0, 0, 0, 0)
+        insights_layout.setSpacing(10)
+
+        # #15 THE ASSAY — the TOP widget, the always-on USER-key value anchor.
+        # It rides _distribute_value() (no mgmt key, no new fetch), so it renders
+        # live regardless of the mgmt-locked state of #16/#17/#18 below it.
+        self._value_assay = ValueAssayWidget(self)
+        self._value_assay.coin_clicked.connect(self._on_assay_clicked)
+        self._value_assay.metric_cycled.connect(self._on_assay_metric_cycled)
+        insights_layout.addWidget(self._value_assay)
+
+        # NOTE (scaffold): #16 ModelOfWeekBelt / #17 TokenRecorder / #18 TaskCourt
+        # addWidget here LATER, in this locked order. Their set_locked() dispatch
+        # already lives in update_insights below (guarded by getattr) so wiring
+        # them is purely additive.
+
+        self._or_layout.addWidget(self._insights_container)
+
+        # Keep-last-good board + the cheap unlocked probe (mirrors Spend). #15 is
+        # USER-key so it ignores this; the probe decides locked-vs-awaiting for
+        # the mgmt features (#16/#17/#18) when they are added.
+        from api_client import AnalyticsClient
+        try:
+            self._insights_unlocked = bool(AnalyticsClient().unlocked)
+        except Exception:
+            self._insights_unlocked = False
+        # #15 renders as soon as its inputs land; push whatever is already in
+        # memory (benchmarks/endpoints may have arrived before the section built).
+        self._distribute_value()
+
+    def _toggle_insights_collapsed(self):
+        self._insights_collapsed = not self._insights_collapsed
+        self._insights_header.set_collapsed(self._insights_collapsed)
+        self._insights_container.setVisible(not self._insights_collapsed)
+
     def _on_spend_band_clicked(self, model_id, global_anchor):
         # #9's legend/band row is an entry point into #10's receipt for the same
         # model (shared IA — the band and the stub open the SAME thermal receipt).
@@ -687,6 +749,49 @@ class Dashboard(QWidget):
         popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 
+    # ---- Wave 3 #15 THE ASSAY click-through ----
+
+    def _on_assay_clicked(self, model_id, anchor_y):
+        """#15 THE ASSAY: a coin was tapped -> render its 3-category assay
+        CERTIFICATE to a pixmap and show it in the shared popup. Mirrors
+        _on_savings_clicked (keyed 'insight:assay:'+model_id, debounced via the
+        _popup_just_hidden_at<0.15 just-closed guard, toggle-hide). GOLD accent
+        for the value STANDARD, else the model's shared Spend hue. No popup when
+        there's no assay row for the coin."""
+        popup = self._ensure_provider_popup()
+        key = "insight:assay:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        w = getattr(self, "_value_assay", None)
+        model = w.result_for(model_id) if w is not None else None
+        result = w._result if w is not None else None
+        html_str = build_assay_certificate_html(model, result)
+        if not html_str:
+            return
+        popup.set_accent(assay_accent_hex(model))
+        popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
+        self._popup_model_id = key
+
+    def _on_assay_metric_cycled(self, next_metric):
+        """#15: the metric label was tapped -> recompute the value standard on the
+        next AA index (intelligence->coding->agentic) and re-mint the coins. The
+        widget already holds the new active metric request; _distribute_value
+        reads it via current_metric(), so we just set it and re-assay."""
+        w = getattr(self, "_value_assay", None)
+        if w is None:
+            return
+        w._metric = next_metric
+        self._distribute_value()
+
     def _build_pinned_models(self):
         self._pinned_header = SectionHeader("Pinned Models")
         self._pinned_header.set_collapsible(True)
@@ -789,6 +894,9 @@ class Dashboard(QWidget):
         self._distribute_speed()
         self._distribute_trend()
         self._distribute_uptime()
+        # #15 THE ASSAY: re-assay when the pin set changes (a coin appears/leaves).
+        # (_distribute_benchmarks already calls this too; cheap + idempotent.)
+        self._distribute_value()
 
     def update_benchmarks(self, board):
         """Worker fetched the Arena board (or None). Hand each pinned card its
@@ -857,6 +965,113 @@ class Dashboard(QWidget):
         for mid, card in self._pinned_cards.items():
             entry = board.lookup(mid, card.display_name())
             card.set_benchmark(entry)
+        # #15 THE ASSAY rides the same benchmark board — re-assay whenever the
+        # crest data lands (one of its two inputs changed).
+        self._distribute_value()
+
+    # ---- Wave 3 INSIGHTS zone (scaffold + #15 THE ASSAY) ----
+
+    def update_insights(self, board):
+        """Worker fetched the InsightsBoard for the mgmt features (or None). Keep
+        last-good; route the mgmt slots to their widgets. Mirrors update_spend's
+        locked/keep-last-good contract. #15 THE ASSAY is INDEPENDENT of `board`
+        (it rides _distribute_value off the USER-key stores) so it renders
+        regardless; this method mainly stands the zone up for #16/#17/#18.
+
+        On a keyless machine with no last-good board, the mgmt widgets get
+        set_locked() + the header reads 'locked' — but #15 stays live, so the
+        zone is never fully blank."""
+        if getattr(self, "_value_assay", None) is None and \
+                getattr(self, "_insights_container", None) is None:
+            return  # section not built (show_insights disabled)
+        if board is not None:
+            self._insights_board = board
+
+        board = self._insights_board
+        if board is None:
+            # No data ever arrived. If no management key -> LOCKED the mgmt
+            # widgets (none exist yet — guarded set_locked dispatch is ready for
+            # #16/#17/#18). #15 is unaffected (USER key).
+            if not getattr(self, "_insights_unlocked", False):
+                for attr in ("_week_belt", "_token_recorder", "_task_court"):
+                    w = getattr(self, attr, None)
+                    if w is not None:
+                        w.set_locked()
+                if getattr(self, "_insights_header", None) is not None and \
+                        not self._has_live_insight_headline():
+                    self._insights_header.right_label.setText("locked")
+            return
+
+        # POPULATED: fan each mgmt slot to its widget (all None today — the
+        # set_data calls are ready for #16/#17/#18, guarded by getattr).
+        wk = getattr(self, "_week_belt", None)
+        if wk is not None and board.week is not None:
+            wk.set_data(board.week)
+        rec = getattr(self, "_token_recorder", None)
+        if rec is not None and board.recorder is not None:
+            rec.set_data(board.recorder)
+        ct = getattr(self, "_task_court", None)
+        if ct is not None and board.court is not None:
+            ct.set_data(board.court)
+
+    def _has_live_insight_headline(self) -> bool:
+        """True when #15 has already written a live 'standard:' headline, so the
+        mgmt-locked path doesn't overwrite it with 'locked' (the anchor wins the
+        header line while the mgmt widgets show their own locked chrome)."""
+        hdr = getattr(self, "_insights_header", None)
+        if hdr is None:
+            return False
+        return hdr.right_label.text().startswith("standard")
+
+    def _distribute_value(self):
+        """#15 THE ASSAY — recompute the value standard from the data ALREADY in
+        memory on the USER key and hand it to the widget. Called from
+        set_tracked_models, update_benchmarks (via _distribute_benchmarks), AND
+        update_endpoints so it re-assays when either input (a benchmark crest or a
+        priced endpoint) lands. Pure compute on the main thread — NO worker I/O.
+
+        quality = BenchmarkEntry.{active metric} ÷ cheapest priced prompt $/Mtok
+        (the SAME number the card's PRICE column shows — auditable). A model
+        lacking the active AA index -> a hollow 'unassayable' coin (decision C),
+        never dropped, never ELO-substituted on the rail."""
+        w = getattr(self, "_value_assay", None)
+        if w is None:
+            return  # section not built (show_insights disabled)
+        board = self._benchmark_board
+        models = []
+        for rank, (mid, card) in enumerate(self._pinned_cards.items()):
+            entry = board.lookup(mid, card.display_name()) if board is not None else None
+            eps = getattr(card, "_endpoints", None)
+            models.append(value_assay.build_assay_model(
+                mid, card.display_name(), entry, eps, spend_rank=rank))
+        result = value_assay.value_rank(models, w.current_metric())
+        w.set_data(result)
+        self._update_insights_headline(result)
+        # An INFO line so the live boot can confirm the value distributed (a top
+        # model + its value + the × multiple — magnitudes only, never a key).
+        win = result.winner
+        if win is not None and win.value is not None:
+            mult = result.top_multiple
+            log.info("value assay: %d models, top=%s value=%.1f x%s",
+                     len(result.assayable), win.model_id, win.value,
+                     (f"{mult:.1f}" if mult is not None else "n/a"))
+
+    def _update_insights_headline(self, result):
+        """The collapsible header's live one-line headline from #15 (the anchor
+        owns the header line; the mgmt-locked path defers to it). Empty/loading ->
+        leave whatever's there (or 'locked' if the mgmt path set it)."""
+        hdr = getattr(self, "_insights_header", None)
+        if hdr is None or result is None:
+            return
+        win = result.winner
+        if win is None or win.value is None:
+            return
+        from widgets import _coin_short_name
+        name = _coin_short_name(win.display)
+        if result.top_multiple is not None:
+            hdr.right_label.setText(f"standard: {name} ×{result.top_multiple:.1f}")
+        else:
+            hdr.right_label.setText(f"standard: {name}")
 
     def update_provider_trust(self, book):
         """Worker fetched The Ledger (or None). Hand the book to every pinned
@@ -1060,6 +1275,9 @@ class Dashboard(QWidget):
             card.set_endpoints(model_endpoints)
             self._prewarm_logos()
             self._apply_drift(model_id, model_endpoints)
+            # #15 THE ASSAY rides the card's endpoints (the price denominator);
+            # re-assay now that a priced prompt endpoint may have landed.
+            self._distribute_value()
 
     def _apply_drift(self, model_id, model_endpoints):
         """#8 THE FAULT LINE — diff the just-landed endpoints vs the stored
@@ -1488,6 +1706,13 @@ class Dashboard(QWidget):
         if bool(getattr(self._settings, "show_spend", True)) if self._settings else True:
             self._build_spend_section()
         self._build_pinned_models()
+        # Wave 3: the INSIGHTS zone (derived garnish about your models/usage) —
+        # mounts BETWEEN the Models board it comments on and Quick Links. Its
+        # anchor #15 THE ASSAY is always-live (USER key); #16/#17/#18 attach
+        # below it later. Guarded by show_insights (mirrors show_spend — when off
+        # the section isn't built at all).
+        if bool(getattr(self._settings, "show_insights", True)) if self._settings else True:
+            self._build_insights_section()
         self._build_quick_links()
         return group
 

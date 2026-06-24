@@ -73,6 +73,7 @@ class Settings:
     show_hidden_fees: bool = True       # show #6 THE WATERLINE — the hidden-cost iceberg under each price
     show_drift: bool = True             # show #8 THE FAULT LINE — the price-drift seismograph on the card edge
     show_spend: bool = True             # show the SPEND zone (Wave 2 #9 The Spectrum + ground-truth analytics)
+    show_insights: bool = True          # show the INSIGHTS zone (Wave 3 #15 The Assay anchor + #16/#17/#18 mgmt widgets)
 
     # -- #14 THE HOURGLASS (budget burn-down) --
     # The budget DENOMINATOR. >0 = the real config path (a weekly spend budget,

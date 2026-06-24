@@ -8846,3 +8846,690 @@ def build_budget_html(budget) -> str:
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
                "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
     return "".join(out)
+
+
+# ===========================================================================
+#  #15 THE ASSAY — the struck-coin value standard (Insights zone anchor)
+# ===========================================================================
+# Each pinned model is a hand-painted struck COIN whose DIAMETER = quality-per-
+# dollar (an AA index ÷ the cheapest prompt $/Mtok), ranged on a LOG-scaled milled
+# rail from BASE -> STERLING. The top-value coin is GOLD and wears a struck '✦
+# STANDARD' hallmark with the '×' multiple engraved above it; copper/silver fill
+# the rest by value-RANK. The model's Spend hue (spend_palette.model_color) is
+# ONLY a 2px rim keyline (metal = "how good a deal"; rim = "which model"). One
+# board-level widget (NOT per-card). Pure compute over value_assay.AssayResult;
+# zero new network. Tap a coin -> a 3-category assay certificate popup.
+#
+# House contract: ONE font-metric measure pass (in set_data) feeds BOTH paint and
+# sizeHint; pens/metal brushes + coin geometry are built in set_data, never the
+# paint hot path; ONE held QPropertyAnimation drives a DISTINCT `_strike` Property
+# (never pos/size) so the coins strike into existence without the widget moving.
+
+# The metal lane (value-rank fills) — two-stop vertical sheens per the spec.
+_METAL_GOLD = (QColor(0xE8, 0xC4, 0x6A), QColor(0xC9, 0xA0, 0x3A))    # sterling/top
+_METAL_SILVER = (QColor(0xC9, 0xCD, 0xD6), QColor(0x9A, 0xA0, 0xAD))  # mid
+_METAL_COPPER = (QColor(0xC0, 0x7A, 0x4E), QColor(0x9A, 0x5A, 0x36))  # low
+_GOLD_INK = QColor(0xE8, 0xC4, 0x6A)   # hallmark/× accent on dark; ink-shifted on gold
+
+
+def _metal_for_rank(rank: int, n_assayable: int):
+    """The two-stop sheen for a value rank: 0 -> gold; the worst -> copper; the
+    middle band(s) -> silver. With 2 coins it's gold (best) + copper (worst)."""
+    if rank <= 0:
+        return _METAL_GOLD
+    if n_assayable >= 2 and rank >= n_assayable - 1:
+        return _METAL_COPPER
+    return _METAL_SILVER
+
+
+class ValueAssayWidget(QWidget):
+    """#15 THE ASSAY (board-level). set_data(AssayResult) paints the milled rail
+    + a struck coin per pinned model sized by log-value, the gold STANDARD coin's
+    hallmark + '×' multiple, hollow 'unassayable' coins (decision C), and the
+    0-pin / 1-pin degrade states (decision D). Clicking a coin emits
+    coin_clicked(model_id, anchor_y_global) -> the dashboard's assay-certificate
+    dossier. Clicking the right-hand metric label cycles intelligence->coding->
+    agentic (metric_cycled(next_metric))."""
+
+    coin_clicked = Signal(str, int)        # (model_id, global anchor y)
+    metric_cycled = Signal(str)            # the next metric to compute/show
+
+    # -- geometry constants (the measure pass derives everything from these) --
+    RAIL_BAND_H = 76                       # fits 58px coin + the × engraving + hallmark
+    COIN_MIN_D = 34.0
+    COIN_SPAN = 24.0                       # d(v) = 34 + 24*logScale(v)  -> 34..58
+    SINGLE_D = 46.0                        # 1-pin / equal-value centred coin
+    CAP_PAD = 8                            # gap after the BASE/STERLING cap labels
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._result = None                # value_assay.AssayResult | None
+        self._metric = "agentic"           # active metric (default agentic)
+        self._strike = 1.0                 # 0..1 coin-strike factor (animated once)
+        self._signature = None             # one-time strike gate
+        self._metric_hit = None            # QRectF of the clickable metric label
+        # Cached from the measure pass (rebuilt in set_data/resize) — the paint
+        # hot path only reads these, never recomputes:
+        self._caption_h = 0
+        self._coin_geom = []               # list[dict]: per-coin paint + hit data
+        self._rail_rect = None             # QRectF | None
+        # Pre-built pens/brushes (allocation-free paint):
+        self._rail_track_pen = QPen(Colors.BORDER, 3, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap)
+        self._mill_pen = QPen(Colors.TEXT_MUTED, 1)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # ONE held animation (ArcGauge/Spectrum idiom) — never per-frame alloc.
+        self._anim = QPropertyAnimation(self, b"strike")
+        self._anim.setDuration(600)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()                    # establish an initial fixed height
+        theme_controller.changed.connect(self._on_theme_changed)
+
+    # -- the strike Property (DISTINCT name; NOT a QWidget builtin) --
+    def get_strike(self):
+        return self._strike
+
+    def set_strike(self, v):
+        self._strike = float(v)
+        self.update()
+
+    strike = Property(float, get_strike, set_strike)
+
+    def _on_theme_changed(self):
+        # model_color rims ride the live accent -> rebuild geometry + repaint.
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, result):
+        """result: a value_assay.AssayResult (active-metric sorted) or None.
+
+        None => keep last good (the anchor never blanks). On a first/changed
+        populated render the coins strike in once; an identical re-distribution
+        is silent (no re-mint)."""
+        if result is None:
+            return
+        self._result = result
+        self._metric = result.metric
+        sig = self._compute_signature(result)
+        first_or_changed = (sig != self._signature)
+        self._signature = sig
+        self._measure()
+        self._build_geometry()
+        if first_or_changed and not result.is_empty:
+            self._start_strike()
+        else:
+            self._strike = 1.0
+        self.update()
+
+    def current_metric(self) -> str:
+        return self._metric
+
+    def result_for(self, model_id):
+        """The AssayModel for a coin (the dashboard reads it to build the
+        certificate). None when absent / no data."""
+        if self._result is None:
+            return None
+        for m in self._result.models:
+            if m.model_id == model_id:
+                return m
+        return None
+
+    # ------------------------------------------------------------------
+    #  Strike animation (one-time)
+    # ------------------------------------------------------------------
+    def _start_strike(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on:                          # reduce-motion -> instant
+            self._strike = 1.0
+            return
+        self._strike = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    @staticmethod
+    def _compute_signature(result):
+        # Active metric + the model set + per-model value rounded — cheap+stable
+        # so a 15-min identical re-distribution doesn't re-mint the coins.
+        return (
+            result.metric,
+            tuple((m.model_id, m.unassayable,
+                   None if m.value is None else round(m.value, 3))
+                  for m in result.models),
+        )
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint and setFixedHeight — no clipping)
+    # ------------------------------------------------------------------
+    def _measure(self):
+        # caption_h = tiny height + 6 ; total height = caption_h + 76 + 10.
+        self._caption_h = QFontMetrics(Fonts.tiny()).height() + 6
+        total_h = self._caption_h + self.RAIL_BAND_H + 10
+        self.setFixedHeight(int(total_h))
+
+    def sizeHint(self) -> QSize:
+        h = self._caption_h + self.RAIL_BAND_H + 10
+        return QSize(280, int(h))
+
+    # ------------------------------------------------------------------
+    #  Geometry build (cache rail rect + per-coin geometry).
+    #  Runs in set_data/resize — NOT the paint hot path.
+    # ------------------------------------------------------------------
+    def _content_rect(self):
+        return QRectF(0, 0, max(1, self.width()), self.height())
+
+    def _build_geometry(self):
+        self._coin_geom = []
+        self._rail_rect = None
+        cr = self._content_rect()
+        res = self._result
+        # Rail x-span: leave room for the BASE/STERLING cap labels at both ends.
+        cap_w = QFontMetrics(Fonts.tiny()).horizontalAdvance("STERLING") + self.CAP_PAD
+        rail_left = cr.left() + cap_w
+        rail_right = cr.right() - cap_w
+        rail_w = max(20.0, rail_right - rail_left)
+        rail_y = self._caption_h + 38.0     # band center
+        self._rail_rect = QRectF(rail_left, rail_y, rail_w, 0.0)
+
+        if res is None or res.is_empty:
+            return
+
+        assayable = res.assayable
+        n_assay = len(assayable)
+        values = [m.value for m in assayable if m.value is not None]
+        vmin = min(values) if values else 1.0
+        vmax = max(values) if values else 1.0
+        equal = (not values) or (vmax <= vmin)
+        single_centered = (n_assay == 1 and not any(x.unassayable for x in res.models))
+
+        # Draw back-to-front by ASCENDING value so the winner (largest) sits on
+        # top if two coins overlap. Hollow (unassayable) coins go first/lowest.
+        ordered = (sorted(assayable, key=lambda m: (m.value or 0.0))
+                   + [m for m in res.models if m.unassayable])
+
+        from value_assay import log_scale
+        for m in ordered:
+            if m.unassayable:
+                d = self.SINGLE_D
+                t = 0.06                    # hollow coins ride near BASE
+            elif equal or n_assay == 1:
+                d = self.SINGLE_D
+                t = 0.5
+            else:
+                t = log_scale(m.value, vmin, vmax)
+                d = self.COIN_MIN_D + self.COIN_SPAN * t
+            # Single coin (1 assayable + no hollow) -> dead-centre (decision D).
+            if single_centered:
+                cx = rail_left + rail_w / 2.0
+            else:
+                cx = rail_left + rail_w * t
+            half = d / 2.0
+            cx = max(rail_left + half, min(rail_right - half, cx))
+            cy = rail_y
+            self._coin_geom.append({
+                "model_id": m.model_id,
+                "model": m,
+                "d": d,
+                "cx": cx,
+                "cy": cy,
+                "rank": m.rank,
+                "n_assay": n_assay,
+                "is_winner": (m.rank == 0 and n_assay >= 1 and not m.unassayable),
+                "hollow": m.unassayable,
+            })
+
+    def resizeEvent(self, event):
+        self._build_geometry()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_caption(p)
+        self._paint_rail(p)
+        res = self._result
+        if res is None or res.is_empty:
+            self._paint_empty(p)
+        else:
+            # winner drawn LAST (on top) — ordered list already ascends by value.
+            for g in self._coin_geom:
+                self._paint_coin(p, g)
+            self._paint_headline_hint(p)
+        p.end()
+
+    def _paint_caption(self, p):
+        f = Fonts.tiny()
+        p.setFont(f)
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        cr = self._content_rect()
+        cap_top = QRectF(cr.left(), 0, cr.width(), self._caption_h)
+        p.drawText(cap_top, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "VALUE STANDARD · quality per $/Mtok")
+        # Right: the active metric label (clickable to cycle). Underlined to
+        # signal the affordance; stored for hit-testing in mousePressEvent.
+        mf = Fonts.tiny()
+        mf.setUnderline(True)
+        p.setFont(mf)
+        p.setPen(QPen(Colors.TEXT_SECONDARY))
+        label = self._metric
+        adv = QFontMetrics(mf).horizontalAdvance(label)
+        self._metric_hit = QRectF(cr.right() - adv - 2, 0, adv + 4, self._caption_h)
+        p.drawText(self._metric_hit,
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+
+    def _paint_rail(self, p):
+        rr = self._rail_rect
+        if rr is None:
+            return
+        y = rr.y()
+        left = rr.x()
+        right = rr.x() + rr.width()
+        # The 3px rounded track.
+        p.setPen(self._rail_track_pen)
+        p.drawLine(QPointF(left, y), QPointF(right, y))
+        # 1px vertical milling ticks every ~28px.
+        p.setPen(self._mill_pen)
+        x = left
+        while x <= right:
+            p.drawLine(QPointF(x, y - 4), QPointF(x, y + 4))
+            x += 28.0
+        # BASE / STERLING cap labels.
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        fm = QFontMetrics(Fonts.tiny())
+        lab_h = fm.height()
+        p.drawText(QRectF(0, y - lab_h / 2.0, left - 2, lab_h),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "BASE")
+        p.drawText(QRectF(right + 2, y - lab_h / 2.0,
+                          self.width() - right - 2, lab_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "STERLING")
+
+    def _paint_empty(self, p):
+        rr = self._rail_rect
+        if rr is None:
+            return
+        p.setFont(Fonts.body())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(0, rr.y() - 12, self.width(), 24),
+                   Qt.AlignmentFlag.AlignCenter, "Pin a model to assay its value")
+
+    def _paint_coin(self, p, g):
+        d = g["d"] * (self._strike if self._strike > 0 else 0.0)
+        if d < 1.0:
+            return
+        half = d / 2.0
+        cx, cy = g["cx"], g["cy"]
+        rect = QRectF(cx - half, cy - half, d, d)
+        m = g["model"]
+
+        if g["hollow"]:
+            # Unassayable: rim-only ring + a struck "no benchmark". No metal.
+            rim = spend_palette.model_color(m.model_id, m.spend_rank)
+            ring = QColor(rim); ring.setAlpha(150)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(ring, 2, Qt.PenStyle.DashLine))
+            p.drawEllipse(rect)
+            self._draw_struck_text(p, "no", cx, cy - d * 0.10, Fonts.tiny(),
+                                   Colors.TEXT_MUTED, light_metal=False)
+            self._draw_struck_text(p, "benchmark", cx, cy + d * 0.12, Fonts.tiny(),
+                                   Colors.TEXT_MUTED, light_metal=False)
+            return
+
+        # Filled metal disc with a two-stop vertical sheen.
+        top, bot = _metal_for_rank(g["rank"], g["n_assay"])
+        grad = QLinearGradient(cx, cy - half, cx, cy + half)
+        grad.setColorAt(0.0, top)
+        grad.setColorAt(1.0, bot)
+        p.setBrush(QBrush(grad))
+        # 2px milled RIM = the model's Spend hue (identity keyline).
+        rim = spend_palette.model_color(m.model_id, m.spend_rank)
+        p.setPen(QPen(rim, 2))
+        p.drawEllipse(rect)
+
+        # On gold, ink is dark for contrast; on copper/silver, light primary.
+        is_gold = (g["rank"] == 0)
+        light_metal = is_gold
+        # struck short name across the face (auto-shrunk to fit d-10, then elided).
+        name = _coin_short_name(m.display)
+        name_font = self._fit_font(name, d - 10)
+        name = QFontMetrics(name_font).elidedText(
+            name, Qt.TextElideMode.ElideRight, int(max(8.0, d - 10)))
+        self._draw_struck_text(p, name, cx, cy - d * 0.08, name_font,
+                               Colors.TEXT_PRIMARY, light_metal)
+        # value score struck below in mono.
+        if m.value is not None:
+            vtxt = f"{m.value:.1f}"
+            self._draw_struck_text(p, vtxt, cx, cy + d * 0.20, Fonts.mono_small(),
+                                   Colors.TEXT_PRIMARY, light_metal)
+
+        # The hallmark on the top-value coin + the engraved × multiple above it.
+        if g["is_winner"] and g["n_assay"] >= 2:
+            self._paint_hallmark(p, g)
+
+    def _paint_hallmark(self, p, g):
+        a = max(0.0, min(1.0, self._strike))    # fade in over the same Property
+        if a <= 0.01:
+            return
+        cx, cy = g["cx"], g["cy"]
+        d = g["d"] * (self._strike if self._strike > 0 else 1.0)
+        # '✦ STANDARD' notched punch riveted upper-right.
+        tab_x = cx + d * 0.32
+        tab_y = cy - d * 0.42
+        gold = QColor(_GOLD_INK); gold.setAlphaF(a)
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(gold))
+        p.drawText(QRectF(tab_x - 30, tab_y - 8, 90, 16),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "✦ STANDARD")
+        # The faint engraved '4.8×' floating above the coin.
+        mult = self._result.top_multiple if self._result else None
+        if mult is not None:
+            mf = Fonts.mono_small()
+            ink = QColor(_GOLD_INK); ink.setAlphaF(a)
+            p.setFont(mf)
+            p.setPen(QPen(ink))
+            p.drawText(QRectF(cx - 40, cy - d * 0.5 - 16, 80, 16),
+                       Qt.AlignmentFlag.AlignCenter, f"{mult:.1f}×")
+
+    def _paint_headline_hint(self, p):
+        # 1-pin headline (decision D): "<model> · value N.N (pin another to compare)"
+        res = self._result
+        if res is None:
+            return
+        assay = res.assayable
+        if len(assay) != 1 or any(m.unassayable for m in res.models):
+            return
+        m = assay[0]
+        if m.value is None:
+            return
+        txt = f"{_coin_short_name(m.display)} · value {m.value:.1f} (pin another to compare)"
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        p.drawText(QRectF(0, self.height() - 14, self.width(), 14),
+                   Qt.AlignmentFlag.AlignCenter, txt)
+
+    # -- struck-text helper: a 1px stamped shadow (dark drop + light highlight)
+    #    so the text reads on light OR dark metal --
+    def _draw_struck_text(self, p, text, cx, cy, font, ink, light_metal):
+        fm = QFontMetrics(font)
+        adv = fm.horizontalAdvance(text)
+        h = fm.height()
+        base = QRectF(cx - adv / 2.0 - 1, cy - h / 2.0, adv + 2, h)
+        p.setFont(font)
+        if light_metal:
+            shadow = QColor(0, 0, 0, 120); hi = QColor(255, 255, 255, 90)
+            ink_c = QColor(40, 30, 10)            # dark ink on gold
+        else:
+            shadow = QColor(0, 0, 0, 150); hi = QColor(255, 255, 255, 40)
+            ink_c = QColor(ink)
+        # drop shadow (down-right) + highlight (up-left) + ink.
+        p.setPen(QPen(shadow))
+        p.drawText(base.translated(0.6, 0.6),
+                   Qt.AlignmentFlag.AlignCenter, text)
+        p.setPen(QPen(hi))
+        p.drawText(base.translated(-0.6, -0.6),
+                   Qt.AlignmentFlag.AlignCenter, text)
+        p.setPen(QPen(ink_c))
+        p.drawText(base, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _fit_font(self, text, max_w):
+        """Shrink from Fonts.label() down to Fonts.tiny() until `text` fits
+        max_w; the caller elides if even tiny overflows."""
+        for f in (Fonts.label(), Fonts.body(), Fonts.tiny()):
+            if QFontMetrics(f).horizontalAdvance(text) <= max_w:
+                return f
+        return Fonts.tiny()
+
+    # ------------------------------------------------------------------
+    #  Interaction — coin hit-test + metric cycle
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        # Metric label first (top-right).
+        hit = self._metric_hit
+        if hit is not None and hit.contains(pos):
+            self.metric_cycled.emit(self._next_metric())
+            return
+        # Coins: front-to-back (winner is last drawn / on top) -> reverse.
+        for g in reversed(self._coin_geom):
+            half = (g["d"] / 2.0) + 2
+            dx = pos.x() - g["cx"]
+            dy = pos.y() - g["cy"]
+            if dx * dx + dy * dy <= half * half:
+                gy = int(self.mapToGlobal(QPoint(0, int(g["cy"]))).y())
+                self.coin_clicked.emit(g["model_id"], gy)
+                return
+        super().mousePressEvent(event)
+
+    def _next_metric(self) -> str:
+        from value_assay import METRICS
+        try:
+            i = METRICS.index(self._metric)
+        except ValueError:
+            i = METRICS.index("agentic")
+        return METRICS[(i + 1) % len(METRICS)]
+
+
+def _coin_short_name(display: str) -> str:
+    """A short coin face label from a model's display name. Strips a 'Vendor: '
+    prefix ('Z.ai: GLM 5.2' -> 'GLM 5.2', 'Anthropic: Claude Opus 4.8' ->
+    'Claude Opus 4.8'); the face font-fit + elide handle the rest."""
+    s = (display or "").strip()
+    if ":" in s:
+        s = s.split(":", 1)[1].strip()
+    return s or display or ""
+
+
+# ---- #15 assay CERTIFICATE (the tap-through dossier) ----------------------
+
+class AssayCertificateStrip(QWidget):
+    """The painted 3-category assay certificate for one model: a header score row
+    + three mini value-bars (intelligence / coding / agentic), each a strip with
+    its 2-decimal value (and the winner's × multiple vs the field). All text is
+    QPainter-drawn (injection-safe); the HTML wrapper ALSO html.escapes names.
+    devicePixelRatio-aware. Measure-before-allocate so nothing clips."""
+
+    STRIP_W = 300
+    PAD = 10
+    ROW_H = 20
+    ROW_GAP = 8
+    TRACK_H = 9
+    LABEL_W = 78
+
+    def __init__(self, model, result, parent=None):
+        super().__init__(parent)
+        self._m = model                    # value_assay.AssayModel
+        self._result = result              # value_assay.AssayResult (for the field max)
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _measure_height(self) -> int:
+        from value_assay import METRICS
+        header_h = QFontMetrics(Fonts.mono_small()).height() + 4
+        rows = len(METRICS)
+        return int(self.PAD * 2 + header_h + 6
+                   + rows * (self.ROW_H + self.ROW_GAP) - self.ROW_GAP)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        from value_assay import METRICS
+        w = self.STRIP_W
+        pad = self.PAD
+        m = self._m
+        res = self._result
+        # The field max per metric (for bar scaling + the winner's × multiple).
+        field_max = {}
+        for k in METRICS:
+            vals = [mm.value_by_metric.get(k) for mm in (res.models if res else [])]
+            vals = [v for v in vals if v is not None]
+            field_max[k] = max(vals) if vals else None
+
+        f_head = Fonts.mono_small()
+        fm_head = QFontMetrics(f_head)
+        # Header: the model name + active-metric value.
+        head = _coin_short_name(m.display)
+        p.setFont(f_head)
+        p.setPen(QPen(Colors.TEXT_PRIMARY))
+        p.drawText(QRectF(pad, pad, w - 2 * pad, fm_head.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, head)
+
+        y = pad + fm_head.height() + 6
+        track_left = pad + self.LABEL_W
+        track_w = w - track_left - pad - 56     # reserve a value column
+        f_lab = Fonts.tiny()
+        f_val = Fonts.mono_small()
+        for k in METRICS:
+            cy = y + self.ROW_H / 2.0
+            # row label (the AA index name).
+            p.setFont(f_lab)
+            p.setPen(QPen(Colors.TEXT_SECONDARY))
+            p.drawText(QRectF(pad, y, self.LABEL_W - 4, self.ROW_H),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, k)
+            # track.
+            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                       track_w, self.TRACK_H), 4), QBrush(track))
+            v = m.value_by_metric.get(k)
+            fmax = field_max.get(k)
+            if v is not None and fmax and fmax > 0:
+                frac = max(0.0, min(1.0, v / fmax))
+                fill_w = max(2.0, track_w * frac)
+                # winner of THIS metric -> gold; else the model's rim hue.
+                is_metric_top = (abs(v - fmax) < 1e-9)
+                col = _GOLD_INK if is_metric_top else \
+                    spend_palette.model_color(m.model_id, m.spend_rank)
+                p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                           fill_w, self.TRACK_H), 4), QBrush(QColor(col)))
+                # value text in the reserved column.
+                p.setFont(f_val)
+                p.setPen(QPen(Colors.TEXT_PRIMARY))
+                p.drawText(QRectF(track_left + track_w + 4, y, 52, self.ROW_H),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           f"{v:.2f}")
+            else:
+                # No AA index for this metric -> a tidy "—" (NOT a fake bar).
+                p.setFont(f_val)
+                p.setPen(QPen(Colors.TEXT_MUTED))
+                p.drawText(QRectF(track_left + track_w + 4, y, 52, self.ROW_H),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "—")
+            y += self.ROW_H + self.ROW_GAP
+
+
+def build_assay_certificate_html(model, result) -> str:
+    """The #15 assay certificate for the ProviderPopup: a header + the painted
+    3-bar breakdown embedded as a data-URI <img> (single-QLabel contract) + the
+    auditable footnote. Every API-sourced string (model/provider names) is
+    html.escape'd before it enters the HTML wrapper (the pixmap text itself is
+    QPainter-drawn so it's injection-safe by construction). When the active
+    metric's AA index is missing, the footnote shows the LABELLED 'ELO basis'
+    fallback (scale-honesty — ELO appears ONLY here, never as a coin diameter).
+    Returns '' when there's nothing to show."""
+    if model is None:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— NO ASSAY ON FILE —</div>")
+    name = html.escape(_coin_short_name(model.display) or model.model_id)
+    metric = html.escape(result.metric if result else "agentic")
+    out = []
+    if model.value is not None:
+        # The headline value + (winner) the × multiple vs the field.
+        head_extra = ""
+        if result is not None and model.rank == 0 and result.top_multiple is not None:
+            head_extra = (f" · <span style='color:#E8C46A;'>"
+                          f"{result.top_multiple:.1f}× the field</span>")
+        out.append(
+            f"<div style='font-size:11pt;font-weight:bold;color:#E8C46A;'>"
+            f"{name} — {metric} value {model.value:.1f}{head_extra}</div>")
+    else:
+        out.append(
+            f"<div style='font-size:11pt;font-weight:bold;color:#a0a0c8;'>"
+            f"{name} — unassayable on {metric}</div>")
+    out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+               "quality-per-dollar · all three AA indices · USER key</div>")
+    try:
+        strip = AssayCertificateStrip(model, result)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{AssayCertificateStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("assay certificate render failed", exc_info=True)
+    # The auditable footnote: the EXACT denominator the PRICE column shows.
+    if model.price is not None:
+        prov = html.escape(model.provider or "")
+        active_idx = model.quality_by_metric.get(result.metric if result else "agentic")
+        idx_txt = (f"AA {active_idx:.1f} (0-100)" if active_idx is not None
+                   else "AA n/a")
+        prov_txt = (f" @ {prov}" if prov else "")
+        out.append(
+            "<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
+            f"quality = {idx_txt} · price = cheapest prompt endpoint "
+            f"${model.price:.2f}/Mtok{prov_txt}</div>")
+    else:
+        out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
+                   "price pending — no priced prompt endpoint yet</div>")
+    # ELO basis (scale-honesty) — LABELLED, certificate-only, never on the rail.
+    if model.value is None and model.peak_elo is not None:
+        out.append(
+            "<div style='margin-top:2px;color:#9AA0AD;font-size:8pt;'>"
+            f"ELO basis (not value-ranked): peak ELO {int(model.peak_elo)}</div>")
+    return "".join(out)
+
+
+def assay_accent_hex(model) -> str:
+    """The popup border accent for the assay certificate: GOLD for the value
+    STANDARD (rank 0), else the model's shared Spend hue. Returns a #rrggbb."""
+    if model is not None and getattr(model, "rank", -1) == 0:
+        return _GOLD_INK.name()
+    if model is not None:
+        return spend_palette.model_color(model.model_id, model.spend_rank).name()
+    return _GOLD_INK.name()

@@ -765,6 +765,27 @@ class SpendBoard:
     budget: Optional[object] = None
 
 
+@dataclass(frozen=True)
+class InsightsBoard:
+    """Wave 3 INSIGHTS zone aggregate — the sibling of SpendBoard for the
+    Insights widgets. fetch_insights returns ONE of these (or None) and the
+    dashboard fans each slot to its widget. Every slot is independently None-able
+    so a partial mgmt-query failure degrades per-widget (the zone never blanks).
+
+    SCOPE NOTE (Wave 3 scaffold): #15 THE ASSAY rides `_distribute_value()` off
+    already-fetched USER-key stores, so `.value` is INDEPENDENT of this board (it
+    is never the source for #15). The other slots are reserved for the later mgmt
+    features and stay None until #16/#17/#18 add their analytics queries:
+      .week     -> #16 Model of the Week (weekly dims=[model])
+      .recorder -> #17 Token Recorder (daily dims=[] full-range)
+      .court    -> #18 Task Court & Climb (classifications/task + rankings/apps)
+    """
+    value: Optional[object] = None        # #15 (rides _distribute_value; board slot reserved)
+    week: Optional[object] = None         # #16 (mgmt) — None until built
+    recorder: Optional[object] = None     # #17 (mgmt) — None until built
+    court: Optional[object] = None        # #18 (mixed) — None until built
+
+
 def build_spend_spectrum(rows: list, granularity: str = "day",
                          truncated: bool = False) -> SpendSpectrumData:
     """Pure builder: the per-bucket per-model matrix + descending-spend model
@@ -2261,6 +2282,7 @@ class APIWorker(QObject):
     permaslug_resolver_ready = Signal(object)  # PermaslugResolver | None (no-auth)
     uptime_ready = Signal(str, object)      # (model_id, {ep_ident: UptimeHistory}) (no-auth, #3)
     spend_ready = Signal(object)            # SpendBoard | None (mgmt-key analytics, Wave 2 F3/#9)
+    insights_ready = Signal(object)         # InsightsBoard | None (Wave 3 INSIGHTS zone; #16/#17/#18 mgmt)
     autopsy_ready = Signal(str, object)     # (token, AutopsyReport|None) — #11, interaction-fired
     logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
     error = Signal(str)
@@ -2351,6 +2373,28 @@ class APIWorker(QObject):
         except Exception:
             log.exception("spend worker crashed")
             self.spend_ready.emit(None)
+
+    @Slot()
+    def fetch_insights(self):
+        """Wave 3 INSIGHTS zone scaffold: fetch the InsightsBoard for the mgmt
+        features (#16/#17/#18). Modeled on fetch_spend — try/except, ALWAYS emit
+        (None on failure / locked) so the zone keeps last-good / shows its locked
+        state and never crashes. NOTE: #15 THE ASSAY is NOT served here (it rides
+        _distribute_value off already-fetched USER-key stores); this worker exists
+        so #16/#17/#18 can add their analytics queries into the board LATER. For
+        now it returns an all-None InsightsBoard (a no-op board). The management
+        key is used read-only by the later queries and is NEVER logged."""
+        try:
+            # SCAFFOLD: #16/#17/#18 will populate .week/.recorder/.court here via
+            # self.analytics.query(...) / FrontendClient / classifications. Until
+            # then this is a no-op board (all slots None) — the dashboard routes
+            # it through the same locked/keep-last-good path as Spend.
+            board = InsightsBoard()
+            log.info("insights board: scaffold (no mgmt widgets yet)")
+            self.insights_ready.emit(board)
+        except Exception:
+            log.exception("insights worker crashed")
+            self.insights_ready.emit(None)
 
     @Slot(str, str)
     def fetch_autopsy(self, t0_iso, t1_iso):
