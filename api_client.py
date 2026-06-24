@@ -8,7 +8,7 @@ import requests
 import statistics
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 from PySide6.QtCore import QObject, Signal, Slot, QThread
 
@@ -1411,6 +1411,158 @@ def build_spend_board(rows: list, granularity: str = "day", start: str = "",
                       range_label=range_label)
 
 
+# --- #14 THE HOURGLASS (budget burn-down) ----------------------------------
+# The sand-clock races the calendar: the BOTTOM bulb is spend (drained sand),
+# the TOP bulb is the remaining budget, and a diagonal PACE tick marks where the
+# sand SHOULD be given % of the period elapsed. The pinch reddens when spend is
+# AHEAD OF PACE (before 100%). NEVER invent a denominator — it comes only from
+# settings.weekly_budget (>0) or the opt-in credits fallback (decision A).
+
+# Per-bulb height in px (the spec's GEOMETRY_PLAN: each bulb is 28px tall). The
+# PURE geometry helper works in these px so it's unit-testable WITHOUT Qt.
+HOURGLASS_BULB_H = 28.0
+
+
+def budget_geometry(spent: float, budget: float, elapsed_frac: float):
+    """PURE (no Qt) hourglass geometry (decision C). Returns
+    (top_h, bottom_h, pace_y, over_pace):
+
+      - spent_frac = clamp(spent/budget, 0, 1), guarded for budget<=0 (-> 0.0).
+      - bottom_h = BULB_H * spent_frac        (spend GROWS the bottom bulb)
+      - top_h    = BULB_H * (1 - spent_frac)  (remaining SHRINKS the top bulb)
+      - pace_y   = BULB_H * clamp(elapsed_frac,0,1)  — the height into the bottom
+                   'should-spent' bulb where the sand OUGHT to be by now.
+      - over_pace = spent_frac > elapsed_frac (the single 'in trouble' signal;
+                    RED is scoped strictly to this so it doesn't fight #11/#13).
+
+    Inversion (spent->bottom, remaining->top) and the pace mapping are the whole
+    point of the unit test; the widget just scales these into its measured glass.
+    """
+    ef = max(0.0, min(1.0, float(elapsed_frac)))
+    if budget is None or budget <= 0:
+        spent_frac = 0.0
+    else:
+        spent_frac = max(0.0, min(1.0, float(spent) / float(budget)))
+    bottom_h = HOURGLASS_BULB_H * spent_frac
+    top_h = HOURGLASS_BULB_H * (1.0 - spent_frac)
+    pace_y = HOURGLASS_BULB_H * ef
+    over_pace = spent_frac > ef
+    return top_h, bottom_h, pace_y, over_pace
+
+
+@dataclass(frozen=True)
+class Budget:
+    """#14 payload — the budget burn-down state (decision E: three distinct
+    states, ZERO fabricated numbers).
+
+    source:
+      "weekly"  -> settings.weekly_budget (>0), the real config path.
+      "credits" -> the opt-in credits fallback (budget=total_credits,
+                   burned=total_usage; the only live spend-cap signal).
+      "none"    -> NO budget configured -> the dashed "Set a budget" state.
+      "locked"  -> no management key (set by the widget's set_locked()).
+
+    For "none"/"locked" the numeric fields are 0 and the widget paints the
+    no-budget / padlocked glass WITHOUT inventing a denominator.
+    spent_frac/elapsed_frac are [0,1]; over_pace == spent_frac > elapsed_frac.
+    daily is the per-day spend series ((label,$),...) for the popup column chart.
+    """
+    spent: float = 0.0
+    budget: float = 0.0
+    spent_frac: float = 0.0
+    elapsed_frac: float = 0.0
+    days_left: int = 0
+    elapsed_days: int = 0
+    projection: float = 0.0
+    avg_daily: float = 0.0
+    over_pace: bool = False
+    source: str = "none"
+    period_days: int = 7
+    daily: tuple = ()        # tuple[(bucket_label, usage)] chronological
+
+    @property
+    def has_budget(self) -> bool:
+        return self.source in ("weekly", "credits") and self.budget > 0
+
+    @property
+    def pct_burned(self) -> int:
+        return int(round(self.spent_frac * 100.0))
+
+    @property
+    def over_projection(self) -> bool:
+        """The projection row goes RED when the forecast overshoots the budget."""
+        return self.has_budget and self.projection > self.budget
+
+
+def build_budget(rows: list, budget_value: float, period_start, now,
+                 source: str = "weekly", period_days: int = 7,
+                 credits_spent: Optional[float] = None) -> Budget:
+    """PURE builder for #14 (decision D). Sums QUERY D's day rows (total_usage,
+    dims=[], granularity=day) into period-to-date spend + a daily series, and
+    computes the projection. NEVER raises; NEVER fabricates a denominator.
+
+    - spent = Σ total_usage across the rows (a real float; no coercion needed,
+      but _as_float is defensive). For the credits source the caller passes
+      credits_spent (total_usage from /credits) so spent == the live burned $.
+    - elapsed_frac = elapsed_days / period_days, where elapsed_days counts the
+      DISTINCT day buckets the API returned (aligned to the same fetch — decision
+      D), guarded so elapsed_days==0 -> elapsed_frac 0 and avg_daily 0 (the young
+      account). days_left = max(0, period_days - elapsed_days).
+    - avg_daily = spent / elapsed_days (guard /0); projection = spent +
+      avg_daily * days_left.
+    - over_pace = spent_frac > elapsed_frac (RED pinch, decision C).
+
+    source != "weekly"/"credits" (i.e. no denominator) -> a Budget("none") with
+    zeroed numerics so the widget paints "Set a budget" (decision A/E).
+    """
+    rows = rows or []
+    # Build the chronological daily series + Σ from QUERY D's rows.
+    day_usage: dict = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        bk = _bucket_key(row)
+        bucket = row.get(bk) if bk else None
+        if bucket is None:
+            continue
+        day_usage[bucket] = day_usage.get(bucket, 0.0) + _as_float(
+            row.get("total_usage"))
+    buckets = sorted(day_usage.keys())   # ISO date strings sort chronologically
+    daily = tuple((b, day_usage[b]) for b in buckets)
+    summed = sum(day_usage.values())
+
+    # No denominator -> the honest "Set a budget" state (decision A).
+    if source not in ("weekly", "credits") or budget_value is None \
+            or budget_value <= 0:
+        return Budget(spent=summed, budget=0.0, source="none",
+                      period_days=period_days, daily=daily,
+                      elapsed_days=len(buckets))
+
+    budget = float(budget_value)
+    # For the credits fallback, the live "burned" figure is the authoritative
+    # spend (total_usage vs total_credits); the day rows still feed the series.
+    spent = float(credits_spent) if (source == "credits"
+                                     and credits_spent is not None) else summed
+
+    # elapsed_days = the DISTINCT day buckets actually returned (decision D),
+    # capped to the period so a wider fetch can't push elapsed_frac past 1.
+    elapsed_days = min(len(buckets), period_days) if buckets else 0
+    days_left = max(0, period_days - elapsed_days)
+    elapsed_frac = (elapsed_days / period_days) if period_days > 0 else 0.0
+    elapsed_frac = max(0.0, min(1.0, elapsed_frac))
+    avg_daily = (spent / elapsed_days) if elapsed_days > 0 else 0.0   # guard /0
+    projection = spent + avg_daily * days_left
+    spent_frac = max(0.0, min(1.0, (spent / budget) if budget > 0 else 0.0))
+    over_pace = spent_frac > elapsed_frac
+
+    return Budget(
+        spent=spent, budget=budget, spent_frac=spent_frac,
+        elapsed_frac=elapsed_frac, days_left=days_left, elapsed_days=elapsed_days,
+        projection=projection, avg_daily=avg_daily, over_pace=over_pace,
+        source=source, period_days=period_days, daily=daily,
+    )
+
+
 class AnalyticsClient:
     """Read-only client for the OpenRouter analytics API (ground-truth spend).
 
@@ -1490,6 +1642,67 @@ class AnalyticsClient:
             log.warning("analytics query failed: %s", type(e).__name__)
         return None
 
+    def get_credits(self) -> Optional[dict]:
+        """GET /api/v1/credits via the mgmt-key session (the recon confirmed the
+        mgmt key works on /credits). Returns {"total_credits","total_usage"} as
+        floats, or None on failure / when locked. The ONLY live spend-cap signal
+        (the #14 credits fallback). Never raises; never logs the key."""
+        if not self.unlocked:
+            return None
+        try:
+            resp = self.session.get(CREDITS_ENDPOINT, timeout=15)
+            resp.raise_for_status()
+            j = resp.json()
+            d = j.get("data", {}) if isinstance(j, dict) else {}
+            return {
+                "total_credits": _as_float(d.get("total_credits")),
+                "total_usage": _as_float(d.get("total_usage")),
+            }
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}"
+            log.warning("credits fetch failed: %s", type(e).__name__)
+            return None
+
+    def _build_budget(self, end, end_iso: str) -> Optional[Budget]:
+        """#14 QUERY D — the period-to-date day query (total_usage, dims=[],
+        granularity=day, last `period_days`) + the budget denominator resolution
+        (decision A, never invent one):
+          (1) settings.weekly_budget > 0 -> source="weekly"; ELSE
+          (2) settings.show_credit_burndown -> the credits fallback
+              (budget=total_credits, burned=total_usage); ELSE
+          (3) the honest "Set a budget" no-budget state.
+        Cached by its own key (the 15-min poll re-hits free within TTL). Never
+        raises — returns a Budget('none') sentinel on any failure so the widget
+        still paints (never blanks)."""
+        import datetime
+        period_days = 7
+        try:
+            from settings import Settings
+            s = Settings.load()
+            weekly = float(getattr(s, "weekly_budget", 0.0) or 0.0)
+            credit_opt_in = bool(getattr(s, "show_credit_burndown", False))
+        except Exception:
+            weekly, credit_opt_in = 0.0, False
+
+        # QUERY D: total_usage only, NO dimensions, day granularity (decision D).
+        d_start = (end - datetime.timedelta(days=period_days)).isoformat()
+        env_d = self.query(["total_usage"], [], "day", d_start, end_iso)
+        rows_d = (env_d.get("rows") or []) if env_d else []
+
+        if weekly > 0:
+            return build_budget(rows_d, weekly, d_start, end_iso,
+                                source="weekly", period_days=period_days)
+        if credit_opt_in:
+            credits = self.get_credits()
+            if credits is not None and credits["total_credits"] > 0:
+                return build_budget(
+                    rows_d, credits["total_credits"], d_start, end_iso,
+                    source="credits", period_days=period_days,
+                    credits_spent=credits["total_usage"])
+            # opt-in on but credits unavailable -> degrade to "Set a budget".
+        return build_budget(rows_d, 0.0, d_start, end_iso, source="none",
+                            period_days=period_days)
+
     def get_spend_board(self) -> Optional[SpendBoard]:
         """The ONE batched call the Spend zone shares. Issues QUERY A now: a
         day-granularity dims=[model] query over the last 7d with the UNION
@@ -1549,6 +1762,17 @@ class AnalyticsClient:
                 log.exception("ghost diff fetch crashed")
                 ghosts = None
 
+            # #14 THE HOURGLASS — QUERY D (period-to-date) + the budget
+            # denominator (decision A; NEVER invent one). Routed through query()
+            # so it caches by its own key. None-safe: a failure -> a Budget
+            # sentinel so the widget paints, never blanks.
+            budget = None
+            try:
+                budget = self._build_budget(end, end_iso)
+            except Exception:
+                log.exception("budget fetch crashed")
+                budget = None
+
             board = build_spend_board(
                 parsed.get("rows") or [],
                 granularity=granularity,
@@ -1558,6 +1782,8 @@ class AnalyticsClient:
                 truncated=bool(meta.get("truncated")),
                 ghosts=ghosts,
             )
+            if budget is not None:
+                board = replace(board, budget=budget)
             # #10 receipts INFO line (no secret — counts + top $/call only).
             try:
                 rcs = board.receipts
@@ -1583,6 +1809,18 @@ class AnalyticsClient:
                     log.info("ghosts: living=%d appeared=%d vanished=%d young=%s",
                              len(g.living), len(g.appeared), len(g.vanished),
                              bool(g.young_history))
+            except Exception:
+                pass
+            # #14 budget INFO line (no secret — source + $ magnitudes + flags).
+            try:
+                b = board.budget
+                if b is not None and b.has_budget:
+                    log.info("budget: source=%s spent=$%.2f budget=$%.2f pct=%d%% "
+                             "over_pace=%s proj=$%.2f", b.source, b.spent,
+                             b.budget, b.pct_burned, b.over_pace, b.projection)
+                else:
+                    log.info("budget: no budget configured (source=%s)",
+                             b.source if b is not None else "none")
             except Exception:
                 pass
             return board

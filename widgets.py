@@ -7723,3 +7723,672 @@ def build_seance_html(entry, diff) -> str:
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
                "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
     return "".join(out)
+
+
+# ===========================================================================
+#  #14 THE HOURGLASS — the sand-clock budget burn-down (CLOSES the Spend zone)
+# ===========================================================================
+# A wide ~84px callout whose TOP bulb is remaining budget and drained BOTTOM is
+# spend, cross-faded against a diagonal PACE tick marking where the sand SHOULD
+# be given % of the period elapsed. The pinch reddens when AHEAD OF PACE (before
+# 100%). Rhymes UPWARD with the balance ArcGauge to bookend the panel. Degrades
+# to a tidy "Set a budget" state (the live default — all /budgets routes 404).
+
+
+def _hourglass_path(cx: float, top: float, bulb_w: float, bulb_h: float,
+                    pinch_w: float, gap: float):
+    """Build the two glass-bulb trapezoids (TOP + BOTTOM) sharing a `gap`-tall
+    pinch at the vertical centre, centred on cx. Returns (top_path, bottom_path,
+    pinch_y_top, pinch_y_bot) — pure given inputs. Each bulb is a trapezoid: a
+    wide outer edge tapering to the pinch_w throat."""
+    half_w = bulb_w / 2.0
+    half_p = pinch_w / 2.0
+    pinch_y_top = top + bulb_h          # throat top (bottom of the upper bulb)
+    pinch_y_bot = pinch_y_top + gap     # throat bottom (top of the lower bulb)
+
+    top_path = QPainterPath()
+    top_path.moveTo(cx - half_w, top)
+    top_path.lineTo(cx + half_w, top)
+    top_path.lineTo(cx + half_p, pinch_y_top)
+    top_path.lineTo(cx - half_p, pinch_y_top)
+    top_path.closeSubpath()
+
+    bot_path = QPainterPath()
+    bot_path.moveTo(cx - half_p, pinch_y_bot)
+    bot_path.lineTo(cx + half_p, pinch_y_bot)
+    bot_path.lineTo(cx + half_w, pinch_y_bot + bulb_h)
+    bot_path.lineTo(cx - half_w, pinch_y_bot + bulb_h)
+    bot_path.closeSubpath()
+    return top_path, bot_path, pinch_y_top, pinch_y_bot
+
+
+class BudgetHourglass(QWidget):
+    """THE HOURGLASS (#14): a wide ~84px callout that CLOSES the Spend section.
+    A hand-painted hourglass — the TOP bulb is remaining budget, the drained
+    BOTTOM bulb is spend — raced against a diagonal PACE tick on the glass's
+    right edge marking where the sand SHOULD be given % of the period elapsed.
+    One glance shows whether you're burning faster than the clock; the pinch
+    glows RED when you're AHEAD OF PACE (before you hit 100%). It rhymes UPWARD
+    with the balance ArcGauge to bookend the panel.
+
+    Beats a progress bar: a bar shows HOW MUCH but not WHETHER YOU'RE ON TRACK
+    (82% is fine on day 6/7, a disaster on day 2/7). The Hourglass encodes TIME
+    twice (sand drained + pace tick) and the projection row makes the forecast
+    explicit. Click -> a large hourglass + a 7-bar daily-spend column chart with
+    the pace line + the projection math.
+
+    STATES (decision E, ZERO fake numbers): POPULATED (a real denominator) = the
+    full glass + 3 rows; NO-BUDGET (key present, no weekly_budget, credits opt-in
+    off — the live default) = a dashed top-bulb outline + a "Set a budget" pill;
+    LOCKED (no mgmt key) = an empty padlocked glass + the unlock copy.
+
+    ONE measure pass feeds BOTH paint and setFixedHeight (font-metric-driven, no
+    clip). Paint is allocation-light (glass paths measured in set_data, cached;
+    paint strokes the cached objects). The fill is a ONE-TIME reveal on a held
+    QPropertyAnimation on a DISTINCT `display_frac` Property (NOT a QWidget
+    builtin), re-fired only on a >0.5% change (static when animations are off).
+    """
+
+    budget_clicked = Signal(QPointF)
+
+    # -- geometry constants (the measure pass derives everything from these) --
+    # PAD=12 so top/bottom 12 + the 60px glass lands the fixed height at ~84px
+    # (the spec's GEOMETRY_PLAN target, matching the BurnRateBar card rhythm it
+    # replaces) and the diagonal pace tick below the bottom bulb never clips.
+    PAD = 12
+    GLYPH_W = 70           # left column width (the glass lives here)
+    BULB_W = 46.0          # widest bulb edge
+    PINCH_W = 3.0          # the throat width (a 3px pinch)
+    PINCH_GAP = 4.0        # vertical gap the throat spans
+    TEXT_X = 78            # right text column left edge
+    ROW_GAP = 4
+    REVEAL_MS = 800
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._budget = None        # Budget | None
+        self._locked = False
+        self._no_budget = False
+        self._signature = None
+        self._display_frac = 0.0   # 0..spent_frac, animated ONCE
+        self._target_frac = 0.0
+        self._reveal_started_count = 0
+
+        # Cached paint geometry (rebuilt in set_data/resize — never alloc in paint)
+        self._top_path = None
+        self._bot_path = None
+        self._pinch_y_top = 0.0
+        self._pinch_y_bot = 0.0
+        self._glass_top = 0.0
+        self._glass_cx = 0.0
+        self._bulb_h = 28.0
+        # the 3 text rows (label strings precomputed in set_data, not in paint).
+        self._row1 = ""        # "$X / $Y"
+        self._row2 = ""        # "{pct}% burned · {n} days left"
+        self._row3 = ""        # "on pace for $Z by reset"
+        self._caption = ""     # locked/no-budget message
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # ONE held animation on a DISTINCT Property name (NOT pos/size/geometry).
+        self._anim = QPropertyAnimation(self, b"display_frac")
+        self._anim.setDuration(self.REVEAL_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()
+        theme_controller.changed.connect(self.update)
+
+    # -- the display_frac Property (distinct name; NOT a QWidget builtin) -----
+    def get_display_frac(self):
+        return self._display_frac
+
+    def set_display_frac(self, v):
+        self._display_frac = float(v)
+        self.update()
+
+    display_frac = Property(float, get_display_frac, set_display_frac)
+
+    # ------------------------------------------------------------------
+    #  Geometry primitives (font-metric-driven; ONE measure pass)
+    # ------------------------------------------------------------------
+    @classmethod
+    def _text_block_h(cls) -> int:
+        return (QFontMetrics(Fonts.mono_medium()).height()
+                + QFontMetrics(Fonts.body()).height()
+                + QFontMetrics(Fonts.tiny()).height()
+                + 2 * cls.ROW_GAP)
+
+    @classmethod
+    def _glass_h(cls) -> float:
+        # two 28px bulbs + the throat gap (≈60px).
+        return 2 * 28.0 + cls.PINCH_GAP
+
+    @classmethod
+    def _fixed_height(cls) -> int:
+        # top/bottom pad + max(glass, text-block). Lands ~84px at the offscreen
+        # font metrics (matching the BurnRateBar card rhythm it replaces).
+        return int(cls.PAD * 2 + max(cls._glass_h(), cls._text_block_h()))
+
+    def _measure(self):
+        """ONE pass: pick the fixed height, place + cache the glass paths, and
+        precompute the 3 text-row strings. Shared by paint and setFixedHeight so
+        nothing clips. Allocation happens here, never in paint."""
+        h = self._fixed_height()
+        self.setFixedHeight(h)
+        self._bulb_h = 28.0
+        glass_h = self._glass_h()
+        # vertically centre the glass within the padded content box.
+        self._glass_top = (h - glass_h) / 2.0
+        self._glass_cx = self.PAD + self.GLYPH_W / 2.0
+        self._top_path, self._bot_path, self._pinch_y_top, self._pinch_y_bot = \
+            _hourglass_path(self._glass_cx, self._glass_top, self.BULB_W,
+                            self._bulb_h, self.PINCH_W, self.PINCH_GAP)
+        self._compute_rows()
+
+    def _compute_rows(self):
+        """Precompute the 3 text rows from the current Budget (decision E — no
+        fabricated numbers; the no-budget/locked captions carry no denominator).
+        """
+        b = self._budget
+        if self._locked:
+            self._row1 = self._row2 = self._row3 = ""
+            self._caption = SPEND_UNLOCK_BASE + " track a budget"
+            return
+        if self._no_budget or b is None or not b.has_budget:
+            self._row1 = self._row2 = self._row3 = ""
+            self._caption = "Set a budget"
+            return
+        self._caption = ""
+        self._row1 = f"${b.spent:,.2f} / ${b.budget:,.0f}"
+        self._row2 = f"{b.pct_burned}% burned · {b.days_left} days left"
+        self._row3 = f"on pace for ${b.projection:,.2f} by reset"
+
+    def resizeEvent(self, event):
+        self._measure()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, budget):
+        """budget: a Budget (board.budget) or None (keep last-good — never blank).
+        Routes to the no-budget state when the Budget carries no denominator
+        (decision A: never invent one)."""
+        if budget is None:
+            return
+        # A Budget with no denominator IS the live "Set a budget" state.
+        if not getattr(budget, "has_budget", False):
+            self.set_no_budget(budget)
+            return
+        self._locked = False
+        self._no_budget = False
+        self._budget = budget
+        sig = (budget.source, round(budget.spent_frac, 5),
+               round(budget.elapsed_frac, 5), budget.days_left,
+               round(budget.projection, 4))
+        first_or_changed = (sig != self._signature)
+        self._signature = sig
+        self._target_frac = budget.spent_frac
+        self._measure()
+        # One-time reveal ONLY when the value changed by >0.5% (a 15-min identical
+        # poll is silent). Static (set final) when animations are off.
+        if first_or_changed and abs(self._target_frac - self._display_frac) > 0.005:
+            self._start_reveal()
+        else:
+            self._display_frac = self._target_frac
+        self.update()
+
+    def set_no_budget(self, budget=None):
+        """Key present but NO denominator (weekly_budget==0 + credits opt-in off
+        — the live default). A faint dashed top-bulb outline + a "Set a budget"
+        pill. NO fabricated denominator (decision A/E)."""
+        self._locked = False
+        self._no_budget = True
+        self._budget = budget        # may carry a real period-to-date spent $
+        self._signature = ("none",)
+        self._display_frac = 0.0
+        self._target_frac = 0.0
+        self._measure()
+        self.update()
+
+    def set_locked(self):
+        """No management key: an empty glass in flat BORDER outline, the pinch
+        crossed with a padlock, the unlock copy (decision E). NO denominator
+        invented. Keeps the real fixed height so the section doesn't jump."""
+        self._locked = True
+        self._no_budget = False
+        self._budget = None
+        self._signature = None
+        self._display_frac = 0.0
+        self._target_frac = 0.0
+        self._measure()
+        self.update()
+
+    def _start_reveal(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on or not self.isVisible():
+            self._display_frac = self._target_frac   # final directly (static)
+            return
+        self._anim.setStartValue(self._display_frac)
+        self._anim.setEndValue(self._target_frac)
+        self._anim.start()
+        self._reveal_started_count += 1
+
+    # ------------------------------------------------------------------
+    #  Paint (allocation-light: cached paths + cached strokes)
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._locked:
+            self._paint_glass_outline(p, dashed=False)
+            self._paint_padlock_pinch(p)
+            self._paint_caption(p, self._caption, muted=True)
+        elif self._no_budget:
+            self._paint_glass_outline(p, dashed=True)
+            self._paint_set_budget_pill(p)
+        else:
+            self._paint_populated(p)
+        p.end()
+
+    def _paint_glass_outline(self, p, dashed: bool):
+        """The empty glass: both bulb trapezoids stroked in BORDER (DotLine when
+        dashed for the no-budget teaser). Shared by the locked + no-budget paths.
+        """
+        style = Qt.PenStyle.DotLine if dashed else Qt.PenStyle.SolidLine
+        pen = QPen(Colors.BORDER, 1.5, style)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if self._top_path is not None:
+            p.drawPath(self._top_path)
+            p.drawPath(self._bot_path)
+
+    def _paint_padlock_pinch(self, p):
+        """A tiny padlock crossing the pinch (the locked glass)."""
+        cy = (self._pinch_y_top + self._pinch_y_bot) / 2.0
+        _paint_padlock(p, self._glass_cx, cy, 13, Colors.TEXT_MUTED)
+
+    def _paint_set_budget_pill(self, p):
+        """A 'Set a budget' pill painted in the text column (no fabricated $)."""
+        f = Fonts.body()
+        fm = QFontMetrics(f)
+        label = self._caption or "Set a budget"
+        tw = fm.horizontalAdvance(label)
+        pill_h = fm.height() + 8
+        pill_w = tw + 22
+        x = self.TEXT_X
+        y = (self.height() - pill_h) / 2.0 - 4
+        accent = theme_controller.accent()
+        rect = QRectF(x, y, min(pill_w, self.width() - x - self.PAD), pill_h)
+        # a dashed accent-tinted pill (a call to action, not an alarm).
+        outline = QColor(accent); outline.setAlpha(150)
+        p.setPen(QPen(outline, 1.2, Qt.PenStyle.DashLine))
+        fill = QColor(accent); fill.setAlpha(22)
+        p.setBrush(QBrush(fill))
+        p.drawRoundedRect(rect, pill_h / 2.0, pill_h / 2.0)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(accent)))
+        p.setFont(f)
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+        # a faint subcaption under the pill so the empty state reads intentional.
+        sub_f = Fonts.tiny()
+        p.setFont(sub_f)
+        p.setPen(QPen(Colors.TEXT_MUTED))
+        sfm = QFontMetrics(sub_f)
+        p.drawText(QRectF(x, rect.bottom() + 1,
+                          self.width() - x - self.PAD, sfm.height() + 2),
+                   Qt.AlignmentFlag.AlignLeft,
+                   "set weekly_budget to track burn-down")
+
+    def _paint_caption(self, p, text, muted=True):
+        """A left-aligned caption in the text column (the locked unlock copy)."""
+        f = Fonts.body()
+        fm = QFontMetrics(f)
+        x = self.TEXT_X
+        avail = self.width() - x - self.PAD
+        msg = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(max(10, avail)))
+        p.setPen(QPen(Colors.TEXT_MUTED if muted else Colors.TEXT_SECONDARY))
+        p.setFont(f)
+        p.drawText(QRectF(x, 0, avail, self.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, msg)
+
+    def _paint_populated(self, p):
+        """The full hourglass: top sand fill (remaining), bottom spend hump, the
+        falling-grain bridge, the PACE tick + dotted leader, the pinch/crest glow
+        (accent on-track / RED over-pace), and the 3 text rows."""
+        b = self._budget
+        if b is None or self._top_path is None:
+            return
+        frac = max(0.0, min(1.0, self._display_frac))     # animated spent_frac
+        remaining_frac = 1.0 - frac
+        accent = theme_controller.accent()
+        over = b.over_pace
+
+        # --- glass outline first (sand fills clip to the bulb paths) ----------
+        p.setPen(QPen(Colors.BORDER, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(self._top_path)
+        p.drawPath(self._bot_path)
+
+        cx = self._glass_cx
+        half_w = self.BULB_W / 2.0
+
+        # --- TOP bulb: remaining budget, filled from the pinch UPWARD ---------
+        # a flat accent-tinted sand fill whose TOP edge is a static sine ripple.
+        if remaining_frac > 0.001:
+            p.save()
+            p.setClipPath(self._top_path)
+            fill_h = self._bulb_h * remaining_frac
+            fill_top = self._pinch_y_top - fill_h
+            sand = QColor(accent); sand.setAlpha(140)
+            # body of the sand below the ripple line.
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(sand))
+            p.drawRect(QRectF(cx - half_w, fill_top + 2,
+                              self.BULB_W, fill_h))
+            # a 2px-amplitude static sine ripple along the top edge (one polyline).
+            ripple = QPolygonF()
+            steps = 16
+            for i in range(steps + 1):
+                t = i / steps
+                rx = (cx - half_w) + t * self.BULB_W
+                ry = fill_top + 2 + math.sin(t * math.pi * 3) * 2.0
+                ripple.append(QPointF(rx, ry))
+            crest = QColor(accent); crest.setAlpha(200)
+            p.setPen(QPen(crest, 1.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPolyline(ripple)
+            p.restore()
+
+        # --- BOTTOM bulb: spent, a settled gradient HUMP from the pinch DOWN ---
+        if frac > 0.001:
+            p.save()
+            p.setClipPath(self._bot_path)
+            mound_h = self._bulb_h * frac
+            base_y = self._pinch_y_bot + self._bulb_h     # bottom of the bulb
+            peak_y = base_y - mound_h
+            # accent -> severity gradient (warms toward severity as budget drains,
+            # mirroring BurnRateBar's idiom — credit_color(remaining_frac)).
+            grad = QLinearGradient(0, peak_y, 0, base_y)
+            grad.setColorAt(0.0, QColor(accent))
+            warm = QColor(Colors.credit_color(remaining_frac))
+            grad.setColorAt(1.0, warm)
+            # a quadratic hump: taller in the middle (a settled pile of sand).
+            hump = QPainterPath()
+            hump.moveTo(cx - half_w, base_y)
+            hump.lineTo(cx - half_w, peak_y + 4)
+            hump.quadTo(cx, peak_y - 4, cx + half_w, peak_y + 4)
+            hump.lineTo(cx + half_w, base_y)
+            hump.closeSubpath()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(grad))
+            p.drawPath(hump)
+            # the crest line of the mound glows RED when over-pace, else accent.
+            crest_col = Colors.RED if over else QColor(accent)
+            cc = QColor(crest_col); cc.setAlpha(220)
+            crest = QPainterPath()
+            crest.moveTo(cx - half_w, peak_y + 4)
+            crest.quadTo(cx, peak_y - 4, cx + half_w, peak_y + 4)
+            p.setPen(QPen(cc, 1.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(crest)
+            p.restore()
+
+        # --- the falling-grain line bridges the pinch when burning is live ----
+        if 0.001 < frac < 0.999:
+            grain = QColor(accent); grain.setAlpha(200)
+            p.setPen(QPen(grain, self.PINCH_W * 0.7))
+            p.drawLine(QPointF(cx, self._pinch_y_top - 2),
+                       QPointF(cx, self._pinch_y_bot + 2))
+
+        # --- the pinch glow (accent on-track / RED over-pace) -----------------
+        pinch_glow = Colors.RED if over else QColor(accent)
+        pg = QColor(pinch_glow); pg.setAlpha(230)
+        p.setPen(QPen(pg, 2.2))
+        p.drawLine(QPointF(cx - self.PINCH_W, self._pinch_y_top),
+                   QPointF(cx + self.PINCH_W, self._pinch_y_top))
+        p.drawLine(QPointF(cx - self.PINCH_W, self._pinch_y_bot),
+                   QPointF(cx + self.PINCH_W, self._pinch_y_bot))
+
+        # --- THE PACE TICK: a diagonal dash on the OUTSIDE-right edge of the ---
+        # glass at the height where sand SHOULD be (elapsed_frac into the bottom
+        # 'should-spent' bulb), + a hairline dotted leader across the glass.
+        base_y = self._pinch_y_bot + self._bulb_h
+        pace_y = base_y - (self._bulb_h * max(0.0, min(1.0, b.elapsed_frac)))
+        edge_x = cx + half_w
+        tick_col = Colors.TEXT_ACCENT
+        # dotted leader across the glass at the pace height.
+        leader = QColor(tick_col); leader.setAlpha(120)
+        p.setPen(QPen(leader, 1, Qt.PenStyle.DotLine))
+        p.drawLine(QPointF(cx - half_w, pace_y), QPointF(edge_x, pace_y))
+        # the 10px diagonal accent dash just outside the right edge.
+        p.setPen(QPen(tick_col, 2))
+        p.drawLine(QPointF(edge_x + 2, pace_y + 4),
+                   QPointF(edge_x + 9, pace_y - 4))
+
+        # --- the 3 text rows in the right column ------------------------------
+        x = self.TEXT_X
+        avail = self.width() - x - self.PAD
+        y = float(self.PAD)
+        # row1: "$X / $Y" (spent / budget), mono.
+        f1 = Fonts.mono_medium()
+        fm1 = QFontMetrics(f1)
+        p.setFont(f1)
+        p.setPen(QPen(Colors.TEXT_PRIMARY))
+        p.drawText(QRectF(x, y, avail, fm1.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self._row1)
+        y += fm1.height() + self.ROW_GAP
+        # row2: "{pct}% burned · {n} days left", body. RED tint when over-pace.
+        f2 = Fonts.body()
+        fm2 = QFontMetrics(f2)
+        p.setFont(f2)
+        p.setPen(QPen(Colors.RED if over else Colors.TEXT_SECONDARY))
+        row2 = self._row2 + ("   ▲ ahead of pace" if over else "")
+        row2 = fm2.elidedText(row2, Qt.TextElideMode.ElideRight, int(avail))
+        p.drawText(QRectF(x, y, avail, fm2.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   row2)
+        y += fm2.height() + self.ROW_GAP
+        # row3: projection, tiny muted — RED when the forecast overshoots budget.
+        f3 = Fonts.tiny()
+        fm3 = QFontMetrics(f3)
+        p.setFont(f3)
+        p.setPen(QPen(Colors.RED if b.over_projection else Colors.TEXT_MUTED))
+        p.drawText(QRectF(x, y, avail, fm3.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self._row3)
+
+    # ------------------------------------------------------------------
+    #  Interaction — click -> the budget burn-down popup
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event):
+        # the locked glass has no dossier; no-budget + populated do.
+        if self._locked:
+            super().mousePressEvent(event)
+            return
+        gpos = event.globalPosition() if hasattr(event, "globalPosition") \
+            else QPointF(self.mapToGlobal(event.pos()))
+        self.budget_clicked.emit(gpos)
+
+
+class BudgetBurndownStrip(QWidget):
+    """The #14 click-through dossier, rendered to a QPixmap and embedded as a
+    data-URI <img> in the shared ProviderPopup (the UptimeStrip idiom). A 7-bar
+    daily-spend column chart with the avg-daily pace line overlaid + the
+    projection math 'avg $a/day × b days left + $spent = $Z'.
+
+    All text is QPainter-drawn (injection-safe); the HTML wrapper has no API
+    strings here (numbers only). devicePixelRatio-aware for crisp HiDPI text."""
+
+    STRIP_W = 300
+
+    def __init__(self, budget, parent=None):
+        super().__init__(parent)
+        self._b = budget
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _measure_height(self) -> int:
+        fm = QFontMetrics(Fonts.tiny())
+        # the column chart block + 3 figure/math lines.
+        return int(12 + 64 + 12 + 3 * (fm.height() + 4) + 10)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        b = self._b
+        w = self.STRIP_W
+        pad = 12
+        accent = theme_controller.accent()
+        f_tiny = Fonts.tiny()
+        f_mono = Fonts.mono_small()
+        fm = QFontMetrics(f_tiny)
+        chart_top = 12.0
+        chart_h = 64.0
+        chart_left = float(pad)
+        chart_right = float(w - pad)
+        chart_w = chart_right - chart_left
+
+        daily = list(getattr(b, "daily", ()) or [])[-7:]
+        n = len(daily)
+        max_v = max((v for (_, v) in daily), default=0.0)
+        base_y = chart_top + chart_h
+
+        # baseline.
+        p.setPen(QPen(Colors.BORDER, 1))
+        p.drawLine(QPointF(chart_left, base_y), QPointF(chart_right, base_y))
+
+        # the daily spend columns (accent).
+        if n > 0:
+            slot = chart_w / n
+            bar_w = min(slot * 0.6, 26.0)
+            for i, (label, v) in enumerate(daily):
+                cx = chart_left + slot * (i + 0.5)
+                frac = (v / max_v) if max_v > 0 else 0.0
+                bh = max(1.0, chart_h * frac)
+                rect = QRectF(cx - bar_w / 2, base_y - bh, bar_w, bh)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(accent)))
+                p.drawRoundedRect(rect, 2, 2)
+
+        # the avg-daily PACE line (dashed) — spikes above it read as burning ahead.
+        if max_v > 0 and getattr(b, "avg_daily", 0.0) > 0:
+            avg_frac = min(1.0, b.avg_daily / max_v)
+            avg_y = base_y - chart_h * avg_frac
+            pace = QColor(Colors.TEXT_ACCENT); pace.setAlpha(170)
+            p.setPen(QPen(pace, 1, Qt.PenStyle.DashLine))
+            p.drawLine(QPointF(chart_left, avg_y), QPointF(chart_right, avg_y))
+            p.setFont(f_tiny)
+            p.setPen(QPen(pace))
+            p.drawText(QRectF(chart_left, avg_y - fm.height() - 1, chart_w,
+                              fm.height()),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"avg ${b.avg_daily:,.2f}/day")
+
+        y = base_y + 12
+        # figure line 1: spent / budget + pct.
+        p.setFont(f_mono)
+        p.setPen(QPen(Colors.TEXT_PRIMARY))
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm.height() + 2),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"${b.spent:,.2f} / ${b.budget:,.0f}   {b.pct_burned}% burned")
+        y += fm.height() + 4
+        # figure line 2: elapsed / days-left + on/ahead of pace.
+        over = bool(getattr(b, "over_pace", False))
+        p.setFont(f_tiny)
+        p.setPen(QPen(Colors.RED if over else Colors.TEXT_SECONDARY))
+        pace_word = "AHEAD of pace" if over else "on pace"
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm.height() + 2),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"day {b.elapsed_days}/{b.period_days} · {b.days_left} left "
+                   f"· {pace_word}")
+        y += fm.height() + 4
+        # the projection MATH line (the explicit forecast).
+        p.setPen(QPen(Colors.RED if getattr(b, "over_projection", False)
+                      else Colors.TEXT_MUTED))
+        p.drawText(QRectF(pad, y, w - 2 * pad, fm.height() + 2),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"${b.avg_daily:,.2f}/day × {b.days_left}d + ${b.spent:,.2f} "
+                   f"= ${b.projection:,.2f}")
+
+
+def budget_accent_hex(budget) -> str:
+    """The popup border accent for the burn-down dossier: RED when over-pace
+    (the zone's single 'in trouble' signal, decision C), else the panel accent.
+    Returns a #rrggbb hex."""
+    if budget is not None and getattr(budget, "over_pace", False):
+        return Colors.RED.name()
+    return theme_controller.accent().name()
+
+
+def build_budget_html(budget) -> str:
+    """The burn-down dossier for the ProviderPopup: a header + the painted column
+    chart + projection math embedded as a data-URI <img> (single-QLabel
+    contract). There are NO API strings here (numbers only). Returns a 'No budget
+    set' card when there's no denominator (decision E — no fabricated numbers)."""
+    if budget is None or not getattr(budget, "has_budget", False):
+        return ("<div style='font-size:11pt;font-weight:bold;color:#a0a0c8;'>"
+                "No budget set</div>"
+                "<div style='color:#64648c;font-size:8pt;margin-top:4px;'>"
+                "Set <b>weekly_budget</b> in settings (or enable "
+                "<b>show_credit_burndown</b>) to track a burn-down. "
+                "Pulse never invents a number.</div>")
+    over = bool(getattr(budget, "over_pace", False))
+    accent = _safe_color(budget_accent_hex(budget), "#a0a0c8")
+    src_word = {"weekly": "Weekly budget",
+                "credits": "Credit burn-down"}.get(budget.source, "Budget")
+    head = (f"AHEAD of pace — ${budget.projection:,.2f} forecast" if over
+            else f"on pace for ${budget.projection:,.2f}")
+    out = [f"<div style='font-size:11pt;font-weight:bold;color:{accent};'>"
+           f"{html.escape(src_word)}: {budget.pct_burned}% burned</div>"]
+    out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+               f"{head}</div>")
+    try:
+        strip = BudgetBurndownStrip(budget)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{BudgetBurndownStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("budget burndown render failed", exc_info=True)
+    out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
+               "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
+    return "".join(out)

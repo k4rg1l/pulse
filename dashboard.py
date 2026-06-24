@@ -37,6 +37,7 @@ from widgets import (
     build_receipt_html, receipt_accent_hex,
     RebateStub, build_rebate_html, rebate_accent_hex,
     GhostVeil, build_seance_html, ghost_accent_hex,
+    BudgetHourglass, build_budget_html, budget_accent_hex,
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
@@ -465,6 +466,16 @@ class Dashboard(QWidget):
         self.spend_ghosts.ghost_clicked.connect(self._on_ghost_clicked)
         spend_layout.addWidget(self.spend_ghosts)
 
+        # #14 THE HOURGLASS — the sand-clock budget burn-down CLOSES the section,
+        # rhyming UPWARD with the Credit Balance ArcGauge to bookend the panel.
+        # The TOP bulb is remaining budget, the drained BOTTOM is spend, raced
+        # against a pace tick; the pinch reddens when AHEAD OF PACE. The live
+        # default (no weekly_budget + credits opt-in off) is the "Set a budget"
+        # state. Click -> the burn-down dossier popup.
+        self.spend_budget = BudgetHourglass(self)
+        self.spend_budget.budget_clicked.connect(self._on_budget_clicked)
+        spend_layout.addWidget(self.spend_budget)
+
         self._or_layout.addWidget(self._spend_container)
 
         # Keep-last-good store + initial state. On a keyless machine the worker
@@ -482,6 +493,7 @@ class Dashboard(QWidget):
             self.spend_receipts.set_locked()
             self.spend_savings.set_locked()
             self.spend_ghosts.set_locked()
+            self.spend_budget.set_locked()
             self._spend_header.right_label.setText("locked")
 
     def _toggle_spend_collapsed(self):
@@ -590,6 +602,37 @@ class Dashboard(QWidget):
         anchor_y = int(global_anchor.y())
         # ghost_accent_hex(None) safely falls back to the panel accent.
         popup.set_accent(ghost_accent_hex(entry))
+        popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
+        self._popup_model_id = key
+
+    def _on_budget_clicked(self, global_anchor):
+        """#14 THE HOURGLASS: the budget glass was clicked -> render the burn-down
+        dossier (the 7-bar daily-spend column chart + the pace line + the
+        projection math) to a pixmap and show it in the shared popup. Mirrors
+        _on_ghost_clicked (keyed, debounced, toggle-hide). RED accent when over
+        pace (decision C), else the panel accent. Shows a 'No budget set' card
+        when there's no denominator (no fabricated numbers)."""
+        popup = self._ensure_provider_popup()
+        key = "budget"
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        board = getattr(self, "_spend_board", None)
+        budget = board.budget if board is not None else None
+        html_str = build_budget_html(budget)
+        if not html_str:
+            return
+        anchor_y = int(global_anchor.y())
+        # budget_accent_hex(None) safely falls back to the panel accent.
+        popup.set_accent(budget_accent_hex(budget))
         popup.show_beside(html_str, self._dashboard_global_rect(), anchor_y)
         self._popup_model_id = key
 
@@ -728,6 +771,8 @@ class Dashboard(QWidget):
                     self.spend_savings.set_locked()
                 if getattr(self, "spend_ghosts", None) is not None:
                     self.spend_ghosts.set_locked()
+                if getattr(self, "spend_budget", None) is not None:
+                    self.spend_budget.set_locked()
                 self._spend_header.right_label.setText("locked")
             return
 
@@ -740,6 +785,11 @@ class Dashboard(QWidget):
             # board.ghosts may be None (a transient ghost-query failure on an
             # unlocked key); set_data(None) keeps last-good, never blanks.
             self.spend_ghosts.set_data(board.ghosts)
+        if getattr(self, "spend_budget", None) is not None:
+            # board.budget carries the burn-down (or a "none"/Budget sentinel ->
+            # the "Set a budget" state). set_data routes a no-denominator Budget
+            # to set_no_budget internally; None keeps last-good.
+            self.spend_budget.set_data(board.budget)
         # Headline in the (collapsible) section header's right_label.
         sp = board.spectrum
         if sp.is_empty:

@@ -74,6 +74,18 @@ class Settings:
     show_drift: bool = True             # show #8 THE FAULT LINE — the price-drift seismograph on the card edge
     show_spend: bool = True             # show the SPEND zone (Wave 2 #9 The Spectrum + ground-truth analytics)
 
+    # -- #14 THE HOURGLASS (budget burn-down) --
+    # The budget DENOMINATOR. >0 = the real config path (a weekly spend budget,
+    # in $). 0 (default) = no budget configured -> the tidy "Set a budget" state.
+    # NEVER fabricate a denominator; only this field (or the credits fallback
+    # below) supplies one.
+    weekly_budget: float = 0.0
+    # Opt-in CREDITS fallback: when weekly_budget==0 AND this is True, derive the
+    # burn-down from GET /api/v1/credits (budget = total_credits, burned =
+    # total_usage — the only live spend-cap signal). Off by default so a credit
+    # balance is never silently presented as a "budget".
+    show_credit_burndown: bool = False
+
     # -- UI overhaul (nav-rail command center) --
     default_source: str = "openrouter"  # which tab opens when the dashboard is shown
     enable_animations: bool = True      # tab transitions / count-ups / pulses (off = instant)
