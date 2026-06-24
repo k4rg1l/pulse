@@ -67,6 +67,7 @@ class Settings:
     show_arena: bool = True             # show the model Arena rank-crest on pinned cards
     show_trust_seals: bool = True       # show per-provider privacy/trust seals on pinned cards
     show_speed: bool = True             # show the fleet-relative Speed Percentile band on pinned cards
+    show_door: bool = True              # show #5 THE THRESHOLD — the "cheapest door" band on pinned cards
     show_uptime: bool = True            # show THE PULSE — the 73h uptime cardiogram on provider rows
 
     # -- UI overhaul (nav-rail command center) --

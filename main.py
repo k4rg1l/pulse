@@ -201,6 +201,11 @@ class OpenRouterPulse(QObject):
                 lambda: self.trigger.fetch_speed_board.emit())
             self.speed_timer.start(20 * 60 * 1000)        # every 20 minutes
 
+        # #5 THE THRESHOLD ("cheapest door"): NO new fetch — it rides the
+        # existing per-model endpoints fetch (each card resolves its own door
+        # when endpoints land). The only thing to wire is the show_door gate.
+        self.dashboard.set_show_door(getattr(self.settings, "show_door", True))
+
         # THE PULSE (#3): per-endpoint 73h uptime cardiogram. PER-ENDPOINT, so
         # this fans out — fetch sparingly (~20 min, mirroring the speed cadence)
         # and cache hard (cards keep last-good). No-auth. Needs the permaslug
@@ -251,6 +256,10 @@ class OpenRouterPulse(QObject):
         if getattr(self.settings, "show_speed", True):
             self.trigger.fetch_permaslug_resolver.emit()
             self.trigger.fetch_speed_board.emit()
+        # #5 THE THRESHOLD: no fetch; re-apply the gate so a settings toggle
+        # takes effect on manual refresh (the per-model door re-resolves when
+        # endpoints land via _fetch_all_endpoints above).
+        self.dashboard.set_show_door(getattr(self.settings, "show_door", True))
         if getattr(self.settings, "show_uptime", True):
             self._fetch_all_uptime()
         # Peer sources (Claude/GPU/System) too — a manual refresh should

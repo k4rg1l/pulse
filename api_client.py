@@ -86,7 +86,6 @@ class ModelInfo:
     pricing_prompt: float = 0.0
     pricing_completion: float = 0.0
     context_length: int = 0
-    top_provider: str = ""
 
     @property
     def price_per_mtok_prompt(self):
@@ -113,6 +112,88 @@ class ProviderInfo:
     headquarters: Optional[str] = None
 
 
+# The extended pricing keys F1 retains beyond prompt/completion. Every one is a
+# STRING $/unit upstream EXCEPT `discount` (already numeric). The public route
+# omits zero-value keys, so we only float() the keys that are actually present —
+# an absent key stays absent (never coerced to 0.0). See EndpointInfo.fee().
+_PRICING_EXTRA_KEYS = (
+    "input_cache_read", "input_cache_write", "web_search", "image", "audio",
+    "input_audio_cache", "internal_reasoning", "request", "discount",
+)
+
+
+def _parse_pricing_extra(pricing: dict) -> dict:
+    """Retain the FULL pricing object (minus prompt/completion, kept as explicit
+    fields) as a sparse {key: float} dict. CRITICAL: a key ABSENT from the
+    upstream payload stays ABSENT here — it is NOT defaulted to 0.0 — because a
+    present-with-value>0 key is the only signal that a hidden fee applies (#6)."""
+    out: dict = {}
+    if not isinstance(pricing, dict):
+        return out
+    for k in _PRICING_EXTRA_KEYS:
+        if k not in pricing:          # sparse omission → leave absent (not 0.0)
+            continue
+        v = pricing[k]
+        try:
+            out[k] = float(v)         # discount is numeric; the rest are strings
+        except (ValueError, TypeError):
+            continue                  # unparseable → treat as absent
+    return out
+
+
+def _ep_percentile(ep: dict, field: str, key: str) -> Optional[float]:
+    """Pull one percentile (e.g. p50) from a {p50,p75,p90,p99} dict field, or
+    accept a bare scalar, else None."""
+    v = ep.get(field)
+    if isinstance(v, dict):
+        n = v.get(key)
+        return float(n) if n is not None else None
+    if isinstance(v, (int, float)):
+        return float(v)
+    return None
+
+
+def parse_model_endpoints(model_id: str, data: dict) -> ModelEndpoints:
+    """Build ModelEndpoints from the public /api/v1/models/{slug}/endpoints
+    `data` object. Module-level (mirrors parse_benchmarks) so the widened F1
+    pricing parse is unit-testable against a captured payload without network.
+    prompt/completion are float()d here as before; the rest of the pricing
+    object is carried sparse via _parse_pricing_extra (absent stays absent)."""
+    endpoints = []
+    for ep in (data or {}).get("endpoints", []):
+        pricing = ep.get("pricing", {})
+        try:
+            pp = float(pricing.get("prompt", "0"))
+        except (ValueError, TypeError):
+            pp = 0.0
+        try:
+            cp = float(pricing.get("completion", "0"))
+        except (ValueError, TypeError):
+            cp = 0.0
+        endpoints.append(EndpointInfo(
+            provider_name=ep.get("provider_name", ""),
+            tag=ep.get("tag", ""),
+            quantization=ep.get("quantization", ""),
+            context_length=ep.get("context_length", 0),
+            pricing_prompt=pp,
+            pricing_completion=cp,
+            uptime_last_30m=ep.get("uptime_last_30m"),
+            uptime_last_5m=ep.get("uptime_last_5m"),
+            uptime_last_1d=ep.get("uptime_last_1d"),
+            latency_p50=_ep_percentile(ep, "latency_last_30m", "p50"),
+            latency_p90=_ep_percentile(ep, "latency_last_30m", "p90"),
+            throughput_p50=_ep_percentile(ep, "throughput_last_30m", "p50"),
+            status=ep.get("status", 0),
+            supports_implicit_caching=ep.get("supports_implicit_caching", False),
+            pricing_extra=_parse_pricing_extra(pricing),
+        ))
+    return ModelEndpoints(
+        model_id=model_id,
+        model_name=(data or {}).get("name", model_id),
+        endpoints=endpoints,
+    )
+
+
 @dataclass
 class EndpointInfo:
     """One provider's offering of a model: latency, uptime, price.
@@ -134,6 +215,15 @@ class EndpointInfo:
     throughput_p50: Optional[float] = None  # tokens/sec
     status: int = 0
     supports_implicit_caching: bool = False
+    # F1 — the FULL pricing object beyond prompt/completion (shared foundation,
+    # primary consumer #6 THE WATERLINE). The public /endpoints route OMITS
+    # zero-value keys (sparse), so an ABSENT key MUST stay None — never coerced
+    # to 0.0 — because "key present with value > 0" is the signal that a hidden
+    # fee actually applies. Every $/token field is a STRING upstream (float()d
+    # at parse, mirroring prompt/completion); `discount` is already numeric.
+    # Units: cache/image/audio/internal_reasoning are $/token; web_search is
+    # $/call; request is $/request; discount is a fraction (0..1).
+    pricing_extra: dict = field(default_factory=dict)
 
     # backwards-compat alias for older readers
     @property
@@ -151,6 +241,18 @@ class EndpointInfo:
     @property
     def price_per_mtok_completion(self):
         return self.pricing_completion * 1_000_000
+
+    def fee(self, key: str) -> Optional[float]:
+        """A hidden-fee value (e.g. 'input_cache_read', 'web_search') or None
+        if the upstream payload omitted that key. None == "this fee does not
+        apply" (sparse route); a 0.0 would be a real, explicit zero fee."""
+        return self.pricing_extra.get(key)
+
+    def has_fee(self, key: str) -> bool:
+        """True iff the fee key was present AND its value is > 0 — the exact
+        signal #6 keys off ("present with value > 0 == applies")."""
+        v = self.pricing_extra.get(key)
+        return v is not None and v > 0
 
     @property
     def uptime(self):
@@ -180,6 +282,115 @@ class ModelEndpoints:
             return None
         candidates.sort(key=lambda e: (e.latency_p50, e.pricing_prompt))
         return candidates[0]
+
+
+# ---------------------------------------------------------------------------
+#  #5 THE THRESHOLD — the "Cheapest Door"
+#
+#  Pure local math over the EndpointInfo list the card already holds (NO new
+#  fetch). The CURRENT provider is the card's _best (lowest p50 latency among
+#  uptime>=99, cheaper-prompt tie-break). The cheaper DESTINATION is the
+#  endpoint with the minimum prompt price (>0). The band paints a perspective
+#  door swung open toward that destination, the saving % engraved on the lintel.
+#
+#  GREEN-DOOR RULE (the rare cheaper-AND-faster case — one deterministic,
+#  testable rule, decision A): cheaper.pricing_prompt < best.pricing_prompt AND
+#  cheaper.throughput_p50 > best.throughput_p50 (STRICTLY higher throughput).
+#  Not widened to "or lower latency".
+# ---------------------------------------------------------------------------
+
+# Brass-amber lane (normal) + emerald (green-door). #5 owns these two; kept
+# region-separate from Speed cyan / Arena tiers / Ledger / Pulse green.
+DOOR_AMBER = "#e0a13a"
+DOOR_EMERALD = "#34d27e"
+
+
+@dataclass
+class DoorResolution:
+    """The resolved 'cheapest door' for one model (or the absence of one).
+
+    save_pct      — round(100 * (best - cheaper)/best); always >= 1 when present.
+    cheaper_name  — destination provider display name.
+    from_*/to_*   — the FROM (current/best) and THROUGH (cheaper) metrics for the
+                    dossier, so it never overstates.
+    green         — cheaper is ALSO strictly faster (higher throughput_p50).
+    """
+    save_pct: int = 0
+    cheaper_name: str = ""
+    from_name: str = ""
+    from_prompt: float = 0.0          # $/token
+    from_latency: Optional[float] = None
+    from_throughput: Optional[float] = None
+    to_prompt: float = 0.0
+    to_latency: Optional[float] = None
+    to_throughput: Optional[float] = None
+    green: bool = False
+
+    @property
+    def accent(self) -> str:
+        return DOOR_EMERALD if self.green else DOOR_AMBER
+
+    @property
+    def from_mtok(self) -> float:
+        return self.from_prompt * 1_000_000
+
+    @property
+    def to_mtok(self) -> float:
+        return self.to_prompt * 1_000_000
+
+    @property
+    def latency_delta_pct(self) -> Optional[int]:
+        """How much SLOWER (+) or faster (-) first-token the cheaper door is, vs
+        the current provider, as a signed % — the honesty-line input. None if
+        either latency is missing."""
+        if self.from_latency is None or self.to_latency is None or self.from_latency <= 0:
+            return None
+        return round(100 * (self.to_latency - self.from_latency) / self.from_latency)
+
+
+def resolve_door(endpoints, best) -> Optional[DoorResolution]:
+    """Pure resolution of THE THRESHOLD. Returns a DoorResolution, or None for
+    every no-op case (decision C — the band then paints nothing):
+      * best is None (no current provider),
+      * no priced (prompt>0) endpoint exists,
+      * the cheapest priced endpoint IS best (already on the cheapest door),
+      * best.pricing_prompt == 0 (free model → divide-by-zero guard),
+      * the saving rounds to 0%.
+    No fake data is ever invented."""
+    if best is None or not endpoints:
+        return None
+    if not best.pricing_prompt or best.pricing_prompt <= 0:
+        return None                                   # free / unpriced → no door
+    priced = [e for e in endpoints if e.pricing_prompt and e.pricing_prompt > 0]
+    if not priced:
+        return None
+    cheapest = min(priced, key=lambda e: e.pricing_prompt)
+    if cheapest is best or cheapest.pricing_prompt >= best.pricing_prompt:
+        return None                                   # best already cheapest
+    save_pct = round(100 * (best.pricing_prompt - cheapest.pricing_prompt)
+                     / best.pricing_prompt)
+    if save_pct <= 0:                                 # rounds to nothing → no door
+        return None
+    # GREEN-DOOR: cheaper AND strictly-higher throughput (decision A). Both
+    # throughputs must be known to claim it.
+    green = (
+        cheapest.pricing_prompt < best.pricing_prompt
+        and best.throughput_p50 is not None
+        and cheapest.throughput_p50 is not None
+        and cheapest.throughput_p50 > best.throughput_p50
+    )
+    return DoorResolution(
+        save_pct=save_pct,
+        cheaper_name=cheapest.provider_name or cheapest.tag or "cheaper provider",
+        from_name=best.provider_name or best.tag or "current provider",
+        from_prompt=best.pricing_prompt,
+        from_latency=best.latency_p50,
+        from_throughput=best.throughput_p50,
+        to_prompt=cheapest.pricing_prompt,
+        to_latency=cheapest.latency_p50,
+        to_throughput=cheapest.throughput_p50,
+        green=green,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -462,10 +673,6 @@ class APIClient:
                     pricing_prompt=pp,
                     pricing_completion=cp,
                     context_length=m.get("context_length", 0),
-                    top_provider=(
-                        m.get("top_provider", {}).get("name", "")
-                        if isinstance(m.get("top_provider"), dict) else ""
-                    ),
                 ))
             return models
         except Exception as e:
@@ -489,49 +696,7 @@ class APIClient:
             resp = self.session.get(url, timeout=15)
             resp.raise_for_status()
             data = resp.json().get("data", {})
-
-            def _percentile(field, key):
-                v = ep.get(field)
-                if isinstance(v, dict):
-                    n = v.get(key)
-                    return float(n) if n is not None else None
-                if isinstance(v, (int, float)):
-                    return float(v)
-                return None
-
-            endpoints = []
-            for ep in data.get("endpoints", []):
-                pricing = ep.get("pricing", {})
-                try:
-                    pp = float(pricing.get("prompt", "0"))
-                except (ValueError, TypeError):
-                    pp = 0.0
-                try:
-                    cp = float(pricing.get("completion", "0"))
-                except (ValueError, TypeError):
-                    cp = 0.0
-                endpoints.append(EndpointInfo(
-                    provider_name=ep.get("provider_name", ""),
-                    tag=ep.get("tag", ""),
-                    quantization=ep.get("quantization", ""),
-                    context_length=ep.get("context_length", 0),
-                    pricing_prompt=pp,
-                    pricing_completion=cp,
-                    uptime_last_30m=ep.get("uptime_last_30m"),
-                    uptime_last_5m=ep.get("uptime_last_5m"),
-                    uptime_last_1d=ep.get("uptime_last_1d"),
-                    latency_p50=_percentile("latency_last_30m", "p50"),
-                    latency_p90=_percentile("latency_last_30m", "p90"),
-                    throughput_p50=_percentile("throughput_last_30m", "p50"),
-                    status=ep.get("status", 0),
-                    supports_implicit_caching=ep.get("supports_implicit_caching", False),
-                ))
-
-            return ModelEndpoints(
-                model_id=model_id,
-                model_name=data.get("name", model_id),
-                endpoints=endpoints,
-            )
+            return parse_model_endpoints(model_id, data)
         except Exception as e:
             log.warning("endpoints(%s) fetch failed: %s", model_id, e)
             return None

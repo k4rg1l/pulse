@@ -172,6 +172,9 @@ class Dashboard(QWidget):
         self._benchmark_board = None
         # The Ledger (per-provider privacy/trust posture), distributed to cards
         self._provider_trust_book = None
+        # #5 THE THRESHOLD gate (settings.show_door). Cached so cards created
+        # later inherit it; #5 has no fetch, so this is its only gate point.
+        self._show_door = bool(getattr(settings, "show_door", True)) if settings else True
         # Speed Percentile (#4): the fleet performance board + the slug→permaslug
         # map needed to look a pinned model up in it. Both distributed to cards.
         self._speed_board = None
@@ -494,7 +497,9 @@ class Dashboard(QWidget):
                 card.arena_clicked.connect(self._on_arena_clicked)
                 card.trust_clicked.connect(self._on_trust_clicked)
                 card.speed_clicked.connect(self._on_speed_clicked)
+                card.door_clicked.connect(self._on_door_clicked)
                 card.uptime_clicked.connect(self._on_uptime_clicked)
+                card.set_show_door(self._show_door)   # #5 settings gate
                 if self._logo_store is not None:
                     card.set_logo_store(self._logo_store)
                 self._pinned_cards[mid] = card
@@ -551,6 +556,16 @@ class Dashboard(QWidget):
         for card in self._pinned_cards.values():
             card.set_provider_trust(book)
         self._prewarm_logos()
+
+    # ---- #5 THE THRESHOLD (the "cheapest door" gate) ----
+
+    def set_show_door(self, show: bool):
+        """Apply the settings.show_door gate to every pinned card (and remember
+        it for cards created later). #5 carries no fetch, so toggling this is how
+        the band is shown/hidden."""
+        self._show_door = bool(show)
+        for card in self._pinned_cards.values():
+            card.set_show_door(self._show_door)
 
     # ---- Speed Percentile (#4) ----
 
@@ -851,6 +866,33 @@ class Dashboard(QWidget):
         popup.set_accent(card.speed_accent())
         popup.show_beside(
             card.speed_html(),
+            self._dashboard_global_rect(),
+            int(global_anchor.y()),
+        )
+        self._popup_model_id = key
+
+    def _on_door_clicked(self, model_id, global_anchor):
+        """#5 THE THRESHOLD band was clicked -> show the FROM→THROUGH dossier
+        (amber, or emerald for the green door)."""
+        card = self._pinned_cards.get(model_id)
+        if card is None or not card.has_door():
+            return
+        popup = self._ensure_provider_popup()
+        key = "door:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        popup.set_accent(card.door_accent())
+        popup.show_beside(
+            card.door_html(),
             self._dashboard_global_rect(),
             int(global_anchor.y()),
         )

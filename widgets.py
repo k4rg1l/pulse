@@ -27,6 +27,7 @@ from theme import Colors, Fonts
 import theme_controller
 
 log = logging.getLogger("pulse.widgets")
+_door_log = logging.getLogger("pulse.threshold")   # #5 door-resolution INFO line
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1000,7 @@ class PinnedModelCard(QWidget):
     HEADER_H = 28
     CREST_H = 28        # the Arena rank-crest band pill (only when benchmark data)
     SPEED_H = 28        # the Speed Percentile band pill (only when speed data)
+    DOOR_H = 28         # #5 THE THRESHOLD "cheapest door" band (only when a door)
     # Uniform vertical rhythm. The header content already sits ~BAND_GAP above the
     # first band (its centered slack), bands are BAND_GAP apart, and ROWS_GAP — a
     # touch smaller, to offset the first provider row's own top slack — sits below
@@ -1016,6 +1018,7 @@ class PinnedModelCard(QWidget):
     arena_clicked = Signal(str, QPointF)   # crest band clicked -> Fighter Card
     trust_clicked = Signal(str, str, QPointF)  # (model_id, provider_ident, anchor)
     speed_clicked = Signal(str, QPointF)   # speed band clicked -> Time Slip dossier
+    door_clicked = Signal(str, QPointF)    # #5 door band clicked -> Threshold dossier
     uptime_clicked = Signal(str, str, QPointF)  # (model_id, ep_ident, anchor) -> Vitals
 
     # ---- THE PULSE (#3 — the 73h uptime cardiogram) geometry constants ----
@@ -1060,6 +1063,20 @@ class PinnedModelCard(QWidget):
         self._crest_emblem_cx = 0.0      # Arena hexagon center x
         self._crest_content_x = 0.0      # Arena text column x
         self._speed_emblem_cx = 0.0      # speed bolt center x
+        # #5 THE THRESHOLD — the "cheapest door" band (3rd band, after Speed).
+        # _door is a DoorResolution or None (None → band paints nothing). The
+        # accent + green flag are resolved ONCE in set_door so paint allocates
+        # nothing per frame (the QPolygonF leaf is built once here too).
+        self._door = None                # api_client.DoorResolution | None
+        self._show_door = True           # gated by settings.show_door (main.py)
+        self._door_hit_rect = QRectF()
+        self._door_hover = False
+        self._door_accent = QColor(0xe0, 0xa1, 0x3a)   # amber; emerald when green
+        self._door_green = False
+        # Render introspection (set during paint) — measured by the test.
+        self._door_leaf_poly = QPolygonF()   # the perspective door-leaf trapezoid
+        self._door_text_left = 0.0           # x where the lintel text starts
+        self._door_chev_x = 0.0              # right chevron x
         # THE PULSE (#3) — per-endpoint 73h uptime histories, keyed by the SAME
         # _ep_ident(ep) the trust seals use so the right history lands on the
         # right row across refreshes. Empty → every row keeps the legacy %-chip.
@@ -1094,11 +1111,16 @@ class PinnedModelCard(QWidget):
         rows = len(self._endpoints.endpoints) if self._endpoints else 1
         crest = self.CREST_H if self._benchmark is not None else 0
         speed = self.SPEED_H if self._speed is not None else 0
-        has_band = self._benchmark is not None or self._speed is not None
-        both = self._benchmark is not None and self._speed is not None
-        inter = self.BAND_GAP if both else 0       # gap between the two bands
+        door = self.DOOR_H if self._door is not None else 0
+        # Generalized multi-band gap math (decision D — #5 makes this 3 bands and
+        # this MUST be right for every future band): one BAND_GAP sits BETWEEN
+        # each pair of present bands, so N present bands take (N-1) gaps. ROWS_GAP
+        # sits below the last band before the provider rows iff any band is shown.
+        bands = (crest > 0) + (speed > 0) + (door > 0)
+        inter = self.BAND_GAP * max(0, bands - 1)
+        has_band = bands > 0
         below = self.ROWS_GAP if has_band else 0    # gap before the provider rows
-        h = (self.HEADER_H + crest + inter + speed + below
+        h = (self.HEADER_H + crest + speed + door + inter + below
              + max(1, rows) * self.ROW_H + self.PAD_Y * 2)
         self.setFixedHeight(h)
 
@@ -1153,6 +1175,62 @@ class PinnedModelCard(QWidget):
 
     def speed_accent(self) -> str:
         return _safe_color(self._speed.tier[1], "#00d2ff") if self._speed else "#00d2ff"
+
+    # ---- #5 THE THRESHOLD (the "cheapest door" band) ----
+
+    def set_door(self, resolution):
+        """resolution: an api_client.DoorResolution or None. None (no cheaper
+        door, free model, or save% rounds to 0) removes the band — the card
+        paints nothing for it but DOES re-measure its height (a band toggled,
+        decision C). The accent + green flag are cached here so the paint hot
+        path allocates nothing per frame."""
+        had = self._door is not None
+        self._door = resolution
+        if resolution is not None:
+            self._door_green = bool(resolution.green)
+            self._door_accent = QColor(_safe_color(resolution.accent, "#e0a13a"))
+        else:
+            self._door_green = False
+            self._door_accent = QColor(0xe0, 0xa1, 0x3a)
+        if (resolution is not None) != had:
+            self._update_height()
+        self.update()
+
+    def has_door(self) -> bool:
+        return self._door is not None
+
+    def door_accent(self) -> str:
+        """Amber normally, emerald for the green door (cheaper AND faster)."""
+        from api_client import DOOR_AMBER, DOOR_EMERALD
+        if self._door is None:
+            return DOOR_AMBER
+        return DOOR_EMERALD if self._door.green else DOOR_AMBER
+
+    def set_show_door(self, show: bool):
+        """Settings gate (show_door). When off, the band is removed (set_door
+        None) and stays off until re-enabled; #5 carries no fetch to gate, so
+        this is the gate point (mirrors the show_speed opt-out)."""
+        show = bool(show)
+        if show == self._show_door:
+            return
+        self._show_door = show
+        self._resolve_door_from_endpoints()
+
+    def _resolve_door_from_endpoints(self):
+        """Resolve THE THRESHOLD from the endpoints/best the card already holds
+        and push it through set_door. Called wherever _best/_endpoints change."""
+        if not self._show_door:
+            self.set_door(None)          # gated off → paint nothing (decision C)
+            return
+        from api_client import resolve_door
+        eps = self._endpoints.endpoints if self._endpoints else []
+        d = resolve_door(eps, self._best)
+        self.set_door(d)
+        if d is not None:
+            _door_log.info(
+                "threshold: %s SAVE %d%% green=%s (%s $%.3f/Mtok -> %s $%.3f/Mtok)",
+                self.model_id, d.save_pct, d.green, d.from_name, d.from_mtok,
+                d.cheaper_name, d.to_mtok)
 
     # ---- Shared left rail ----
     # The crest + speed band emblems sit in the SAME column as each provider
@@ -1382,6 +1460,10 @@ class PinnedModelCard(QWidget):
         else:
             self._best = None
         self._update_height()
+        # #5 THE THRESHOLD rides the SAME data (no new fetch): resolve the
+        # cheapest door from the endpoints we just received. set_door re-measures
+        # height itself if the band toggled, so this is safe after _update_height.
+        self._resolve_door_from_endpoints()
         self.update()
 
     def provider_html(self) -> str:
@@ -1631,6 +1713,7 @@ class PinnedModelCard(QWidget):
         icon_hover = self._icon_hit_rect.contains(pos)
         crest_hover = self._benchmark is not None and self._crest_hit_rect.contains(pos)
         speed_hover = self._speed is not None and self._speed_hit_rect.contains(pos)
+        door_hover = self._door is not None and self._door_hit_rect.contains(pos)
         _, seal_ident = self._seal_at(pos)
         _, pulse_ident = self._pulse_at(pos)
         changed = False
@@ -1643,6 +1726,9 @@ class PinnedModelCard(QWidget):
         if speed_hover != self._speed_hover:
             self._speed_hover = speed_hover
             changed = True
+        if door_hover != self._door_hover:
+            self._door_hover = door_hover
+            changed = True
         if seal_ident != self._seal_hover_ident:
             self._seal_hover_ident = seal_ident
             changed = True
@@ -1650,7 +1736,7 @@ class PinnedModelCard(QWidget):
             self._pulse_hover_ident = pulse_ident
             changed = True
         if changed:
-            if (icon_hover or crest_hover or speed_hover
+            if (icon_hover or crest_hover or speed_hover or door_hover
                     or seal_ident is not None or pulse_ident is not None):
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
@@ -1659,11 +1745,13 @@ class PinnedModelCard(QWidget):
 
     def leaveEvent(self, event):
         if (self._icon_hover or self._crest_hover or self._speed_hover
+                or self._door_hover
                 or self._seal_hover_ident is not None
                 or self._pulse_hover_ident is not None):
             self._icon_hover = False
             self._crest_hover = False
             self._speed_hover = False
+            self._door_hover = False
             self._seal_hover_ident = None
             self._pulse_hover_ident = None
             self.unsetCursor()
@@ -1686,6 +1774,9 @@ class PinnedModelCard(QWidget):
         elif self._speed is not None and self._speed_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._speed_hit_rect.center().toPoint())
             self.speed_clicked.emit(self.model_id, QPointF(global_pos))
+        elif self._door is not None and self._door_hit_rect.contains(pos):
+            global_pos = self.mapToGlobal(self._door_hit_rect.center().toPoint())
+            self.door_clicked.emit(self.model_id, QPointF(global_pos))
         elif seal_ident is not None:
             global_pos = self.mapToGlobal(seal_rect.center().toPoint())
             self.trust_clicked.emit(self.model_id, seal_ident, QPointF(global_pos))
@@ -1800,6 +1891,17 @@ class PinnedModelCard(QWidget):
             drew_band = True
         else:
             self._speed_hit_rect = QRectF()
+
+        # #5 THE THRESHOLD — painted LAST in the stack so the door reads as the
+        # "exit" below the model's standing (Arena rank → Speed → Door).
+        if self._door is not None:
+            if drew_band:
+                y += self.BAND_GAP
+            self._paint_door(painter, y)
+            y += self.DOOR_H
+            drew_band = True
+        else:
+            self._door_hit_rect = QRectF()
 
         if drew_band:
             y += self.ROWS_GAP
@@ -2274,6 +2376,160 @@ class PinnedModelCard(QWidget):
         painter.drawPath(p)
         painter.restore()
 
+    def _paint_door(self, painter, y):
+        """#5 THE THRESHOLD — a hand-painted perspective DOOR-LEAF band. A stone
+        jamb on the shared left rail marks the CURRENT (best) provider; a fake-
+        perspective leaf swings open toward the CHEAPER destination; the saving %
+        is engraved on the lintel ('SAVE NN% · {provider}'). Brass-amber normally;
+        it turns EMERALD and spills light through the gap (the literal GREEN DOOR,
+        '+ FASTER') only when the cheaper provider is ALSO faster. Mirrors
+        _paint_speed's band idiom + font-metric-driven fallback cascade; one
+        QFontMetrics(Fonts.tiny() bold) measure pass feeds paint AND the test."""
+        d = self._door
+        band = QRectF(self.PAD_X - 2, y,
+                      self.width() - 2 * (self.PAD_X - 2), self.DOOR_H)
+        self._door_hit_rect = band
+        ACCENT = QColor(self._door_accent)
+        green = self._door_green
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 1) BAND BACKING (same idiom as the crest/speed bands, but amber/emerald)
+        bg = QColor(ACCENT); bg.setAlpha(34 if self._door_hover else 18)
+        bpath = QPainterPath(); bpath.addRoundedRect(band, 8, 8)
+        painter.fillPath(bpath, QBrush(bg))
+        bd = QColor(ACCENT); bd.setAlpha(105 if self._door_hover else 45)
+        painter.setPen(QPen(bd, 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(bpath)
+
+        # --- one measure pass for the lintel text (feeds paint + the test) ---
+        f = Fonts.tiny(); f.setBold(True)
+        fm = QFontMetrics(f)
+        save_txt = f"SAVE {d.save_pct}%"
+        faster_txt = " + FASTER" if green else ""
+        headline = save_txt + faster_txt
+        tail = f" · {d.cheaper_name}"            # destination, elided/dropped first
+        chev_w = 12
+        chev_x = band.right() - 8 - chev_w
+        self._door_chev_x = chev_x
+        glyph_w = 7.0 if green else 0.0          # the emerald lightning glyph slot
+
+        # 2) THE JAMB (left rail post = the source/best provider). On the SAME
+        #    emblem column as the Arena hexagon / Speed bolt.
+        jamb_cx = self._icon_col_cx()            # 21
+        post_x = jamb_cx - 1.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillRect(QRectF(post_x, band.top() + 5, 2.0,
+                                band.height() - 10), QColor(0x5a, 0x55, 0x66))
+        # a small square hinge nub at the post's vertical mid, on its right side
+        nub_cy = band.center().y()
+        painter.fillRect(QRectF(post_x + 2.0, nub_cy - 1.5, 3.0, 3.0),
+                         QColor(0x6e, 0x68, 0x7d))
+
+        # 3) THE DOOR LEAF — a perspective trapezoid hinged at the jamb. Hinge
+        #    edge full-height on the post; swinging edge SHORTER + offset right.
+        hinge_x = jamb_cx + 1.0                  # 22
+        swing_x = jamb_cx + 19.0                 # 40 — confined to x in [22,40]
+        leaf = QPolygonF([
+            QPointF(hinge_x, band.top() + 4),         # top-hinge
+            QPointF(swing_x, band.top() + 8),         # top-swing (perspective)
+            QPointF(swing_x, band.bottom() - 3),      # bottom-swing
+            QPointF(hinge_x, band.bottom() - 4),      # bottom-hinge
+        ])
+        self._door_leaf_poly = leaf
+        # GREEN-DOOR light spill: a faint emerald glow in the OPEN gap, behind
+        # the leaf, so the rare cheaper-AND-faster case is unmissable.
+        if green:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(0x34, 0xd2, 0x7e, 70)))
+            painter.drawEllipse(QPointF(swing_x + 5.0, band.center().y()),
+                                7.0, band.height() / 2.0 - 3.0)
+        leaf_grad = QLinearGradient(hinge_x, band.top(), swing_x, band.top())
+        if green:
+            leaf_grad.setColorAt(0.0, QColor(0x1f, 0x7a, 0x4d, 150))
+            leaf_grad.setColorAt(1.0, QColor(0x34, 0xd2, 0x7e, 150))
+        else:
+            leaf_grad.setColorAt(0.0, QColor(0xb0, 0x7a, 0x2e, 150))
+            leaf_grad.setColorAt(1.0, QColor(0xe0, 0xa1, 0x3a, 150))
+        painter.setBrush(QBrush(leaf_grad))
+        outline = QColor(ACCENT); outline.setAlpha(180)
+        painter.setPen(QPen(outline, 1))
+        painter.drawPolygon(leaf)
+        # one vertical panel-groove line inside the leaf
+        groove = QColor(ACCENT); groove.setAlpha(90)
+        painter.setPen(QPen(groove, 1))
+        gx = hinge_x + (swing_x - hinge_x) * 0.5
+        painter.drawLine(QPointF(gx, band.top() + 7), QPointF(gx, band.bottom() - 6))
+        # a tiny round 'knob' near the swinging edge
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(ACCENT).lighter(150)))
+        painter.drawEllipse(QPointF(swing_x - 3.0, band.center().y()), 1.5, 1.5)
+
+        # 4) THE LINTEL TEXT — text_left computed (clears the open leaf), with the
+        #    fallback cascade: drop the ' · provider' tail first, then elide the
+        #    headline (mirror _paint_speed).
+        startX = swing_x + 6.0                    # jamb_cx + leaf_swing + 6 (~46)
+        MIN_LANE = 44
+        show_tail = True
+
+        def total_w(with_tail):
+            return (glyph_w + fm.horizontalAdvance(headline)
+                    + (fm.horizontalAdvance(tail) if with_tail else 0))
+
+        text_left = chev_x - self.CHEV_GAP - total_w(show_tail)
+        if text_left - startX < MIN_LANE:         # tight → drop the destination tail
+            show_tail = False
+            text_left = chev_x - self.CHEV_GAP - total_w(show_tail)
+        head_draw, elided = headline, False
+        if text_left - startX < MIN_LANE:         # still tight → elide the headline
+            avail = max(0, int(chev_x - self.CHEV_GAP - glyph_w - startX))
+            head_draw = fm.elidedText(headline, Qt.TextElideMode.ElideRight, avail)
+            text_left = chev_x - self.CHEV_GAP - glyph_w - fm.horizontalAdvance(head_draw)
+            elided = True
+        text_left = max(startX, text_left)
+        self._door_text_left = text_left
+
+        painter.setFont(f)
+        tx = text_left
+        # GREEN-DOOR: a 5px hand-painted 2-stroke emerald lightning glyph
+        if green and not elided:
+            painter.setPen(QPen(QColor(0x34, 0xd2, 0x7e), 1.4,
+                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                                Qt.PenJoinStyle.RoundJoin))
+            gcy = band.center().y()
+            painter.drawLine(QPointF(tx + 3.5, gcy - 5), QPointF(tx + 0.5, gcy + 0.5))
+            painter.drawLine(QPointF(tx + 0.5, gcy + 0.5), QPointF(tx + 4.0, gcy + 5))
+            tx += glyph_w
+
+        if elided:
+            painter.setPen(QColor(0xe8, 0xc2, 0x7a))
+            painter.drawText(QRectF(tx, band.top(), chev_x - tx, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             head_draw)
+        else:
+            # 'SAVE NN%' (+ ' + FASTER') in warm gold, then the dim destination tail
+            painter.setPen(QColor(0xe8, 0xc2, 0x7a))
+            hw = fm.horizontalAdvance(headline)
+            painter.drawText(QRectF(tx, band.top(), hw + 2, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             headline)
+            tx += hw
+            if show_tail:
+                painter.setPen(Colors.TEXT_MUTED)
+                painter.drawText(QRectF(tx, band.top(),
+                                        max(0.0, chev_x - self.CHEV_GAP - tx),
+                                        band.height()),
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                                 tail)
+
+        # 5) RIGHT EDGE chevron (click affordance), identical to _paint_speed.
+        painter.setFont(Fonts.body())
+        painter.setPen(ACCENT if self._door_hover else QColor(120, 120, 150))
+        painter.drawText(QRectF(chev_x, band.top() - 1, chev_w, band.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter, "›")
+        painter.restore()
+
     def _paint_emblem(self, painter, rect, color, elite):
         """A small hexagonal rank crest with an inner gem, glow + shimmer for
         elite tiers."""
@@ -2575,6 +2831,107 @@ class PinnedModelCard(QWidget):
         if tp >= 0.75 and lp >= 0.75:
             return "Fast both ways — quick to first token and fast streaming."
         return ""
+
+    # ---- #5 THE THRESHOLD dossier (the FROM→THROUGH comparison + honesty line) --
+
+    def door_html(self, ident=None) -> str:
+        """The 'cheapest door' dossier: a FROM (current/best provider) row and a
+        THROUGH THE DOOR (cheaper provider) row with its -Z% price cut, a width-
+        scaled delta bar, the absolute $/Mtok gap, and — so the band NEVER
+        overstates — an HONESTY LINE ('cheaper but 14% slower') whenever the door
+        isn't the green (cheaper-AND-faster) case. `ident` is accepted to match
+        the other *_html signatures; the door is per-model, not per-row."""
+        d = self._door
+        if d is None:
+            return ""
+        accent = self.door_accent()
+        name = html.escape(self._display_model_name())
+        from_name = html.escape(d.from_name)
+        to_name = html.escape(d.cheaper_name)
+
+        def money(mtok):
+            return f"${mtok:.3f}/Mtok"
+
+        def lat(ms):
+            if ms is None:
+                return "—"
+            return f"{ms/1000:.1f}s" if ms >= 1000 else f"{ms:.0f} ms"
+
+        def tput(t):
+            return f"{t:.0f} t/s" if t is not None else "—"
+
+        # width-scaled delta bar: the saving as a proportion of the FROM price.
+        bar_n = max(2, min(24, int(round(d.save_pct / 100 * 24))))
+        bar = (f"<span style='background-color:{accent};color:{accent};'>"
+               f"{'&nbsp;' * bar_n}</span>")
+
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+        head = (f"&#9656; SAVE {d.save_pct}% + FASTER" if d.green
+                else f"&#9656; SAVE {d.save_pct}%")
+        out.append(
+            f"<div style='color:{accent};font-size:9pt;font-weight:bold;margin-bottom:2px;'>"
+            f"{head} &nbsp;·&nbsp; through {to_name}</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:8px;'>"
+                   "Cheapest priced provider vs the current best · live from "
+                   "openrouter.ai</div>")
+
+        def row(label, label_col, prov, mtok, ms, t, extra=""):
+            return (
+                f"<tr>"
+                f"<td style='padding:2px 12px 2px 0;color:{label_col};font-weight:bold;white-space:nowrap;'>{label}</td>"
+                f"<td style='padding:2px 10px 2px 0;color:#f0f0ff;white-space:nowrap;'>{prov}</td>"
+                f"<td style='padding:2px 10px 2px 0;color:#f0f0ff;font-weight:bold;white-space:nowrap;' align='right'>{money(mtok)}{extra}</td>"
+                f"<td style='padding:2px 10px 2px 0;color:#a0a0c8;white-space:nowrap;' align='right'>{lat(ms)}</td>"
+                f"<td style='padding:2px 0;color:#a0a0c8;white-space:nowrap;' align='right'>{tput(t)}</td>"
+                f"</tr>")
+
+        cut = (f" <span style='color:{accent};'>(-{d.save_pct}%)</span>")
+        out.append(
+            "<table cellspacing='0' style='border-spacing:0;margin-bottom:6px;'>"
+            + "<tr><td></td><td></td>"
+              "<td style='color:#64648c;font-size:8pt;' align='right'>$/Mtok</td>"
+              "<td style='color:#64648c;font-size:8pt;' align='right'>first&nbsp;token</td>"
+              "<td style='color:#64648c;font-size:8pt;' align='right'>stream</td></tr>"
+            + row("FROM", "#a0a0c8", from_name, d.from_mtok, d.from_latency, d.from_throughput)
+            + row("THROUGH THE DOOR", accent, to_name, d.to_mtok, d.to_latency,
+                  d.to_throughput, extra=cut)
+            + "</table>")
+
+        gap = d.from_mtok - d.to_mtok
+        out.append(
+            f"<div style='margin-bottom:6px;'>{bar}"
+            f"<span style='color:#c8c8e0;font-size:8.5pt;'>&nbsp;&nbsp;"
+            f"saves <b style='color:{accent};'>${gap:.3f}/Mtok</b> on input"
+            f"</span></div>")
+
+        # THE HONESTY LINE — the band never lies. Green ⇒ celebrate; otherwise
+        # state the trade-off (slower / unknown speed) plainly.
+        honesty = self._door_honesty(d)
+        out.append(
+            f"<div style='margin-top:6px;color:{accent if d.green else '#d0a060'};"
+            f"font-size:8.5pt;font-style:italic;'>{html.escape(honesty)}</div>")
+        out.append("<div style='margin-top:6px;color:#64648c;font-size:8pt;'>"
+                   "Door swings to the cheapest priced provider · turns emerald "
+                   "only when it is ALSO faster · refreshed with endpoints</div>")
+        return "".join(out)
+
+    def _door_honesty(self, d) -> str:
+        """The plain-English trade-off so the band never overstates."""
+        if d.green:
+            return f"The green door: {d.save_pct}% cheaper AND faster to stream."
+        ld = d.latency_delta_pct
+        # throughput trade-off (the green-door axis) takes precedence in wording
+        if (d.from_throughput is not None and d.to_throughput is not None
+                and d.to_throughput < d.from_throughput):
+            slower = round(100 * (d.from_throughput - d.to_throughput) / d.from_throughput) \
+                if d.from_throughput > 0 else None
+            if slower:
+                return f"Cheaper, but streams {slower}% slower."
+        if ld is not None and ld > 0:
+            return f"Cheaper, but {ld}% slower to first token."
+        if d.to_throughput is None and d.to_latency is None:
+            return "Cheaper — speed for this provider isn't reported yet."
+        return "Cheaper, with comparable speed."
 
     # ---- THE PULSE dossier (#3 — the painted 73h "Vitals" strip + verdict) ----
 
