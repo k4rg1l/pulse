@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QThread
 from config import (
     API_KEY, API_KEY_ENDPOINT, MODELS_ENDPOINT,
     MODELS_COUNT_ENDPOINT, STATUS_URL,
+    ANALYTICS_META_ENDPOINT, ANALYTICS_QUERY_ENDPOINT,
 )
 
 log = logging.getLogger("pulse.api")
@@ -637,6 +638,343 @@ def parse_benchmarks(da_rows: list, aa_rows: list) -> BenchmarkBoard:
     return BenchmarkBoard(entries)
 
 
+# ===========================================================================
+#  F3 — Analytics (ground-truth spend). The foundation the whole Spend zone
+#  rides. Keyed on the MANAGEMENT key (config.API_KEY/HEADERS carry only the
+#  regular user key); analytics is mgmt-key-gated. Pure parsers are module-
+#  level + unit-tested against the verbatim recon row.
+# ===========================================================================
+
+# The day/hour/week bucket key NAME is NOT stable across dimension sets:
+#   dims=[] or [model]      -> date__day / date__hour / date__week
+#   dims=[model, provider]  -> created_at__day / created_at__hour / ...
+# So NEVER hardcode date__day — detect the single key matching this regex.
+_BUCKET_KEY_RE = re.compile(r"^(date|created_at)__(minute|hour|day|week|month)$")
+
+
+def _as_float(v) -> float:
+    """Coerce an analytics metric to float. total_usage/usage_cache/
+    cache_hit_rate come back as JSON numbers, but be defensive — some metrics
+    arrive as JSON strings. None/'' -> 0.0."""
+    if v is None or v == "":
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _as_int(v) -> int:
+    """Coerce an analytics COUNT metric to int. request_count and ALL tokens_*
+    arrive as JSON STRINGS ("1","8685"); coerce via float() first so "1.0" and
+    1.0 both work. None/'' -> 0."""
+    if v is None or v == "":
+        return 0
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bucket_key(row: dict):
+    """Return the row's time-bucket key (date__day / created_at__hour / ...)
+    by regex, or None if absent. Detects the name so the parser works for both
+    dims=[model] (date__*) and dims=[model,provider] (created_at__*) shapes."""
+    for k in row:
+        if _BUCKET_KEY_RE.match(k):
+            return k
+    return None
+
+
+def parse_analytics_query(envelope: Optional[dict]) -> dict:
+    """Unwrap the analytics envelope into a plain dict:
+        {"rows": [...], "metadata": {...}, "cachedAt": <epoch ms|None>}
+    The envelope shape (confirmed live) is the OUTER {"data": {...}} already
+    unwrapped to its inner object: {"data":[rows], "metadata":{...},
+    "cachedAt":<ms>}. Tolerates a fully-wrapped envelope too. Never raises."""
+    if not isinstance(envelope, dict):
+        return {"rows": [], "metadata": {}, "cachedAt": None}
+    inner = envelope
+    # Tolerate being handed the raw HTTP json (one extra "data" wrap).
+    if "rows" not in inner and isinstance(inner.get("data"), dict) and \
+            isinstance(inner["data"].get("data"), list):
+        inner = inner["data"]
+    rows = inner.get("data")
+    if not isinstance(rows, list):
+        rows = inner.get("rows") if isinstance(inner.get("rows"), list) else []
+    meta = inner.get("metadata") if isinstance(inner.get("metadata"), dict) else {}
+    return {"rows": rows, "metadata": meta, "cachedAt": inner.get("cachedAt")}
+
+
+def _short_model(model_id: str) -> str:
+    """Strip the vendor/ prefix for a compact legend label
+    (anthropic/claude-4.6-sonnet-20260217 -> claude-4.6-sonnet-20260217)."""
+    if not model_id:
+        return ""
+    return model_id.split("/", 1)[1] if "/" in model_id else model_id
+
+
+@dataclass(frozen=True)
+class SpendModel:
+    """One model's roll-up across the range (#9 legend-spine row)."""
+    model_id: str
+    short_name: str
+    total_usage: float
+    request_count: int
+    share: float          # fraction 0..1 of the range total
+
+
+@dataclass(frozen=True)
+class SpendSpectrumData:
+    """#9 THE SPECTRUM payload: a per-bucket per-model spend matrix plus the
+    descending-spend model roll-up, the hero range total, and the spike bucket.
+
+    buckets: ordered list of bucket labels (the date__day / __hour strings).
+    matrix:  {model_id: [usage_per_bucket]} aligned to `buckets` (0 where absent).
+    models:  descending-spend SpendModel list (rank 0 == heaviest == bottom band).
+    """
+    buckets: tuple
+    matrix: dict
+    models: tuple                 # tuple[SpendModel], descending spend
+    total: float                  # hero range total ($)
+    granularity: str
+    spike_index: int              # index into buckets of the max-total bucket (-1 none)
+    spike_total: float
+    truncated: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        return self.total <= 0.0 or not self.models
+
+
+@dataclass(frozen=True)
+class SpendBoard:
+    """The single aggregate the analytics fetch returns; the dashboard
+    distributes it to the Spend widgets. #9 populates .spectrum NOW; the other
+    slots are reserved/empty for the later Spend features (#10/#12/#13/#14).
+    `start`/`end` are the range ISO strings; `range_label` is the human header."""
+    spectrum: SpendSpectrumData
+    start: str = ""
+    end: str = ""
+    range_label: str = "Last 7 Days"
+    # -- reserved for later Spend features (filled by #10/#12/#13/#14) --
+    receipts: tuple = ()
+    savings: Optional[object] = None
+    ghosts: Optional[object] = None
+    budget: Optional[object] = None
+
+
+def build_spend_spectrum(rows: list, granularity: str = "day",
+                         truncated: bool = False) -> SpendSpectrumData:
+    """Pure builder: the per-bucket per-model matrix + descending-spend model
+    roll-up + hero total + spike bucket. Honors the data quirks:
+      - bucket key detected via _bucket_key (date__day OR created_at__*)
+      - request_count/tokens via _as_int (STRINGS); total_usage via _as_float
+      - divide-by-zero guarded (share 0 when total==0)
+    """
+    rows = rows or []
+    # Collect ordered buckets + per-(model,bucket) usage + per-model totals.
+    bucket_order: list = []
+    seen_buckets = set()
+    per_model_usage: dict = defaultdict(float)
+    per_model_reqs: dict = defaultdict(int)
+    cell: dict = defaultdict(float)        # (model, bucket) -> usage
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        bk = _bucket_key(row)
+        bucket = row.get(bk) if bk else None
+        model = row.get("model") or ""
+        usage = _as_float(row.get("total_usage"))
+        reqs = _as_int(row.get("request_count"))
+        if bucket is not None and bucket not in seen_buckets:
+            seen_buckets.add(bucket)
+            bucket_order.append(bucket)
+        per_model_usage[model] += usage
+        per_model_reqs[model] += reqs
+        if bucket is not None:
+            cell[(model, bucket)] += usage
+
+    bucket_order.sort()  # chronological (ISO date/hour strings sort correctly)
+    total = sum(per_model_usage.values())
+
+    # Descending-spend model roll-up (heaviest first => rank 0 => bottom band).
+    ordered_models = sorted(
+        per_model_usage.keys(),
+        key=lambda m: (-per_model_usage[m], m),
+    )
+    models = tuple(
+        SpendModel(
+            model_id=m,
+            short_name=_short_model(m),
+            total_usage=per_model_usage[m],
+            request_count=per_model_reqs[m],
+            share=(per_model_usage[m] / total) if total > 0 else 0.0,
+        )
+        for m in ordered_models
+    )
+
+    matrix = {
+        m: [cell.get((m, b), 0.0) for b in bucket_order]
+        for m in ordered_models
+    }
+
+    # Spike = the bucket with the largest summed spend across all models.
+    spike_index = -1
+    spike_total = 0.0
+    if bucket_order:
+        bucket_totals = [
+            sum(matrix[m][i] for m in ordered_models)
+            for i in range(len(bucket_order))
+        ]
+        spike_index = max(range(len(bucket_totals)), key=lambda i: bucket_totals[i])
+        spike_total = bucket_totals[spike_index]
+
+    return SpendSpectrumData(
+        buckets=tuple(bucket_order),
+        matrix=matrix,
+        models=models,
+        total=total,
+        granularity=granularity,
+        spike_index=spike_index,
+        spike_total=spike_total,
+        truncated=bool(truncated),
+    )
+
+
+def build_spend_board(rows: list, granularity: str = "day", start: str = "",
+                      end: str = "", range_label: str = "Last 7 Days",
+                      truncated: bool = False) -> SpendBoard:
+    """Build the aggregate SpendBoard from QUERY A's rows. #9's .spectrum is
+    populated; later features' slots stay empty until they ride this same
+    cached envelope."""
+    spectrum = build_spend_spectrum(rows, granularity=granularity,
+                                    truncated=truncated)
+    return SpendBoard(spectrum=spectrum, start=start, end=end,
+                      range_label=range_label)
+
+
+class AnalyticsClient:
+    """Read-only client for the OpenRouter analytics API (ground-truth spend).
+
+    Mirrors APIClient's shape (a requests.Session + last_error) but carries a
+    SEPARATE session keyed on the MANAGEMENT key. When no management key is
+    present it is `unlocked=False` and every call returns None WITHOUT touching
+    the network (the LOCKED sentinel). It NEVER raises to the worker — any
+    failure sets last_error and returns None so the zone keeps last-good / shows
+    locked. The management key is used read-only and is NEVER logged/printed.
+
+    query() caches parsed envelopes by (frozenset(metrics), tuple(dims),
+    granularity, start, end) with the response's cachedAt as the TTL anchor, so
+    a same-key re-poll inside the window is free (the 15-min poll re-hits Query
+    A for free within TTL).
+    """
+
+    # TTL a touch under the 15-min poll so a re-poll of an unchanged key reuses
+    # the cached envelope instead of re-hitting the rate-limited endpoint.
+    CACHE_TTL_SECONDS = 14 * 60
+
+    def __init__(self):
+        import config
+        self.mgmt_key = config.MANAGEMENT_KEY
+        self.unlocked = bool(self.mgmt_key)
+        self.session = requests.Session()
+        # A SEPARATE session/headers from APIClient — do NOT reuse self.session
+        # elsewhere. Authorization carries the mgmt key.
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.mgmt_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": HEADERS["HTTP-Referer"],
+            "X-OpenRouter-Title": "Pulse",
+        })
+        self._cache: dict = {}
+        self.last_error: Optional[str] = None
+        self._meta = None  # lazy; optional granularity/dimension validation
+
+    def query(self, metrics: list, dimensions: list, granularity: str,
+              start: str, end: str) -> Optional[dict]:
+        """Cached analytics POST. Returns the PARSED envelope dict
+        ({"rows", "metadata", "cachedAt"}) or None (locked / failure). Never
+        raises."""
+        if not self.unlocked:
+            return None  # LOCKED sentinel — no network
+        key = (frozenset(metrics), tuple(dimensions), granularity, start, end)
+        hit = self._cache.get(key)
+        if hit is not None:
+            cached_at, parsed = hit
+            if (time.time() - cached_at) < self.CACHE_TTL_SECONDS:
+                return parsed
+        try:
+            body = {
+                "metrics": metrics,
+                "dimensions": dimensions,
+                "granularity": granularity,
+                # date_range:{start,end} — confirmed against /analytics/meta + a
+                # live 200 query.
+                "date_range": {"start": start, "end": end},
+            }
+            resp = self.session.post(ANALYTICS_QUERY_ENDPOINT, json=body, timeout=20)
+            resp.raise_for_status()
+            j = resp.json()
+            # Envelope: {"data": {"data":[rows], "metadata":{...}, "cachedAt":ms}}
+            inner = j.get("data", j) if isinstance(j, dict) else {}
+            parsed = parse_analytics_query(inner)
+            self._cache[key] = (time.time(), parsed)
+            self.last_error = None
+            return parsed
+        except requests.exceptions.HTTPError as e:
+            resp = e.response
+            code = resp.status_code if resp is not None else None
+            self.last_error = f"HTTP {code}" if code else "HTTP error"
+            # Log status only — never the key, never the (private) body content.
+            log.warning("analytics query: HTTP error status=%s", code)
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            log.warning("analytics query failed: %s", type(e).__name__)
+        return None
+
+    def get_spend_board(self) -> Optional[SpendBoard]:
+        """The ONE batched call the Spend zone shares. Issues QUERY A now: a
+        day-granularity dims=[model] query over the last 7d with the UNION
+        metric list, so #10/#12 can ride this SAME cached envelope later with no
+        new query. Returns a SpendBoard (with .spectrum populated) or None when
+        locked / on failure. Never raises."""
+        if not self.unlocked:
+            return None
+        try:
+            import datetime
+            end = datetime.datetime.now(datetime.timezone.utc)
+            start = end - datetime.timedelta(days=7)
+            # <=2-day ranges would use 'hour'; the standing zone is 7d -> 'day'.
+            span_days = (end - start).total_seconds() / 86400.0
+            granularity = "hour" if span_days <= 2 else "day"
+            union_metrics = [
+                "total_usage", "request_count", "tokens_total", "tokens_prompt",
+                "tokens_completion", "reasoning_tokens", "cached_tokens",
+                "usage_cache", "cache_hit_rate",
+            ]
+            start_iso = start.isoformat()
+            end_iso = end.isoformat()
+            parsed = self.query(union_metrics, ["model"], granularity,
+                                start_iso, end_iso)
+            if parsed is None:
+                return None
+            meta = parsed.get("metadata") or {}
+            board = build_spend_board(
+                parsed.get("rows") or [],
+                granularity=granularity,
+                start=start_iso,
+                end=end_iso,
+                range_label="Last 7 Days",
+                truncated=bool(meta.get("truncated")),
+            )
+            return board
+        except Exception:
+            log.exception("get_spend_board crashed")
+            return None
+
+
 class APIClient:
     """Synchronous API client for OpenRouter."""
 
@@ -825,6 +1163,7 @@ class APIWorker(QObject):
     trend_ready = Signal(object)            # TrendBoard | None  (no-auth, #7 THE TAPE)
     permaslug_resolver_ready = Signal(object)  # PermaslugResolver | None (no-auth)
     uptime_ready = Signal(str, object)      # (model_id, {ep_ident: UptimeHistory}) (no-auth, #3)
+    spend_ready = Signal(object)            # SpendBoard | None (mgmt-key analytics, Wave 2 F3/#9)
     logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
     error = Signal(str)
 
@@ -835,6 +1174,9 @@ class APIWorker(QObject):
         # thread; it carries its own session (no key, browser-ish UA).
         from frontend_client import FrontendClient
         self.frontend = FrontendClient()
+        # F3 analytics client (Wave 2): a SEPARATE mgmt-key session; read-only
+        # ground-truth spend. Returns None when no management key is set.
+        self.analytics = AnalyticsClient()
 
     @Slot()
     def fetch_key_info(self):
@@ -889,6 +1231,28 @@ class APIWorker(QObject):
         except Exception:
             log.exception("benchmarks worker crashed")
             self.benchmarks_ready.emit(None)
+
+    @Slot()
+    def fetch_spend(self):
+        """F3/#9: fetch the ground-truth Spend board via the mgmt-key analytics
+        API. Always emits (None on failure OR when locked) so the Spend zone
+        keeps last-good / shows its locked state, never crashes."""
+        try:
+            board = self.analytics.get_spend_board()
+            if board is not None:
+                sp = board.spectrum
+                spike = (sp.buckets[sp.spike_index]
+                         if 0 <= sp.spike_index < len(sp.buckets) else "n/a")
+                # INFO line so the live boot can confirm the board landed.
+                # Magnitudes only here (a $ total) — never the key.
+                log.info("spend board: %d models, $%.2f over %s, spike %s",
+                         len(sp.models), sp.total, board.range_label.lower(), spike)
+            else:
+                log.info("spend board: none (locked or no data)")
+            self.spend_ready.emit(board)
+        except Exception:
+            log.exception("spend worker crashed")
+            self.spend_ready.emit(None)
 
     @Slot()
     def fetch_provider_trust(self):

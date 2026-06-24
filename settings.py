@@ -72,6 +72,7 @@ class Settings:
     show_uptime: bool = True            # show THE PULSE — the 73h uptime cardiogram on provider rows
     show_hidden_fees: bool = True       # show #6 THE WATERLINE — the hidden-cost iceberg under each price
     show_drift: bool = True             # show #8 THE FAULT LINE — the price-drift seismograph on the card edge
+    show_spend: bool = True             # show the SPEND zone (Wave 2 #9 The Spectrum + ground-truth analytics)
 
     # -- UI overhaul (nav-rail command center) --
     default_source: str = "openrouter"  # which tab opens when the dashboard is shown

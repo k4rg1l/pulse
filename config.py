@@ -37,12 +37,45 @@ def _load_api_key() -> str:
 
 API_KEY = _load_api_key()
 
+
+def _load_management_key() -> str:
+    """The OpenRouter MANAGEMENT key (a broader-scope provisioning key) that
+    unlocks the read-only /api/v1/analytics endpoints (ground-truth spend).
+
+    Resolution order mirrors _load_api_key EXACTLY:
+      1. OPENROUTER_MANAGEMENT_KEY environment variable
+      2. management_api_key field in %APPDATA%/Pulse/settings.json (then the
+         legacy OpenRouterPulse dir, utf-8-sig to tolerate a BOM)
+      3. Empty (the Spend zone renders its tidy LOCKED state)
+    The key is used read-only (an analytics query) and is NEVER logged/printed.
+    """
+    env_key = os.environ.get("OPENROUTER_MANAGEMENT_KEY", "").strip()
+    if env_key:
+        return env_key
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+    for dirname in ("Pulse", "OpenRouterPulse"):
+        path = Path(appdata) / dirname / "settings.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                key = str(data.get("management_api_key", "")).strip()
+                if key:
+                    return key
+            except Exception:
+                pass
+    return ""
+
+
+MANAGEMENT_KEY = _load_management_key()
+
 # -- API Endpoints --
 BASE_URL = "https://openrouter.ai"
 API_KEY_ENDPOINT = f"{BASE_URL}/api/v1/key"
 MODELS_ENDPOINT = f"{BASE_URL}/api/v1/models"
 MODELS_COUNT_ENDPOINT = f"{BASE_URL}/api/v1/models/count"  # unused in MVP
 GENERATION_ENDPOINT = f"{BASE_URL}/api/v1/generation"
+ANALYTICS_META_ENDPOINT = f"{BASE_URL}/api/v1/analytics/meta"
+ANALYTICS_QUERY_ENDPOINT = f"{BASE_URL}/api/v1/analytics/query"
 STATUS_URL = "https://status.openrouter.ai"
 
 # -- Refresh Intervals (milliseconds, fallback when settings missing) --

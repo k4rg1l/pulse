@@ -62,6 +62,7 @@ class FetchTrigger(QObject):
     fetch_trend = Signal()          # rankings/models WoW momentum (slow, no-auth, #7)
     fetch_permaslug_resolver = Signal()  # catalog slug↔permaslug map (slow, no-auth)
     fetch_uptime = Signal(str, str)  # (model_id, permaslug) — per-endpoint 73h uptime (#3)
+    fetch_spend = Signal()          # ground-truth spend board (mgmt-key analytics, Wave 2 F3/#9)
     fetch_logo = Signal(str, str)   # (slug, url) — one provider logo, on demand
 
 
@@ -116,6 +117,7 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_trend.connect(self.api_worker.fetch_trend)
         self.trigger.fetch_permaslug_resolver.connect(self.api_worker.fetch_permaslug_resolver)
         self.trigger.fetch_uptime.connect(self.api_worker.fetch_uptime)
+        self.trigger.fetch_spend.connect(self.api_worker.fetch_spend)
         self.trigger.fetch_logo.connect(self.api_worker.fetch_logo)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
@@ -126,6 +128,7 @@ class OpenRouterPulse(QObject):
         self.api_worker.trend_ready.connect(self._on_trend)
         self.api_worker.permaslug_resolver_ready.connect(self._on_permaslug_resolver)
         self.api_worker.uptime_ready.connect(self._on_uptime)
+        self.api_worker.spend_ready.connect(self._on_spend)
         self.api_worker.logo_ready.connect(self._on_logo_ready)
         self.api_worker.error.connect(self._on_error)
 
@@ -248,6 +251,19 @@ class OpenRouterPulse(QObject):
             self.uptime_timer.timeout.connect(self._fetch_all_uptime)
             self.uptime_timer.start(20 * 60 * 1000)        # every 20 minutes
 
+        # Wave 2 SPEND zone (F3 / #9 The Spectrum): ground-truth spend via the
+        # mgmt-key analytics API. MODELS-class cadence — the endpoint is rate-
+        # limited and analytics is slow-moving, and AnalyticsClient caches each
+        # query for ~14 min, so a 15-min re-poll re-hits the cache for free.
+        # Locked (no management key) is handled gracefully by the worker
+        # (emits None) + the dashboard (set_locked). Opt-out via show_spend.
+        if getattr(self.settings, "show_spend", True):
+            QTimer.singleShot(1300, lambda: self.trigger.fetch_spend.emit())
+            self.spend_timer = QTimer(self)
+            self.spend_timer.timeout.connect(
+                lambda: self.trigger.fetch_spend.emit())
+            self.spend_timer.start(15 * 60 * 1000)        # every 15 minutes
+
         # -- Pluggable sources (Claude, …): peers to OpenRouter --
         self._setup_sources()
 
@@ -299,6 +315,10 @@ class OpenRouterPulse(QObject):
         self.dashboard.set_show_drift(getattr(self.settings, "show_drift", True))
         if getattr(self.settings, "show_uptime", True):
             self._fetch_all_uptime()
+        # Wave 2 SPEND zone: re-fetch the ground-truth spend board (the
+        # AnalyticsClient cache makes a within-TTL re-poll free).
+        if getattr(self.settings, "show_spend", True):
+            self.trigger.fetch_spend.emit()
         # Peer sources (Claude/GPU/System) too — a manual refresh should
         # refetch everything, not just OpenRouter. force_refresh() lets a
         # source (e.g. Claude) break its usage-endpoint backoff and retry now.
@@ -342,6 +362,10 @@ class OpenRouterPulse(QObject):
     @Slot(object)
     def _on_benchmarks(self, board):
         self.dashboard.update_benchmarks(board)
+
+    @Slot(object)
+    def _on_spend(self, board):
+        self.dashboard.update_spend(board)
 
     @Slot(object)
     def _on_provider_trust(self, book):

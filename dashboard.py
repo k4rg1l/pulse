@@ -33,7 +33,7 @@ from config import (
 from widgets import (
     ArcGauge, StatCard, SectionHeader, BurnRateBar, GradientStrip,
     ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
-    ModelPicker, ProviderPopup,
+    ModelPicker, ProviderPopup, SpendSpectrum,
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
@@ -414,36 +414,60 @@ class Dashboard(QWidget):
         else:
             self._autotopup_label.setVisible(False)
 
-    def _build_usage_section(self):
-        self._or_layout.addWidget(SectionHeader("Usage"))
+    def _build_spend_section(self):
+        """Wave 2 SPEND zone — ground-truth spend from the analytics API,
+        REPLACING the estimated Usage + Burn Rate sections. Hero is #9 The
+        Spectrum; later Spend features (#10-14) attach beneath it inside the
+        same container. A collapsible header (like Pinned Models) carries a live
+        one-line headline in its right_label ("$X · 7d" / "locked")."""
+        self._spend_header = SectionHeader("Spend")
+        self._spend_header.set_collapsible(True)
+        self._spend_header.clicked.connect(self._toggle_spend_collapsed)
+        self._spend_collapsed = False
+        self._or_layout.addWidget(self._spend_header)
 
-        self.timeline = TimelineChart(self)
-        topup_thr = self._settings.auto_topup_threshold if self._settings else 0.0
-        self.timeline.set_data([], [], topup_thr, "last 24h")
-        self._or_layout.addWidget(self.timeline)
+        # One container holds the whole zone (so the header can collapse it and
+        # later strips just addWidget below the Spectrum). spacing=10 per the IA.
+        self._spend_container = QWidget()
+        self._spend_container.setStyleSheet("background: transparent;")
+        spend_layout = QVBoxLayout(self._spend_container)
+        spend_layout.setContentsMargins(0, 0, 0, 0)
+        spend_layout.setSpacing(10)
 
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        self.kpi_today = StatCard("Today")
-        self.kpi_monthly = StatCard("Projected / mo")
-        grid.addWidget(self.kpi_today, 0, 0)
-        grid.addWidget(self.kpi_monthly, 0, 1)
-        self._or_layout.addLayout(grid)
+        self.spend_spectrum = SpendSpectrum(self)
+        self.spend_spectrum.band_clicked.connect(self._on_spend_band_clicked)
+        self.spend_spectrum.spike_clicked.connect(self._on_spend_spike_clicked)
+        spend_layout.addWidget(self.spend_spectrum)
 
-    def _build_burn_rate(self):
-        self._or_layout.addWidget(SectionHeader("Burn Rate"))
+        self._or_layout.addWidget(self._spend_container)
 
-        burn_card = CardFrame(self)
-        # 50px bar + symmetric 6/6 vertical padding = 62 (was 60, which squeezed
-        # the bar's bottom 'used/remaining' labels).
-        burn_card.setFixedHeight(62)
-        burn_layout = QVBoxLayout(burn_card)
-        burn_layout.setContentsMargins(14, 6, 14, 6)
+        # Keep-last-good store + initial state. On a keyless machine the worker
+        # emits None and update_spend paints the locked state; here the live
+        # fetch will replace it with real data.
+        self._spend_board = None
+        from api_client import AnalyticsClient
+        # Cheap unlocked probe (no network): decides locked vs awaiting-data.
+        try:
+            self._spend_unlocked = bool(AnalyticsClient().unlocked)
+        except Exception:
+            self._spend_unlocked = False
+        if not self._spend_unlocked:
+            self.spend_spectrum.set_locked()
+            self._spend_header.right_label.setText("locked")
 
-        self.burn_rate_bar = BurnRateBar(self)
-        burn_layout.addWidget(self.burn_rate_bar)
+    def _toggle_spend_collapsed(self):
+        self._spend_collapsed = not self._spend_collapsed
+        self._spend_header.set_collapsed(self._spend_collapsed)
+        self._spend_container.setVisible(not self._spend_collapsed)
 
-        self._or_layout.addWidget(burn_card)
+    def _on_spend_band_clicked(self, model_id, global_anchor):
+        # #10 receipt popup attaches here later. Wired now (no-op) so the signal
+        # is live before #10 ships.
+        log.debug("spend band clicked: %s", model_id)
+
+    def _on_spend_spike_clicked(self, t0_iso, t1_iso):
+        # #11 autopsy attaches here later. Wired now (no-op).
+        log.debug("spend spike clicked: %s..%s", t0_iso, t1_iso)
 
     def _build_pinned_models(self):
         self._pinned_header = SectionHeader("Pinned Models")
@@ -554,6 +578,38 @@ class Dashboard(QWidget):
         if board is not None:
             self._benchmark_board = board
         self._distribute_benchmarks()
+
+    # ---- Wave 2 SPEND zone (F3 / #9 The Spectrum) ----
+
+    def update_spend(self, board):
+        """Worker fetched the ground-truth Spend board (or None). Keep last-good
+        (the zone never blanks); fan out to the Spend widgets. Distinguishes
+        LOCKED (board None + no key + no last-good) from POPULATED-EMPTY ($0 in
+        range) — never fakes numbers in either."""
+        if getattr(self, "spend_spectrum", None) is None:
+            return  # section not built (show_spend disabled)
+        if board is not None:
+            self._spend_board = board
+
+        board = self._spend_board
+        if board is None:
+            # No data ever arrived. If no management key -> LOCKED; otherwise a
+            # transient failure on an unlocked key -> show the awaiting/empty
+            # chrome (still honest, no fake $).
+            if not getattr(self, "_spend_unlocked", False):
+                self.spend_spectrum.set_locked()
+                self._spend_header.right_label.setText("locked")
+            return
+
+        self.spend_spectrum.set_data(board.spectrum)
+        # Headline in the (collapsible) section header's right_label.
+        sp = board.spectrum
+        if sp.is_empty:
+            self._spend_header.right_label.setText("$0.00 · 7d")
+        else:
+            self._spend_header.right_label.setText(
+                f"${sp.total:,.2f} · 7d"
+            )
 
     def _distribute_benchmarks(self):
         board = self._benchmark_board
@@ -1185,8 +1241,13 @@ class Dashboard(QWidget):
         self.error_banner = ErrorBanner(self)
         self._or_layout.addWidget(self.error_banner)
         self._build_gauge_section()
-        self._build_usage_section()
-        self._build_burn_rate()
+        # Wave 2: the ground-truth SPEND zone (#9 The Spectrum + foundation F3)
+        # REPLACES the estimated Usage + Burn Rate sections. Order stays
+        # Balance → Spend → Models. The TimelineChart/BurnRateBar CLASSES are
+        # kept in widgets.py (the Spectrum echoes the gradient-area idiom); only
+        # these two SECTION builders are dropped.
+        if bool(getattr(self._settings, "show_spend", True)) if self._settings else True:
+            self._build_spend_section()
         self._build_pinned_models()
         self._build_quick_links()
         return group
@@ -1243,38 +1304,16 @@ class Dashboard(QWidget):
         if orp is not None:
             orp.set_meta(forecast if (forecast and forecast != "--") else "")
 
+        # The forecast tooltip still annotates the Credit Balance gauge (the
+        # gauge + its forecast subtitle stay). The estimated Usage timeline /
+        # KPI StatCards / Burn Rate bar were Wave-2-replaced by the ground-truth
+        # SPEND zone, so their feeders are intentionally gone — ground-truth
+        # spend is routed through update_spend(board), not here.
         tip = self._build_forecast_tooltip(
             key_info, rate_hourly, rate_daily, monthly_proj, rate_source
         )
         self.gauge.setToolTip(tip)
-        self.burn_rate_bar.setToolTip(tip)
         self._autotopup_label.setToolTip(tip)
-
-        if self._history is not None:
-            window_seconds = 24 * 3600
-            series = self._history.balance_series(window_seconds)
-            topups = self._history.topup_events(window_seconds)
-            topup_thr = self._settings.auto_topup_threshold if self._settings else 0.0
-            self.timeline.set_data(series, topups, topup_thr, "last 24h")
-
-        self.kpi_today.set_value(f"${key_info.usage_daily:.2f}", "spent today")
-        if monthly_proj is not None and monthly_proj > 0:
-            self.kpi_monthly.set_value(
-                _fmt_money(monthly_proj),
-                "based on recent burn",
-            )
-        else:
-            self.kpi_monthly.set_value(
-                _fmt_money(key_info.usage_monthly),
-                "this month so far",
-            )
-
-        pct_used = 1.0 - percent if remaining is not None and total > 0 else 0.0
-        if rate_hourly is not None and rate_hourly > 0:
-            rate_text = f"${rate_hourly:.3f}/hr · ${rate_daily:.2f}/day"
-        else:
-            rate_text = "Insufficient data"
-        self.burn_rate_bar.set_data(pct_used, forecast, rate_text)
 
     def _smart_forecast(self, key_info):
         """Returns (rate_hourly, rate_daily, monthly_proj, forecast_text, rate_source)."""

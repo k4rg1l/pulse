@@ -25,6 +25,7 @@ import base64
 
 from theme import Colors, Fonts
 import theme_controller
+import spend_palette
 
 log = logging.getLogger("pulse.widgets")
 _door_log = logging.getLogger("pulse.threshold")   # #5 door-resolution INFO line
@@ -4956,6 +4957,642 @@ class TimelineChart(QWidget):
             f"now ${vals[-1]:.2f}",
         )
         painter.end()
+
+
+# ---------------------------------------------------------------------------
+#  THE SPECTRUM (#9) — stacked gradient-area ground-truth spend ribbon
+# ---------------------------------------------------------------------------
+# The canonical Spend unlock copy (shared verbatim across all six set_locked
+# paths; each tailors only the trailing verb). A small painted padlock precedes
+# it. NEVER fake numbers when locked — TEXT_MUTED only.
+SPEND_UNLOCK_BASE = "Add a management key at openrouter.ai to unlock"
+
+
+def _paint_padlock(painter: QPainter, cx: float, cy: float, size: float,
+                   color: QColor):
+    """A tiny QPainter-drawn padlock (rounded-rect body + arc shackle),
+    centered at (cx, cy). Shared by the Spend zone's locked states."""
+    painter.save()
+    pen = QPen(color, max(1.0, size * 0.12))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    body_w = size * 0.78
+    body_h = size * 0.6
+    body = QRectF(cx - body_w / 2, cy - body_h / 2 + size * 0.16, body_w, body_h)
+    painter.drawRoundedRect(body, size * 0.12, size * 0.12)
+    # shackle: an upward arc sitting on top of the body
+    sh_w = body_w * 0.62
+    sh = QRectF(cx - sh_w / 2, body.top() - body_h * 0.62, sh_w, body_h * 0.9)
+    painter.drawArc(sh, 0, 180 * 16)
+    painter.restore()
+
+
+class SpendSpectrum(QWidget):
+    """THE SPECTRUM (#9): a hand-painted stacked gradient-area chart of daily
+    ground-truth spend — every model a colored band (time on X, model
+    composition stacked on Y) — anchored top-right by a count-up range TOTAL and
+    below by a per-model legend-spine. A spike day glows as a clickable column.
+
+    Echoes TimelineChart's gradient-area fill idiom + ArcGauge's single held
+    QPropertyAnimation count-up + the measure-then-paint geometry contract (one
+    _measure() feeds both paint and setFixedHeight so nothing clips). The reveal
+    is one-time, gated on a signature compare so 15-min polls don't re-animate.
+
+    Click entry points (signals wired now, consumed by #10/#11 later):
+      band_clicked(model_id, global_anchor)  -> #10 receipt popup
+      spike_clicked(t0_iso, t1_iso)           -> #11 autopsy
+    """
+
+    band_clicked = Signal(str, QPointF)
+    spike_clicked = Signal(str, str)
+
+    # -- geometry constants (the measure pass derives everything from these) --
+    PAD_X = 14
+    PAD_TOP = 26
+    PAD_BOTTOM = 18
+    CHART_H = 130
+    SWATCH = 10
+    BAND_TOP_STROKE = 1.4
+    MAX_LEGEND_ROWS = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data = None          # SpendSpectrumData | None
+        self._locked = False
+        self._signature = None     # cheap reveal-gate signature
+        self._reveal = 1.0         # 0..1 grow factor (animated once)
+        # Cached geometry from the measure pass (rebuilt in set_data/resize):
+        self._band_polys = []      # list[(model_id, QPolygonF)] bottom→top
+        self._legend_rects = []    # list[(model_id, QRectF)]
+        self._spike_rect = None    # QRectF | None (the clickable spike column)
+        self._legend_block_h = 0
+        self._hover_model = None
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+
+        # ONE held animation (ArcGauge idiom) — never per-frame alloc.
+        self._anim = QPropertyAnimation(self, b"reveal")
+        self._anim.setDuration(700)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._measure()  # establish an initial fixed height (locked-ish chrome)
+        theme_controller.changed.connect(self._on_theme_changed)
+
+    # -- the reveal Property (distinct name; not a QWidget builtin) --
+    def get_reveal(self):
+        return self._reveal
+
+    def set_reveal(self, v):
+        self._reveal = float(v)
+        self.update()
+
+    reveal = Property(float, get_reveal, set_reveal)
+
+    def _on_theme_changed(self):
+        # Accent may have changed -> re-resolve band colors + repaint.
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, data):
+        """data: a SpendSpectrumData (board.spectrum) or None.
+
+        None with no prior data => caller should use set_locked(); here we treat
+        None defensively as 'keep last good'."""
+        if data is None:
+            return
+        self._locked = False
+        self._data = data
+        sig = self._compute_signature(data)
+        first_or_changed = (sig != self._signature)
+        self._signature = sig
+        self._measure()
+        self._build_geometry()
+        # One-time reveal: animate only on first populated render or when the
+        # range/model-set signature changes (so a 15-min identical poll is
+        # silent). Honor the app-wide animations flag.
+        if first_or_changed and not data.is_empty:
+            self._start_reveal()
+        else:
+            self._reveal = 1.0
+        self.update()
+
+    def set_locked(self):
+        """No management key: paint full chrome + a faint ghost silhouette +
+        the padlock + unlock line + greyed legend placeholders. Zero fake $."""
+        self._locked = True
+        self._data = None
+        self._signature = None
+        self._reveal = 1.0
+        self._measure()
+        self._band_polys = []
+        self._legend_rects = []
+        self._spike_rect = None
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Reveal animation
+    # ------------------------------------------------------------------
+    def _start_reveal(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on:
+            self._reveal = 1.0
+            return
+        self._reveal = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    @staticmethod
+    def _compute_signature(data):
+        # Range + model set + per-model totals rounded — cheap and stable.
+        return (
+            data.granularity,
+            data.buckets,
+            tuple((m.model_id, round(m.total_usage, 4)) for m in data.models),
+        )
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint and setFixedHeight — no clipping)
+    # ------------------------------------------------------------------
+    def _legend_row_h(self) -> int:
+        return QFontMetrics(Fonts.body()).height() + 6
+
+    def _legend_rows_count(self) -> int:
+        if self._locked or self._data is None:
+            return 3  # greyed placeholder rows
+        n = len(self._data.models)
+        if n == 0:
+            return 1  # the "$0.00 / no spend" still leaves a tidy lane
+        if n > self.MAX_LEGEND_ROWS:
+            return self.MAX_LEGEND_ROWS + 1  # +1 for the "+N more" row
+        return n
+
+    def _measure(self):
+        f_hero = Fonts.mono_large()
+        f_tiny = Fonts.tiny()
+        header_h = QFontMetrics(f_hero).height() + QFontMetrics(f_tiny).height()
+        legend_row_h = self._legend_row_h()
+        self._legend_block_h = legend_row_h * self._legend_rows_count()
+        savings_strip_h = QFontMetrics(f_tiny).height() + 8  # RESERVED for #12
+        total_h = (self.PAD_TOP + header_h + 8 + self.CHART_H + 10
+                   + self._legend_block_h + savings_strip_h + self.PAD_BOTTOM)
+        self._header_h = header_h
+        self._legend_row_h_cached = legend_row_h
+        self._savings_strip_h = savings_strip_h
+        self.setFixedHeight(int(total_h))
+
+    # ------------------------------------------------------------------
+    #  Geometry build (cache band polygons + legend rects + spike rect)
+    #  Runs in set_data/resize — NOT the paint hot path.
+    # ------------------------------------------------------------------
+    def _chart_geom(self):
+        w = max(1, self.width())
+        chart_left = self.PAD_X
+        chart_w = w - 2 * self.PAD_X
+        chart_top = self.PAD_TOP + self._header_h + 8
+        chart_h = self.CHART_H
+        return chart_left, chart_top, chart_w, chart_h
+
+    def _build_geometry(self):
+        self._band_polys = []
+        self._legend_rects = []
+        self._spike_rect = None
+        data = self._data
+        if data is None or data.is_empty:
+            return
+        chart_left, chart_top, chart_w, chart_h = self._chart_geom()
+        n = len(data.buckets)
+        if n == 0:
+            return
+
+        # x of each bucket center; a single bucket becomes a fat centered column.
+        if n == 1:
+            xs = [chart_left + chart_w / 2.0]
+            col_w = chart_w * 0.55
+        else:
+            xs = [chart_left + chart_w * i / (n - 1) for i in range(n)]
+            col_w = chart_w / (n - 1)
+
+        chart_bottom = chart_top + chart_h
+        # Per-bucket stacked totals define the y-scale (peak == full chart_h).
+        bucket_totals = [
+            sum(data.matrix[m.model_id][i] for m in data.models)
+            for i in range(n)
+        ]
+        peak = max(bucket_totals) if bucket_totals else 0.0
+        if peak <= 0:
+            return
+        usable_h = chart_h - 4  # tiny headroom so the top band doesn't clip
+
+        def y_for(cum):
+            return chart_bottom - usable_h * (cum / peak)
+
+        # Build bands bottom→top (heaviest model first = rank 0 = floor band).
+        # Cumulative bottom edge per bucket, ascending the stack.
+        cum_bottom = [0.0] * n
+        for m in data.models:
+            row = data.matrix[m.model_id]
+            top_pts = []   # left→right across the cumulative TOP edge
+            bot_pts = []   # the cumulative BOTTOM edge (to walk back)
+            for i in range(n):
+                cb = cum_bottom[i]
+                ct = cb + row[i]
+                top_pts.append(QPointF(xs[i], y_for(ct)))
+                bot_pts.append(QPointF(xs[i], y_for(cb)))
+                cum_bottom[i] = ct
+            if n == 1:
+                # widen the single column into a real rectangle
+                hx = col_w / 2.0
+                poly = QPolygonF([
+                    QPointF(xs[0] - hx, top_pts[0].y()),
+                    QPointF(xs[0] + hx, top_pts[0].y()),
+                    QPointF(xs[0] + hx, bot_pts[0].y()),
+                    QPointF(xs[0] - hx, bot_pts[0].y()),
+                ])
+            else:
+                poly = QPolygonF(top_pts + list(reversed(bot_pts)))
+            self._band_polys.append((m.model_id, poly))
+
+        # Spike column rect (the clickable autopsy entry).
+        si = data.spike_index
+        if 0 <= si < n:
+            sx = xs[si]
+            half = col_w / 2.0
+            self._spike_rect = QRectF(sx - half, chart_top, max(8.0, col_w),
+                                      chart_h)
+
+        # Legend rows (top-aligned under the chart + 10px gap).
+        legend_top = chart_bottom + 10
+        row_h = self._legend_row_h_cached
+        w = max(1, self.width())
+        rows = min(len(data.models), self.MAX_LEGEND_ROWS)
+        for idx in range(rows):
+            r = QRectF(self.PAD_X, legend_top + idx * row_h,
+                       w - 2 * self.PAD_X, row_h)
+            self._legend_rects.append((data.models[idx].model_id, r))
+
+    def resizeEvent(self, event):
+        self._build_geometry()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint (allocation-light: strokes cached polygons + measured rects)
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w = self.width()
+        h = self.height()
+
+        # 1) ROUNDED BG (TimelineChart idiom)
+        bg = QPainterPath()
+        bg.addRoundedRect(QRectF(0, 0, w, h), 10, 10)
+        painter.fillPath(bg, QBrush(Colors.BG_CARD))
+        painter.setPen(QPen(Colors.BORDER, 1))
+        painter.drawPath(bg)
+
+        accent = theme_controller.accent()
+        chart_left, chart_top, chart_w, chart_h = self._chart_geom()
+        chart_bottom = chart_top + chart_h
+
+        # 2) HEADER ROW — left range label, right hero total + ground-truth tag
+        f_hero = Fonts.mono_large()
+        f_tiny = Fonts.tiny()
+        hero_h = QFontMetrics(f_hero).height()
+        painter.setPen(Colors.TEXT_SECONDARY)
+        painter.setFont(Fonts.label())
+        label = "SPEND"
+        if self._data is not None:
+            label = "SPEND · " + self._data_range_label().upper()
+        elif self._locked:
+            label = "SPEND · LAST 7 DAYS"
+        painter.drawText(QRectF(self.PAD_X, 4, chart_w, 18),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         label)
+
+        hero_top = self.PAD_TOP - 4
+        if self._locked:
+            # a small lock glyph where the hero $ would be (no "$0.00")
+            _paint_padlock(painter, w - self.PAD_X - 9, hero_top + hero_h / 2,
+                           16, Colors.TEXT_MUTED)
+        else:
+            total = self._data.total if self._data is not None else 0.0
+            shown = total * self._reveal
+            hero_text = f"${shown:,.2f}"
+            painter.setPen(Colors.TEXT_PRIMARY)
+            painter.setFont(f_hero)
+            hero_rect = QRectF(w / 2.0, hero_top, w / 2.0 - self.PAD_X, hero_h)
+            painter.drawText(hero_rect,
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             hero_text)
+            # "ground truth" tag beneath, right-aligned
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(f_tiny)
+            tag = "ground truth"
+            if self._data is not None and self._data.truncated:
+                tag = "ground truth · truncated"
+            tag_rect = QRectF(w / 2.0, hero_top + hero_h,
+                              w / 2.0 - self.PAD_X, QFontMetrics(f_tiny).height())
+            painter.drawText(tag_rect,
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, tag)
+            # 2px accent underline under the hero total
+            hw = QFontMetrics(f_hero).horizontalAdvance(hero_text)
+            ux1 = (w - self.PAD_X) - hw
+            uy = hero_top + hero_h - 1
+            painter.setPen(QPen(accent, 2))
+            painter.drawLine(int(ux1), int(uy), int(w - self.PAD_X), int(uy))
+
+        # 3) CHART BODY
+        if self._locked:
+            self._paint_locked_chart(painter, accent, chart_left, chart_top,
+                                     chart_w, chart_h)
+        elif self._data is None or self._data.is_empty:
+            self._paint_empty_chart(painter, chart_left, chart_top, chart_w, chart_h)
+        else:
+            self._paint_bands(painter, accent, chart_left, chart_top, chart_w,
+                              chart_h)
+
+        # 5) BASELINE + AXIS labels
+        painter.setPen(QPen(Colors.TEXT_MUTED, 1))
+        painter.drawLine(int(chart_left), int(chart_bottom),
+                         int(chart_left + chart_w), int(chart_bottom))
+        if self._data is not None and self._data.buckets:
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(f_tiny)
+            ax_y = chart_bottom + 2
+            painter.drawText(QRectF(chart_left, ax_y, 120, 12),
+                             Qt.AlignmentFlag.AlignLeft, self._data.buckets[0])
+            painter.drawText(QRectF(chart_left + chart_w - 120, ax_y, 120, 12),
+                             Qt.AlignmentFlag.AlignRight, self._data.buckets[-1])
+
+        # 6) LEGEND-SPINE
+        legend_top = chart_bottom + 10
+        if self._locked or self._data is None:
+            self._paint_locked_legend(painter, legend_top)
+        elif self._data.is_empty:
+            self._paint_empty_legend(painter, legend_top)
+        else:
+            self._paint_legend(painter, accent, legend_top)
+
+        # 7) RESERVED savings-strip lane — intentionally BLANK (it is #12's).
+        painter.end()
+
+    def _data_range_label(self):
+        # The widget receives only the spectrum; default to the standing label.
+        return "Last 7 Days"
+
+    def _paint_bands(self, painter, accent, cl, ct, cw, ch):
+        chart_bottom = ct + ch
+        data = self._data
+        # spike glow column behind the bands
+        if self._spike_rect is not None:
+            glow = QColor(accent)
+            glow.setAlpha(28)
+            painter.fillRect(self._spike_rect, glow)
+        # bands bottom→top; reveal scales each band height from the baseline
+        rv = self._reveal
+        for rank, (mid, poly) in enumerate(self._band_polys):
+            color = spend_palette.model_color(mid, rank)
+            draw_poly = poly
+            if rv < 1.0:
+                # scale toward baseline so bands "grow" on reveal
+                draw_poly = QPolygonF([
+                    QPointF(p.x(), chart_bottom - (chart_bottom - p.y()) * rv)
+                    for p in poly
+                ])
+            grad = QLinearGradient(0, ct, 0, chart_bottom)
+            c_top = QColor(color); c_top.setAlpha(110)
+            c_bot = QColor(color); c_bot.setAlpha(18)
+            grad.setColorAt(0, c_top)
+            grad.setColorAt(1, c_bot)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(grad))
+            painter.drawPolygon(draw_poly)
+            # crisp full-alpha top stroke (so thin ribbons stay visible)
+            stroke = QColor(color)
+            if self._hover_model is not None and self._hover_model != mid:
+                stroke.setAlpha(120)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(stroke, self.BAND_TOP_STROKE,
+                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                                Qt.PenJoinStyle.RoundJoin))
+            n = len(data.buckets)
+            top_n = n if n >= 1 else 0
+            if n == 1:
+                # the flat top edge of the single column
+                painter.drawLine(draw_poly[0], draw_poly[1])
+            else:
+                top_path = QPainterPath()
+                top_path.moveTo(draw_poly[0])
+                for i in range(1, top_n):
+                    top_path.lineTo(draw_poly[i])
+                painter.drawPath(top_path)
+        # spike caret + tiny $ label at the top of the spike column
+        if self._spike_rect is not None and rv >= 0.999:
+            si = data.spike_index
+            sx = self._spike_rect.center().x()
+            caret_y = ct - 2
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(accent))
+            caret = QPolygonF([
+                QPointF(sx - 4, caret_y - 5),
+                QPointF(sx + 4, caret_y - 5),
+                QPointF(sx, caret_y),
+            ])
+            painter.drawPolygon(caret)
+            painter.setPen(Colors.TEXT_SECONDARY)
+            painter.setFont(Fonts.tiny())
+            painter.drawText(QRectF(sx - 30, caret_y - 18, 60, 12),
+                             Qt.AlignmentFlag.AlignCenter,
+                             f"${data.spike_total:,.1f}")
+
+    def _paint_empty_chart(self, painter, cl, ct, cw, ch):
+        # flat baseline already drawn by caller; centered tidy message
+        painter.setPen(Colors.TEXT_MUTED)
+        painter.setFont(Fonts.body())
+        painter.drawText(QRectF(cl, ct, cw, ch),
+                         Qt.AlignmentFlag.AlignCenter, "No spend in this range")
+
+    def _paint_locked_chart(self, painter, accent, cl, ct, cw, ch):
+        chart_bottom = ct + ch
+        # faint ghosted stacked-spectrum silhouette (a teaser, NOT data):
+        # three greyed bands at ~12% alpha TEXT_MUTED.
+        ghost = QColor(Colors.TEXT_MUTED)
+        ghost.setAlpha(31)  # ~12%
+        fractions = [0.5, 0.78, 0.93]  # cumulative tops of 3 fake bands
+        prev = 0.0
+        n = 5
+        xs = [cl + cw * i / (n - 1) for i in range(n)]
+        # a gently wavy silhouette so it reads as "a chart could be here"
+        import math as _m
+        for bi, frac in enumerate(fractions):
+            top_pts, bot_pts = [], []
+            for i in range(n):
+                wob = 0.06 * _m.sin(i * 1.3 + bi)
+                ct_cum = min(1.0, frac + wob)
+                cb_cum = prev
+                top_pts.append(QPointF(xs[i], chart_bottom - (ch - 4) * ct_cum))
+                bot_pts.append(QPointF(xs[i], chart_bottom - (ch - 4) * cb_cum))
+            poly = QPolygonF(top_pts + list(reversed(bot_pts)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(ghost))
+            painter.drawPolygon(poly)
+            prev = frac
+        # centered padlock + unlock line
+        painter.setFont(Fonts.body())
+        msg = SPEND_UNLOCK_BASE + " ground-truth spend"
+        fm = QFontMetrics(Fonts.body())
+        msg_w = fm.horizontalAdvance(msg)
+        cx = cl + cw / 2.0
+        cy = ct + ch / 2.0
+        _paint_padlock(painter, cx - msg_w / 2.0 - 12, cy, 14, Colors.TEXT_MUTED)
+        painter.setPen(Colors.TEXT_MUTED)
+        painter.drawText(QRectF(cl, cy - fm.height() / 2.0, cw, fm.height()),
+                         Qt.AlignmentFlag.AlignCenter, msg)
+
+    def _paint_legend(self, painter, accent, legend_top):
+        data = self._data
+        row_h = self._legend_row_h_cached
+        w = self.width()
+        f_body = Fonts.body()
+        f_mono = Fonts.mono_small()
+        f_tiny = Fonts.tiny()
+        fm_body = QFontMetrics(f_body)
+        fm_mono = QFontMetrics(f_mono)
+        rows = min(len(data.models), self.MAX_LEGEND_ROWS)
+        for idx in range(rows):
+            m = data.models[idx]
+            y = legend_top + idx * row_h
+            mid_y = y + row_h / 2.0
+            # swatch
+            sw = self.SWATCH
+            sw_rect = QRectF(self.PAD_X, mid_y - sw / 2.0, sw, sw)
+            color = spend_palette.model_color(m.model_id, idx)
+            sw_path = QPainterPath()
+            sw_path.addRoundedRect(sw_rect, 3, 3)
+            painter.fillPath(sw_path, QBrush(color))
+            # right side: $ amount + (share%)
+            amt = f"${m.total_usage:,.2f}"
+            share = f"({m.share * 100:.0f}%)"
+            amt_w = fm_mono.horizontalAdvance(amt)
+            share_w = QFontMetrics(f_tiny).horizontalAdvance(share)
+            right = w - self.PAD_X
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(f_tiny)
+            painter.drawText(QRectF(right - share_w, y, share_w, row_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                             share)
+            amt_x = right - share_w - 6 - amt_w
+            painter.setPen(Colors.TEXT_PRIMARY)
+            painter.setFont(f_mono)
+            painter.drawText(QRectF(amt_x, y, amt_w, row_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                             amt)
+            # name (elided to the gap between swatch and the $ block)
+            name_x = self.PAD_X + sw + 6
+            name_avail = max(10, int(amt_x - 6 - name_x))
+            name = fm_body.elidedText(m.short_name, Qt.TextElideMode.ElideRight,
+                                      name_avail)
+            painter.setPen(Colors.TEXT_SECONDARY if idx > 0 else Colors.TEXT_PRIMARY)
+            painter.setFont(f_body)
+            painter.drawText(QRectF(name_x, y, name_avail, row_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             name)
+        # overflow "+N more"
+        if len(data.models) > self.MAX_LEGEND_ROWS:
+            extra = len(data.models) - self.MAX_LEGEND_ROWS
+            y = legend_top + self.MAX_LEGEND_ROWS * row_h
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(f_tiny)
+            painter.drawText(QRectF(self.PAD_X, y, w - 2 * self.PAD_X, row_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             f"+{extra} more")
+
+    def _paint_empty_legend(self, painter, legend_top):
+        # a single tidy row, real zero — NOT the locked placeholder
+        row_h = self._legend_row_h_cached
+        painter.setPen(Colors.TEXT_MUTED)
+        painter.setFont(Fonts.body())
+        painter.drawText(QRectF(self.PAD_X, legend_top, self.width() - 2 * self.PAD_X,
+                                row_h),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         "—")
+
+    def _paint_locked_legend(self, painter, legend_top):
+        row_h = self._legend_row_h_cached
+        w = self.width()
+        for idx in range(3):
+            y = legend_top + idx * row_h
+            mid_y = y + row_h / 2.0
+            sw = self.SWATCH
+            sw_rect = QRectF(self.PAD_X, mid_y - sw / 2.0, sw, sw)
+            ghost = QColor(Colors.TEXT_MUTED)
+            ghost.setAlpha(80)
+            painter.setPen(QPen(ghost, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(sw_rect, 3, 3)
+            painter.setPen(Colors.TEXT_MUTED)
+            painter.setFont(Fonts.mono_small())
+            painter.drawText(QRectF(w - self.PAD_X - 60, y, 60, row_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                             "— — —")
+
+    # ------------------------------------------------------------------
+    #  Interaction (click entry points for #10 / #11)
+    # ------------------------------------------------------------------
+    def mouseMoveEvent(self, event):
+        if self._locked or self._data is None:
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        hov = None
+        for mid, r in self._legend_rects:
+            if r.contains(pos):
+                hov = mid
+                break
+        if hov != self._hover_model:
+            self._hover_model = hov
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._locked or self._data is None or self._data.is_empty:
+            super().mousePressEvent(event)
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        gpos = event.globalPosition() if hasattr(event, "globalPosition") \
+            else QPointF(self.mapToGlobal(event.pos()))
+        # spike column first (the autopsy entry, #11)
+        if self._spike_rect is not None and self._spike_rect.contains(pos):
+            si = self._data.spike_index
+            if 0 <= si < len(self._data.buckets):
+                t0 = self._data.buckets[si]
+                t1 = (self._data.buckets[si + 1]
+                      if si + 1 < len(self._data.buckets) else t0)
+                self.spike_clicked.emit(t0, t1)
+                return
+        # legend row -> band_clicked (#10 receipt)
+        for mid, r in self._legend_rects:
+            if r.contains(pos):
+                self.band_clicked.emit(mid, gpos)
+                return
+        # a band polygon in the chart
+        for mid, poly in self._band_polys:
+            if poly.containsPoint(pos, Qt.FillRule.OddEvenFill):
+                self.band_clicked.emit(mid, gpos)
+                return
+        super().mousePressEvent(event)
 
 
 def _format_price_pair(prompt, completion):
