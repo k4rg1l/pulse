@@ -593,6 +593,8 @@ class APIWorker(QObject):
     endpoints_ready = Signal(str, object)   # (model_id, ModelEndpoints|None)
     benchmarks_ready = Signal(object)       # BenchmarkBoard | None
     provider_trust_ready = Signal(object)   # ProviderTrustBook | None  (no-auth)
+    speed_board_ready = Signal(object)      # SpeedBoard | None  (no-auth, #4)
+    permaslug_resolver_ready = Signal(object)  # PermaslugResolver | None (no-auth)
     logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
     error = Signal(str)
 
@@ -668,6 +670,29 @@ class APIWorker(QObject):
         except Exception:
             log.exception("provider trust worker crashed")
             self.provider_trust_ready.emit(None)
+
+    @Slot()
+    def fetch_speed_board(self):
+        """Fetch the no-auth rankings/performance fleet (Speed Percentile, #4).
+        Always emits (None on failure) so cards keep their last-good band."""
+        try:
+            board = self.frontend.get_speed_board()
+            self.speed_board_ready.emit(board)
+        except Exception:
+            log.exception("speed board worker crashed")
+            self.speed_board_ready.emit(None)
+
+    @Slot()
+    def fetch_permaslug_resolver(self):
+        """Fetch the no-auth catalog slug↔permaslug map. Needed to resolve a
+        pinned model's public slug to the versioned permaslug the speed (and,
+        later, uptime) datasets are keyed by. Always emits (None on failure)."""
+        try:
+            res = self.frontend.get_permaslug_resolver()
+            self.permaslug_resolver_ready.emit(res)
+        except Exception:
+            log.exception("permaslug resolver worker crashed")
+            self.permaslug_resolver_ready.emit(None)
 
     @Slot(str, str)
     def fetch_logo(self, slug: str, url: str):

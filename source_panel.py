@@ -79,7 +79,9 @@ class SourcePanel(QWidget):
             holder = QWidget()
             holder.setStyleSheet("background: transparent;")
             hv = QVBoxLayout(holder)
-            hv.setContentsMargins(20, 14, 20, 18)
+            # Match the non-scrollable wrap (16/16) so the first card sits the
+            # same distance below the header on every panel, and top==bottom.
+            hv.setContentsMargins(20, 16, 20, 16)
             hv.setSpacing(12)
             hv.addWidget(body)
             hv.addStretch()
@@ -105,7 +107,9 @@ class SourcePanel(QWidget):
         header.setFixedHeight(HEADER_H)
         header.setStyleSheet("background: transparent;")
         h = QHBoxLayout(header)
-        h.setContentsMargins(20, 0, 16, 0)
+        # Right inset matches the left (20) and the body content right edge so the
+        # refresh/close cluster doesn't overhang the card column.
+        h.setContentsMargins(20, 0, 20, 0)
         h.setSpacing(10)
 
         self._logo = QLabel(header)

@@ -198,6 +198,7 @@ class SettingsPanel(QWidget):
     def _toggle_row(self, label, on, on_change):
         w = QWidget()
         w.setStyleSheet("background: transparent;")
+        w.setMinimumHeight(28)        # uniform settings-row pitch (see _info_row)
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 2, 0, 2)
         lab = QLabel(label)
@@ -213,6 +214,7 @@ class SettingsPanel(QWidget):
     def _info_row(self, label, value):
         w = QWidget()
         w.setStyleSheet("background: transparent;")
+        w.setMinimumHeight(28)        # match _toggle_row so the list pitch is uniform
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 2, 0, 2)
         lab = QLabel(label)

@@ -4,7 +4,7 @@
 - **New agent?** Read THIS top-to-bottom first, then [AGENTS.md](AGENTS.md). That's the whole onboarding — you'll know the vision, the current state, and exactly what to build next.
 - **Outgoing agent?** Update this as your *last act*: Status, what you shipped, what's next, any new decision/gotcha. When something becomes a permanent rule, move it into AGENTS.md. Keep **THE VISION** section stable.
 
-**Last updated:** 2026-06-23 · **v0.8.0 RELEASED** (*The Arena* + logging; pushed/tagged/release w/ `Pulse.exe`). **Since v0.8.0, two unpushed commits on local `main`:** OpenRouter **Wave 1 #2 — "The Ledger"** (foundation **F2** + provider Trust Seals + Custody Dossier + real logos). Not pushed/released yet.
+**Last updated:** 2026-06-24 · **v0.8.0 RELEASED** (*The Arena* + logging; pushed/tagged/release w/ `Pulse.exe`). **Unpushed on local `main` since v0.8.0:** Wave 1 **#2 "The Ledger"** + **F2**, then **#4 "Speed Percentile"** (fleet-relative velocity band) + an **app-wide pixel-alignment pass**. **205 tests green.** Not pushed/released. **NEXT: the Orchestrator** (see [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)) finishes the OpenRouter roadmap on a branch, then deep-dives Claude.
 
 ---
 
@@ -33,42 +33,38 @@ Follow the roadmap. **Re-verify any endpoint live right before building it** —
 ## Status — where we are
 
 - **Released `v0.8.0`** (`origin/main`, tagged, GitHub release w/ binary): **The Arena** + **structured logging**.
-- **NEW since v0.8.0 (local `main`, NOT pushed):** OpenRouter **Wave 1 #2 — "The Ledger"** is shipped in two commits:
-  - **Foundation F2** (`frontend_client.py`): no-auth client for `openrouter.ai/api/frontend/*` + slug↔permaslug resolver + pure parsers (all-providers, performance, stats/endpoint, uptime-hourly), unit-tested against captured **public** fixtures in `tests/fixtures/`.
-  - **The Ledger** (roadmap #2): each provider row on the pinned board wears a painted **Trust Seal** — a shield with a **Custody Score** grade S→F we compute from the provider's data policy + jurisdiction (training on prompts hard-caps to F). Click a seal → a **Custody Dossier** popup (auditable rap sheet that sums to the score + jurisdiction trail + the provider's **real logo** via `logo_store.py`). The (i) popup gained a TRUST column. Opt-out: `show_trust_seals`.
-- **Green:** `python -m pytest -q` → **184 passed** (was 124; +60 across F2/Ledger/logos).
-- **Wave 1 remaining: #4 Speed Percentile (NEXT), then #3 73-Hour Uptime Ribbon.** F2's `SpeedBoard` + `PermaslugResolver` are already built + tested — #4 wires them in. See below.
-- Running `dist/Pulse.exe` is still the v0.8.0 build (rebuild for the new work).
+- **Unpushed on local `main` since v0.8.0:**
+  - **Foundation F2** (`frontend_client.py`): no-auth client for `openrouter.ai/api/frontend/*` + slug↔permaslug resolver + pure parsers, unit-tested against captured public fixtures.
+  - **#2 "The Ledger"** — per-provider **Trust Seals** (Custody Score S→F) + **Custody Dossier** popup + real logos. Opt-out `show_trust_seals`.
+  - **#4 "Speed Percentile"** — a fleet-relative **velocity band** on each pinned card: a lightning-bolt emblem + a clean percentile meter (gradient fill + glowing knob) + tier word ("BRISK · faster than 40%") + a click-through **Speed dossier** (STREAM SPEED vs FIRST TOKEN, both percentile bars, champion providers). Pure layer = `SpeedStanding` / `speed_tier` / `SpeedBoard.standing`. Opt-out `show_speed`.
+  - **App-wide pixel-alignment pass** — driven by a 9-agent audit. Bands + provider rows now share ONE left rail (`_icon_col_cx` / `_content_col_x`); uniform vertical rhythm (`BAND_GAP`/`ROWS_GAP`); BurnRateBar / ArcGauge / source cards / panels / settings all squared up. Locked by a `qapp` geometry test.
+- **Green:** `python -m pytest -q` → **205 passed**.
+- **Gotcha banked (see AGENTS.md + memory):** Pulse 401 / $0.00 ⇒ `config.API_KEY` resolved **empty** — env `OPENROUTER_API_KEY` first, then `settings.json`. A persistent User-scope `OPENROUTER_API_KEY` is now set on this machine so `pulse-rebuild` launches authed. **Also:** assistant tool reads can be an isolated FS snapshot ≠ the user's live machine — verify from the user's own shell.
+- Running `dist/Pulse.exe` is the new build. **The OpenRouter roadmap is NOT finished** — #3 (Uptime Ribbon), the rest of Wave 1/2/3, and the management-key/Analytics features remain. That's the Orchestrator's job (below).
 
 ---
 
-## ▶ THE NEXT BUILD — OpenRouter Wave 1 #4: Speed Percentile
+## ▶ THE NEXT BUILD — hand the wheel to the Orchestrator
 
-**This is queued for you. #2 (The Ledger) is DONE. Do NOT skip ahead to management-key/Analytics features — those come after Wave 1.**
+The next phase runs through an **Orchestrator agent** — full operating manual in **[docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)** (that file IS the prompt). It *manages*; it does not code. It spawns high-effort Opus 4.8 worker agents with detailed, self-contained specs and keeps its own context lean.
 
-**#4 — Speed Percentile.** Source: `/api/frontend/v1/rankings/performance` (no auth). Per pinned model: where its provider's p50 throughput/latency sits **against the whole fleet** ("faster than 82% of the field"), naming the single best-speed and best-price provider. *Wild seed:* a percentile **ribbon/dial**, not a number — match the bar set by The Arena + The Ledger seals.
+**Phase A — finish the OpenRouter roadmap on a branch.** Build every remaining roadmap feature ([docs/OPENROUTER-ROADMAP.md](docs/OPENROUTER-ROADMAP.md)) to the WILD bar, one validated commit each, on a dedicated branch (`openrouter-roadmap`). First item: **#3 73-Hour Uptime Ribbon**, then the rest of Waves 1–3 incl. the management-key Analytics tier. Leave the branch for review — **do NOT merge to main, do NOT release.**
 
-**Most of the data layer already exists (F2):**
-- `frontend_client.parse_performance` → `SpeedBoard` is built + tested. It exposes `lookup(permaslug)`, `throughput_percentile(permaslug)` and `latency_percentile(permaslug)` (fraction of the field you beat), and each `SpeedRanking` carries `best_throughput_provider`/`_price` + `best_latency_provider`/`_price`.
-- `SpeedBoard` is keyed by **permaslug**, so you must resolve the pinned model's public slug → permaslug. `frontend_client.PermaslugResolver` (`parse_catalog_permaslugs`) is built + tested but **not yet wired** — #4 needs to fetch `catalog/models` once and distribute the resolver, OR resolve via it.
+**Phase B — Claude deep-dive.** Back to `main` → new branch → reverse-engineer Claude's local data + APIs as thoroughly as OpenRouter (grow [docs/CLAUDE-LOCAL-DATA.md](docs/CLAUDE-LOCAL-DATA.md) into a full `docs/CLAUDE-RESEARCH.md` + a curated wild-feature `docs/CLAUDE-ROADMAP.md`), then orchestrate building those.
 
-**What #4 needs to build (mirror the #2 wiring exactly — it's the template):**
-1. Wire two no-auth fetches through `APIWorker` (slot+signal) + `main.py` (slow timer) + `dashboard` (distribute to cards): the **SpeedBoard** (`FrontendClient.get_speed_board`) and the **PermaslugResolver** (`FrontendClient.get_permaslug_resolver`). Gate behind a `show_speed_*` setting.
-2. A pure mapping in the card: pinned `model_id` → permaslug (resolver) → `SpeedBoard` percentile + best providers.
-3. The **wild render** in `widgets.PinnedModelCard` (font-metric-driven) — a percentile ribbon/dial in the model header area (near the crest), + the best-speed/best-price provider call-out. Consider folding it into the crest/header row or the (i) popup.
-4. Deterministic `qapp` test measuring the rendered percentile + a live check.
+### The build flow for each enrichment (non-negotiable — every worker follows this)
+pure parser unit-tested against a captured sample → render (font-metric-driven; reuse `widgets.py` patterns) → **deterministic validation** (a `qapp` test that measures the result) + a careful live check → **/security-review (Sonnet over `git diff --staged`)** → commit. One enrichment, one commit. **The user does the visual QA — keep it fast + precise; never screenshot-click.**
 
-### Then: #3 — 73-Hour Uptime Ribbon (LAST in Wave 1)
-Source: `/api/frontend/v1/stats/endpoint?permaslug=…&variant=standard` → endpoint UUIDs (`parse_endpoint_refs`, built) → `stats/uptime-hourly?id=<UUID>` → `parse_uptime_hourly` → 73 chronological `{date, uptime}` points (built + tested). *Wild seed:* replace the single uptime number with a **GitHub-style 73-cell hourly heat-strip** per provider. **Heads-up:** this is N× requests (1 stats/endpoint + one uptime-hourly per provider per model) — poll sparingly + cache.
+### #3 — 73-Hour Uptime Ribbon (first roadmap item for the Orchestrator)
+Source: `/api/frontend/v1/stats/endpoint?permaslug=…&variant=standard` → endpoint UUIDs (`parse_endpoint_refs`, built) → `stats/uptime-hourly?id=<UUID>` → `parse_uptime_hourly` → 73 chronological `{date, uptime}` points (built + tested). *Wild seed:* a **GitHub-style 73-cell hourly heat-strip** per provider, not a number. **Heads-up:** N× requests (1 stats/endpoint + 1 uptime-hourly per provider per model) — poll sparingly + cache hard.
 
-### The build flow for each enrichment (non-negotiable)
-pure parser unit-tested against a captured sample → render (font-metric-driven; reuse `widgets.py` patterns) → **deterministic validation** (a `qapp` test that measures the result) + a careful live check → `/security-review` → commit. One enrichment, one commit. **The user does the QA/visual validation — keep it fast and precise; don't screenshot-click.**
-
-### Lessons banked from #2 (read these)
-- **Re-verify endpoints live first** — `stats/*` 404 on the public slug; they need the versioned permaslug (the whole reason F2's resolver exists).
-- **The frontend API bot-blocks the default `python-requests` UA** (connection reset, not 403). `FrontendClient` overrides the UA directly — `requests.Session.headers.setdefault` does NOT work (the session ships a UA already). A deterministic test (`test_frontend_client_overrides_default_user_agent`) locks this; don't regress it. **This bug is invisible to parser tests — only a live boot caught it.**
-- **Logos render in the popup only** (a judge panel + the 14px row both rejected logo-on-row as mush). The board hero is the painted seal.
-- **The single-instance mutex bites dev loops:** a leaked `python main.py` zombie holds `Global\Pulse_SingleInstance_v1`, and every later boot silently exits "already running" (only logs "logging started"). If a boot logs nothing, kill stray `python.exe …main.py` first (see AGENTS.md "Safe restart").
+### Lessons banked (read these; pass them to every worker)
+- **Re-verify endpoints live first** — the frontend API drifts; `stats/*` 404 on the public slug (need the versioned permaslug). Tools: `tools/or_probe_frontend.py`; captures land in gitignored `tools/_probe_out/`.
+- **The frontend API bot-blocks the default `python-requests` UA** (connection reset, not 403). `FrontendClient` overrides the UA directly — `setdefault` does NOT work. Locked by `test_frontend_client_overrides_default_user_agent`. Invisible to parser tests — only a live boot caught it.
+- **Bands share the provider-row left rail** — crest/speed emblems use `PinnedModelCard._icon_col_cx()`; their text + provider names use `_content_col_x()`; vertical rhythm via `BAND_GAP`/`ROWS_GAP`. New bands MUST use the same rail (locked by `test_crest_and_speed_bands_share_columns`).
+- **Logos render in the popup only** (a judge panel + the 14px row both rejected logo-on-row as mush). The board hero is the painted emblem/seal.
+- **Single-instance mutex bites dev loops** — a leaked instance holds `Global\Pulse_SingleInstance_v1`; later boots silently exit "already running". `pulse-rebuild` clean-kills first; if a boot logs nothing, kill stray `python …main.py` / `Pulse.exe`.
+- **401 / $0.00 ⇒ an *empty* API key**, not an invalid one. `config.py` reads env `OPENROUTER_API_KEY` first, then `settings.json`. Verify from the *launch* shell: `python -c "import config;print(len(config.API_KEY))"` (0 = no key). A persistent User-scope env var is set on this machine. **And: assistant tool file/log reads can be an isolated FS snapshot ≠ the user's live machine — confirm from the user's own shell.**
 
 ---
 

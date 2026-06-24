@@ -58,6 +58,8 @@ class FetchTrigger(QObject):
     fetch_models = Signal()         # full catalog for the picker
     fetch_benchmarks = Signal()     # Arena standings (slow cadence)
     fetch_provider_trust = Signal() # provider privacy/trust posture (slow, no-auth)
+    fetch_speed_board = Signal()    # rankings/performance fleet (slow, no-auth, #4)
+    fetch_permaslug_resolver = Signal()  # catalog slug↔permaslug map (slow, no-auth)
     fetch_logo = Signal(str, str)   # (slug, url) — one provider logo, on demand
 
 
@@ -108,12 +110,16 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_models.connect(self.api_worker.fetch_models)
         self.trigger.fetch_benchmarks.connect(self.api_worker.fetch_benchmarks)
         self.trigger.fetch_provider_trust.connect(self.api_worker.fetch_provider_trust)
+        self.trigger.fetch_speed_board.connect(self.api_worker.fetch_speed_board)
+        self.trigger.fetch_permaslug_resolver.connect(self.api_worker.fetch_permaslug_resolver)
         self.trigger.fetch_logo.connect(self.api_worker.fetch_logo)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
         self.api_worker.models_ready.connect(self._on_models)
         self.api_worker.benchmarks_ready.connect(self._on_benchmarks)
         self.api_worker.provider_trust_ready.connect(self._on_provider_trust)
+        self.api_worker.speed_board_ready.connect(self._on_speed_board)
+        self.api_worker.permaslug_resolver_ready.connect(self._on_permaslug_resolver)
         self.api_worker.logo_ready.connect(self._on_logo_ready)
         self.api_worker.error.connect(self._on_error)
 
@@ -173,6 +179,21 @@ class OpenRouterPulse(QObject):
                 lambda: self.trigger.fetch_provider_trust.emit())
             self.trust_timer.start(12 * 3600 * 1000)   # every 12 hours
 
+        # Speed Percentile (#4): no-auth fleet performance + the slug→permaslug
+        # map it's keyed by. The resolver barely moves (refresh slow); the
+        # performance fleet drifts faster (refresh every 20 min). Opt-out setting.
+        if getattr(self.settings, "show_speed", True):
+            QTimer.singleShot(1500, lambda: self.trigger.fetch_permaslug_resolver.emit())
+            QTimer.singleShot(1700, lambda: self.trigger.fetch_speed_board.emit())
+            self.resolver_timer = QTimer(self)
+            self.resolver_timer.timeout.connect(
+                lambda: self.trigger.fetch_permaslug_resolver.emit())
+            self.resolver_timer.start(12 * 3600 * 1000)   # every 12 hours
+            self.speed_timer = QTimer(self)
+            self.speed_timer.timeout.connect(
+                lambda: self.trigger.fetch_speed_board.emit())
+            self.speed_timer.start(20 * 60 * 1000)        # every 20 minutes
+
         # -- Pluggable sources (Claude, …): peers to OpenRouter --
         self._setup_sources()
 
@@ -204,6 +225,9 @@ class OpenRouterPulse(QObject):
             self.trigger.fetch_benchmarks.emit()
         if getattr(self.settings, "show_trust_seals", True):
             self.trigger.fetch_provider_trust.emit()
+        if getattr(self.settings, "show_speed", True):
+            self.trigger.fetch_permaslug_resolver.emit()
+            self.trigger.fetch_speed_board.emit()
         # Peer sources (Claude/GPU/System) too — a manual refresh should
         # refetch everything, not just OpenRouter. force_refresh() lets a
         # source (e.g. Claude) break its usage-endpoint backoff and retry now.
@@ -240,6 +264,16 @@ class OpenRouterPulse(QObject):
     def _on_provider_trust(self, book):
         log.debug("provider trust: %s providers", len(book) if book else 0)
         self.dashboard.update_provider_trust(book)
+
+    @Slot(object)
+    def _on_speed_board(self, board):
+        log.debug("speed board: %s ranked models", len(board) if board else 0)
+        self.dashboard.update_speed_board(board)
+
+    @Slot(object)
+    def _on_permaslug_resolver(self, resolver):
+        log.debug("permaslug resolver: %s entries", len(resolver) if resolver else 0)
+        self.dashboard.update_permaslug_resolver(resolver)
 
     @Slot(str, object, bool)
     def _on_logo_ready(self, slug, data, is_svg):

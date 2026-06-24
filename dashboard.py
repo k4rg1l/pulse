@@ -171,6 +171,10 @@ class Dashboard(QWidget):
         self._benchmark_board = None
         # The Ledger (per-provider privacy/trust posture), distributed to cards
         self._provider_trust_book = None
+        # Speed Percentile (#4): the fleet performance board + the slug→permaslug
+        # map needed to look a pinned model up in it. Both distributed to cards.
+        self._speed_board = None
+        self._permaslug_resolver = None
         # Provider logos (#2b): the shared cache + the open-dossier context so a
         # logo that arrives after the dossier opens can refresh it in place.
         self._logo_store = None
@@ -407,7 +411,9 @@ class Dashboard(QWidget):
         self._or_layout.addWidget(SectionHeader("Burn Rate"))
 
         burn_card = CardFrame(self)
-        burn_card.setFixedHeight(60)
+        # 50px bar + symmetric 6/6 vertical padding = 62 (was 60, which squeezed
+        # the bar's bottom 'used/remaining' labels).
+        burn_card.setFixedHeight(62)
         burn_layout = QVBoxLayout(burn_card)
         burn_layout.setContentsMargins(14, 6, 14, 6)
 
@@ -482,6 +488,7 @@ class Dashboard(QWidget):
                 card.info_clicked.connect(self._on_info_clicked)
                 card.arena_clicked.connect(self._on_arena_clicked)
                 card.trust_clicked.connect(self._on_trust_clicked)
+                card.speed_clicked.connect(self._on_speed_clicked)
                 if self._logo_store is not None:
                     card.set_logo_store(self._logo_store)
                 self._pinned_cards[mid] = card
@@ -506,6 +513,7 @@ class Dashboard(QWidget):
         )
         self._distribute_benchmarks()
         self._distribute_provider_trust()
+        self._distribute_speed()
 
     def update_benchmarks(self, board):
         """Worker fetched the Arena board (or None). Hand each pinned card its
@@ -536,6 +544,34 @@ class Dashboard(QWidget):
         for card in self._pinned_cards.values():
             card.set_provider_trust(book)
         self._prewarm_logos()
+
+    # ---- Speed Percentile (#4) ----
+
+    def update_speed_board(self, board):
+        """Worker fetched the performance fleet (or None). Cards keep their
+        last-good speed band if board is None."""
+        if board is not None:
+            self._speed_board = board
+        self._distribute_speed()
+
+    def update_permaslug_resolver(self, resolver):
+        """Worker fetched the slug↔permaslug map (or None)."""
+        if resolver is not None:
+            self._permaslug_resolver = resolver
+        self._distribute_speed()
+
+    def _distribute_speed(self):
+        """Resolve each pinned model's public slug → permaslug, look it up in the
+        fleet, and hand the card a render-ready SpeedStanding (or None). Needs
+        BOTH the board and the resolver before it can place anything."""
+        board = self._speed_board
+        resolver = self._permaslug_resolver
+        if board is None or resolver is None:
+            return
+        for mid, card in self._pinned_cards.items():
+            perma = resolver.permaslug(mid)
+            standing = board.standing(perma) if perma else None
+            card.set_speed(standing)
 
     # ---- Provider logos (#2b) ----
 
@@ -732,6 +768,32 @@ class Dashboard(QWidget):
         popup.set_accent(card.arena_accent())
         popup.show_beside(
             card.arena_html(),
+            self._dashboard_global_rect(),
+            int(global_anchor.y()),
+        )
+        self._popup_model_id = key
+
+    def _on_speed_clicked(self, model_id, global_anchor):
+        """The Speed band was clicked -> show the model's Velocity dossier."""
+        card = self._pinned_cards.get(model_id)
+        if card is None or not card.has_speed():
+            return
+        popup = self._ensure_provider_popup()
+        key = "speed:" + model_id
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        popup.set_accent(card.speed_accent())
+        popup.show_beside(
+            card.speed_html(),
             self._dashboard_global_rect(),
             int(global_anchor.y()),
         )

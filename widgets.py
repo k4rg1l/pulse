@@ -131,23 +131,27 @@ class ArcGauge(QWidget):
         painter.setPen(fg_pen)
         painter.drawArc(rect, start_angle, value_span)
 
-        # Center text - amount
+        # Center readout — amount / total / (optional) subtitle, stacked and
+        # vertically centered on the arc center via font metrics, so the block
+        # stays put whether or not the subtitle is present (no magic offsets).
+        amount_f, total_f, sub_f = Fonts.mono_large(), Fonts.mono_small(), Fonts.tiny()
+        amount_h = QFontMetrics(amount_f).height()
+        total_h = QFontMetrics(total_f).height()
+        sub_h = QFontMetrics(sub_f).height() if self._subtitle_text else 0
+        top = cy - (amount_h + total_h + sub_h) / 2
+
         painter.setPen(Colors.TEXT_PRIMARY)
-        painter.setFont(Fonts.mono_large())
-        painter.drawText(QRectF(0, cy - 36, w, 40),
+        painter.setFont(amount_f)
+        painter.drawText(QRectF(0, top, w, amount_h),
                          Qt.AlignmentFlag.AlignCenter, self._amount_text)
-
-        # Total text
         painter.setPen(Colors.TEXT_MUTED)
-        painter.setFont(Fonts.mono_small())
-        painter.drawText(QRectF(0, cy + 4, w, 20),
+        painter.setFont(total_f)
+        painter.drawText(QRectF(0, top + amount_h, w, total_h),
                          Qt.AlignmentFlag.AlignCenter, self._total_text)
-
-        # Subtitle
         if self._subtitle_text:
             painter.setPen(Colors.TEXT_SECONDARY)
-            painter.setFont(Fonts.tiny())
-            painter.drawText(QRectF(0, cy + 24, w, 18),
+            painter.setFont(sub_f)
+            painter.drawText(QRectF(0, top + amount_h + total_h, w, sub_h),
                              Qt.AlignmentFlag.AlignCenter, self._subtitle_text)
 
         # Percentage badge at bottom of arc
@@ -493,7 +497,10 @@ class BurnRateBar(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         w = self.width()
-        pad = 4
+        # No internal horizontal pad: the only inset is the burn card's 14px
+        # layout margin, so the bar/text share the same left/right column as the
+        # KPI cards and the timeline above/below it.
+        pad = 0
 
         # Rate text
         painter.setPen(Colors.TEXT_SECONDARY)
@@ -830,7 +837,15 @@ class PinnedModelCard(QWidget):
 
     ROW_H = 22
     HEADER_H = 28
-    CREST_H = 30        # the Arena rank-crest band (only when benchmark data)
+    CREST_H = 28        # the Arena rank-crest band pill (only when benchmark data)
+    SPEED_H = 28        # the Speed Percentile band pill (only when speed data)
+    # Uniform vertical rhythm. The header content already sits ~BAND_GAP above the
+    # first band (its centered slack), bands are BAND_GAP apart, and ROWS_GAP — a
+    # touch smaller, to offset the first provider row's own top slack — sits below
+    # the last band. Net: visually equal gaps header↔band↔band↔rows.
+    BAND_GAP = 6
+    ROWS_GAP = 3
+    CHEV_GAP = 7        # gap from a band's trailing value to its right chevron
     PAD_X = 14
     PAD_Y = 8
     ICON_VISIBLE = 16   # rendered glyph
@@ -840,6 +855,7 @@ class PinnedModelCard(QWidget):
     info_clicked = Signal(str, QPointF)    # (model_id, global anchor pos)
     arena_clicked = Signal(str, QPointF)   # crest band clicked -> Fighter Card
     trust_clicked = Signal(str, str, QPointF)  # (model_id, provider_ident, anchor)
+    speed_clicked = Signal(str, QPointF)   # speed band clicked -> Time Slip dossier
 
     def __init__(self, model_id, parent=None):
         super().__init__(parent)
@@ -859,8 +875,22 @@ class PinnedModelCard(QWidget):
         self._seal_hits = []             # [(QRectF, ident, accent_hex)] per row
         self._seal_hover_ident = None
         self._logo_store = None          # shared LogoStore (#2b), or None
+        # Speed Percentile (#4) — the fleet-relative velocity band ("Time Slip")
+        self._speed = None               # SpeedStanding or None
+        self._speed_hit_rect = QRectF()
+        self._speed_hover = False
+        self._speed_elite = False        # top-decile throughput → heat-haze shimmer
+        # Render introspection (set during paint) — measured by deterministic tests
+        self._speed_lane_rect = QRectF()
+        self._speed_marker_x = 0.0       # comet head x (throughput percentile)
+        self._speed_reaction_x = None    # latency reaction-tick x, or None
+        self._crest_emblem_cx = 0.0      # Arena hexagon center x
+        self._crest_content_x = 0.0      # Arena text column x
+        self._speed_emblem_cx = 0.0      # speed bolt center x
+        # Shimmer phase is shared by the Arena crest sweep AND the elite speed
+        # comet; the one timer runs whenever EITHER band wants it.
         self._shimmer = 0.0
-        self._shimmer_on = False
+        self._arena_elite = False
         self._shimmer_timer = QTimer(self)
         self._shimmer_timer.setInterval(55)
         self._shimmer_timer.timeout.connect(self._advance_shimmer)
@@ -871,8 +901,28 @@ class PinnedModelCard(QWidget):
     def _update_height(self):
         rows = len(self._endpoints.endpoints) if self._endpoints else 1
         crest = self.CREST_H if self._benchmark is not None else 0
-        h = self.HEADER_H + crest + max(1, rows) * self.ROW_H + self.PAD_Y * 2
+        speed = self.SPEED_H if self._speed is not None else 0
+        has_band = self._benchmark is not None or self._speed is not None
+        both = self._benchmark is not None and self._speed is not None
+        inter = self.BAND_GAP if both else 0       # gap between the two bands
+        below = self.ROWS_GAP if has_band else 0    # gap before the provider rows
+        h = (self.HEADER_H + crest + inter + speed + below
+             + max(1, rows) * self.ROW_H + self.PAD_Y * 2)
         self.setFixedHeight(h)
+
+    # ---- Shimmer (shared by the Arena crest + the elite speed comet) ----
+
+    def _wants_shimmer(self) -> bool:
+        return self._arena_elite or self._speed_elite
+
+    def _sync_shimmer(self):
+        """Run the one shared shimmer timer iff some band wants it AND we're
+        visible; stop it otherwise. Cheap no-op when state is unchanged."""
+        if self._wants_shimmer() and self.isVisible():
+            if not self._shimmer_timer.isActive():
+                self._shimmer_timer.start()
+        elif not self._wants_shimmer():
+            self._shimmer_timer.stop()
 
     # ---- Arena (benchmark standings) ----
 
@@ -880,17 +930,46 @@ class PinnedModelCard(QWidget):
         """entry: BenchmarkEntry or None. Adds/removes the crest band."""
         had = self._benchmark is not None
         self._benchmark = entry
-        self._shimmer_on = bool(entry is not None and entry.is_elite)
-        if self._shimmer_on and self.isVisible():
-            self._shimmer_timer.start()
-        elif not self._shimmer_on:
-            self._shimmer_timer.stop()
+        self._arena_elite = bool(entry is not None and entry.is_elite)
+        self._sync_shimmer()
         if (entry is not None) != had:
             self._update_height()
         self.update()
 
     def has_benchmark(self) -> bool:
         return self._benchmark is not None
+
+    # ---- Speed Percentile (#4 — the "Time Slip" velocity band) ----
+
+    def set_speed(self, standing):
+        """standing: a frontend_client.SpeedStanding or None. None removes the
+        velocity band (model not in the ranked field). The dashboard preserves
+        the last-good *board* on a failed refresh, so a transient fetch error
+        doesn't blank the band."""
+        had = self._speed is not None
+        self._speed = standing
+        self._speed_elite = bool(standing is not None and standing.is_elite)
+        self._sync_shimmer()
+        if (standing is not None) != had:
+            self._update_height()
+        self.update()
+
+    def has_speed(self) -> bool:
+        return self._speed is not None
+
+    def speed_accent(self) -> str:
+        return _safe_color(self._speed.tier[1], "#00d2ff") if self._speed else "#00d2ff"
+
+    # ---- Shared left rail ----
+    # The crest + speed band emblems sit in the SAME column as each provider
+    # row's trust seal, and the band text starts at the SAME x as the provider
+    # names — so emblems/seals and band-text/names line up vertically down the
+    # whole card. One source of truth for all three.
+    def _icon_col_cx(self) -> float:
+        return self.PAD_X + self.SEAL_W / 2.0      # seal / band-emblem center x
+
+    def _content_col_x(self) -> float:
+        return self.PAD_X + self.SEAL_W + 3         # provider-name / band-text left x
 
     # ---- The Ledger (per-provider trust seals) ----
 
@@ -957,8 +1036,7 @@ class PinnedModelCard(QWidget):
         return self._display_model_name()
 
     def showEvent(self, event):
-        if self._shimmer_on:
-            self._shimmer_timer.start()
+        self._sync_shimmer()
         super().showEvent(event)
 
     def hideEvent(self, event):
@@ -1220,6 +1298,7 @@ class PinnedModelCard(QWidget):
         pos = event.position()
         icon_hover = self._icon_hit_rect.contains(pos)
         crest_hover = self._benchmark is not None and self._crest_hit_rect.contains(pos)
+        speed_hover = self._speed is not None and self._speed_hit_rect.contains(pos)
         _, seal_ident = self._seal_at(pos)
         changed = False
         if icon_hover != self._icon_hover:
@@ -1228,20 +1307,25 @@ class PinnedModelCard(QWidget):
         if crest_hover != self._crest_hover:
             self._crest_hover = crest_hover
             changed = True
+        if speed_hover != self._speed_hover:
+            self._speed_hover = speed_hover
+            changed = True
         if seal_ident != self._seal_hover_ident:
             self._seal_hover_ident = seal_ident
             changed = True
         if changed:
-            if icon_hover or crest_hover or seal_ident is not None:
+            if icon_hover or crest_hover or speed_hover or seal_ident is not None:
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             else:
                 self.unsetCursor()
             self.update()
 
     def leaveEvent(self, event):
-        if self._icon_hover or self._crest_hover or self._seal_hover_ident is not None:
+        if (self._icon_hover or self._crest_hover or self._speed_hover
+                or self._seal_hover_ident is not None):
             self._icon_hover = False
             self._crest_hover = False
+            self._speed_hover = False
             self._seal_hover_ident = None
             self.unsetCursor()
             self.update()
@@ -1257,6 +1341,9 @@ class PinnedModelCard(QWidget):
         elif self._benchmark is not None and self._crest_hit_rect.contains(pos):
             global_pos = self.mapToGlobal(self._crest_hit_rect.center().toPoint())
             self.arena_clicked.emit(self.model_id, QPointF(global_pos))
+        elif self._speed is not None and self._speed_hit_rect.contains(pos):
+            global_pos = self.mapToGlobal(self._speed_hit_rect.center().toPoint())
+            self.speed_clicked.emit(self.model_id, QPointF(global_pos))
         elif seal_ident is not None:
             global_pos = self.mapToGlobal(seal_rect.center().toPoint())
             self.trust_clicked.emit(self.model_id, seal_ident, QPointF(global_pos))
@@ -1311,23 +1398,21 @@ class PinnedModelCard(QWidget):
         name_max_w = max(40, int(chip_left - GAP_NAME_TO_CHIP - self.PAD_X))
         elided_name = name_fm.elidedText(name, Qt.TextElideMode.ElideRight, name_max_w)
 
+        # Shared baseline for the name and the ★ chip so the two different-size
+        # fonts sit on ONE line (AlignVCenter would center each line-box and
+        # leave the smaller chip riding ~2px high). Baseline is centered on the
+        # header band using the dominant (name) font's metrics.
+        baseline = self.PAD_Y + (self.HEADER_H + name_fm.ascent() - name_fm.descent()) / 2.0
+
         painter.setPen(Colors.TEXT_PRIMARY)
         painter.setFont(Fonts.subheading())
-        painter.drawText(
-            QRectF(self.PAD_X, self.PAD_Y, name_max_w, self.HEADER_H),
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            elided_name,
-        )
+        painter.drawText(QPointF(self.PAD_X, baseline), elided_name)
 
-        # Chip (only if we have a best provider)
+        # Chip (only if we have a best provider) — same baseline as the name
         if chip_text:
             painter.setPen(Colors.CYAN)
             painter.setFont(chip_font)
-            painter.drawText(
-                QRectF(chip_left, self.PAD_Y, chip_w, self.HEADER_H),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                chip_text,
-            )
+            painter.drawText(QPointF(float(chip_left), baseline), chip_text)
 
         # Info icon (cyan halo on hover)
         if self._icon_hover:
@@ -1348,14 +1433,31 @@ class PinnedModelCard(QWidget):
             "ⓘ",
         )
 
+        # Bands stack below the header with a uniform vertical rhythm. The header
+        # content already sits ~BAND_GAP above the first band (its centered slack),
+        # so we add NO gap there; the two bands are BAND_GAP apart; ROWS_GAP sits
+        # before the provider rows. Net: visually equal gaps down the card.
         y = self.PAD_Y + self.HEADER_H
+        drew_band = False
 
-        # Arena rank-crest band (between header and provider rows)
         if self._benchmark is not None:
             self._paint_crest(painter, y)
             y += self.CREST_H
+            drew_band = True
         else:
             self._crest_hit_rect = QRectF()
+
+        if self._speed is not None:
+            if drew_band:
+                y += self.BAND_GAP
+            self._paint_speed(painter, y)
+            y += self.SPEED_H
+            drew_band = True
+        else:
+            self._speed_hit_rect = QRectF()
+
+        if drew_band:
+            y += self.ROWS_GAP
 
         if self._error:
             painter.setPen(Colors.RED)
@@ -1401,7 +1503,7 @@ class PinnedModelCard(QWidget):
         lat_right = up_right - UPTIME_W - GAP
         # Leave the left slot for the per-provider Trust Seal (or the ★ marker
         # when no trust data is available).
-        name_x = self.PAD_X + self.SEAL_W + 3
+        name_x = self._content_col_x()
         name_max_w = lat_right - LATENCY_W - 8 - name_x
 
         self._seal_hits = []
@@ -1431,12 +1533,14 @@ class PinnedModelCard(QWidget):
                     (QRectF(self.PAD_X - 2, y, self.SEAL_W + 4, self.ROW_H),
                      self._ep_ident(ep), grade.color))
             elif is_best:
-                # No trust data — fall back to the classic ★ best marker.
+                # No trust data — fall back to the classic ★ best marker,
+                # centered in the SAME seal column (cx = PAD_X + SEAL_W/2) so the
+                # marker doesn't shift when a row has a shield vs the ★ fallback.
                 painter.setPen(Colors.CYAN)
                 painter.setFont(Fonts.body())
                 painter.drawText(
-                    QRectF(self.PAD_X, y, 12, self.ROW_H),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    QRectF(self.PAD_X, y, self.SEAL_W, self.ROW_H),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
                     "★",
                 )
 
@@ -1485,8 +1589,8 @@ class PinnedModelCard(QWidget):
         e = self._benchmark
         tier_name, tier_hex = e.tier
         tier = QColor(tier_hex)
-        band = QRectF(self.PAD_X - 2, y + 1,
-                      self.width() - 2 * (self.PAD_X - 2), self.CREST_H - 3)
+        band = QRectF(self.PAD_X - 2, y,
+                      self.width() - 2 * (self.PAD_X - 2), self.CREST_H)
         self._crest_hit_rect = band
 
         painter.save()
@@ -1501,14 +1605,18 @@ class PinnedModelCard(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(bpath)
 
-        # 16 (not 20): the elite glow rings extend past the hexagon, so a 20px
-        # emblem's glow touched the band's top/bottom border. 16 + glow clears it.
-        EMB = 16
-        erect = QRectF(band.left() + 10, band.center().y() - EMB / 2, EMB, EMB)
+        # Emblem sits in the SAME slot as each provider row's trust seal, and the
+        # text starts at the provider-name column — so the band lines up with the
+        # rows below it (see _icon_col_cx / _content_col_x).
+        EMB = float(self.SEAL_W)
+        icon_cx = self._icon_col_cx()
+        erect = QRectF(icon_cx - EMB / 2, band.center().y() - EMB / 2, EMB, EMB)
+        self._crest_emblem_cx = icon_cx
         self._paint_emblem(painter, erect, tier, e.is_elite)
 
         # TIER  ·  #rank CATEGORY  ............  ELO  ›
-        tx = erect.right() + 9
+        tx = self._content_col_x()
+        self._crest_content_x = tx
         tf = Fonts.tiny()
         tf.setBold(True)
         painter.setFont(tf)
@@ -1551,8 +1659,175 @@ class PinnedModelCard(QWidget):
             elo_txt = str(e.peak_elo)
             elo_w = efm.horizontalAdvance(elo_txt) + 2
             painter.setPen(tier)
-            painter.drawText(QRectF(chev_x - 7 - elo_w, band.top(), elo_w, band.height()),
+            painter.drawText(QRectF(chev_x - self.CHEV_GAP - elo_w, band.top(), elo_w, band.height()),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, elo_txt)
+        painter.restore()
+
+    # ---- Speed Percentile rendering (the "Time Slip" drag-strip band) ----
+
+    def _paint_speed(self, painter, y):
+        """A clean fleet-speed meter: a lightning-bolt emblem, then a dim rounded
+        track with a cyan gradient fill whose LENGTH is the throughput percentile
+        (vs the whole ranked field), capped by a glowing knob. The tier word +
+        'faster than NN%' read out the value; a chevron opens the full two-axis
+        Speed dossier. Fixed-px / font-metric-driven so it never clips; dominant
+        color is brand cyan so it never fights the Arena tiers above it."""
+        st = self._speed
+        band = QRectF(self.PAD_X - 2, y,
+                      self.width() - 2 * (self.PAD_X - 2), self.SPEED_H)
+        self._speed_hit_rect = band
+        cy = band.center().y()
+        ACCENT = QColor(0, 210, 255)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Band backing (same idiom as the crest band, but brand cyan).
+        bg = QColor(ACCENT); bg.setAlpha(34 if self._speed_hover else 18)
+        bpath = QPainterPath(); bpath.addRoundedRect(band, 8, 8)
+        painter.fillPath(bpath, QBrush(bg))
+        bd = QColor(ACCENT); bd.setAlpha(105 if self._speed_hover else 45)
+        painter.setPen(QPen(bd, 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(bpath)
+
+        tp = st.throughput_pct if st.throughput_pct is not None else 0.0
+
+        # --- Right text zone: [TIER] · faster than NN%  + chevron ---
+        tier_name, tier_hex = st.tier
+        tier_col = QColor(_safe_color(tier_hex, "#00d2ff"))
+        f = Fonts.tiny(); f.setBold(True)
+        fm = QFontMetrics(f)
+        pct = round(tp * 100)
+        head_full = f"faster than {pct}%"
+        sep = " · "
+        chev_w = 12
+        chev_x = band.right() - 8 - chev_w
+
+        def text_total(show_tier):
+            tw = (fm.horizontalAdvance(tier_name) + fm.horizontalAdvance(sep)) if show_tier else 0
+            return tw + fm.horizontalAdvance(head_full)
+
+        # Lane starts on the SAME content column as the crest text + provider names.
+        startX = self._content_col_x()
+        MIN_LANE = 44
+        show_tier = True
+        text_left = chev_x - self.CHEV_GAP - text_total(show_tier)
+        if text_left - 8 - startX < MIN_LANE:          # not enough lane → drop tier word
+            show_tier = False
+            text_left = chev_x - self.CHEV_GAP - text_total(show_tier)
+        head_text, elided = head_full, False
+        if text_left - 8 - startX < MIN_LANE:          # still tight → elide headline
+            lane_end = startX + MIN_LANE
+            avail = max(0, int(chev_x - self.CHEV_GAP - (lane_end + 8)))
+            head_text = fm.elidedText(head_full, Qt.TextElideMode.ElideRight, avail)
+            text_left = chev_x - self.CHEV_GAP - fm.horizontalAdvance(head_text)
+            elided = True
+        lane_end = max(startX + 1, text_left - 8)
+        lane_len = lane_end - startX
+        self._speed_lane_rect = QRectF(startX, cy - 3, lane_len, 6)
+
+        # --- speed emblem: a clean lightning bolt in the left slot. Centered on
+        #     the SAME column as the crest's hexagon emblem (band.left()+18) so the
+        #     two bands' emblems line up vertically. ---
+        self._speed_emblem_cx = self._icon_col_cx()
+        self._paint_speed_bolt(painter, self._speed_emblem_cx, cy, float(self.SEAL_W), ACCENT)
+
+        # --- the meter: dim rounded track + cyan gradient fill whose length is
+        #     the throughput percentile, capped by a glowing knob ---
+        self._speed_reaction_x = None          # latency lives in the dossier, not the band
+        TRACK_H = 5.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        track = QPainterPath()
+        track.addRoundedRect(QRectF(startX, cy - TRACK_H / 2, lane_len, TRACK_H),
+                             TRACK_H / 2, TRACK_H / 2)
+        painter.fillPath(track, QBrush(QColor(40, 40, 62)))
+
+        fill_end = startX + tp * lane_len
+        self._speed_marker_x = fill_end
+        if fill_end > startX + 0.5:
+            fillpath = QPainterPath()
+            fillpath.addRoundedRect(QRectF(startX, cy - TRACK_H / 2,
+                                           fill_end - startX, TRACK_H),
+                                    TRACK_H / 2, TRACK_H / 2)
+            grad = QLinearGradient(startX, cy, fill_end, cy)
+            grad.setColorAt(0.0, QColor(0, 146, 196))
+            grad.setColorAt(1.0, QColor(124, 236, 255))
+            painter.fillPath(fillpath, QBrush(grad))
+
+        # glowing knob at the fill head (the throughput read)
+        painter.setBrush(QBrush(QColor(0, 210, 255, 70)))
+        painter.drawEllipse(QPointF(fill_end, cy), 6.5, 6.5)
+        painter.setBrush(QBrush(Colors.BG_CARD))
+        painter.drawEllipse(QPointF(fill_end, cy), 4.6, 4.6)
+        painter.setBrush(QBrush(QColor(214, 248, 255)))
+        painter.drawEllipse(QPointF(fill_end, cy), 3.4, 3.4)
+        if self._speed_elite:
+            # WARP tier: a tiny heat-haze sparkle riding the knob
+            off = math.sin(self._shimmer * 2 * math.pi) * 1.4
+            painter.setBrush(QBrush(QColor(255, 255, 255, 160)))
+            painter.drawEllipse(QPointF(fill_end + off, cy - off), 1.2, 1.2)
+
+        # --- right text zone ---
+        painter.setFont(f)
+        tx = text_left
+        if elided:
+            painter.setPen(Colors.TEXT_PRIMARY)
+            painter.drawText(QRectF(tx, band.top(), chev_x - tx, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             head_text)
+        else:
+            if show_tier:
+                painter.setPen(tier_col)
+                tw = fm.horizontalAdvance(tier_name)
+                painter.drawText(QRectF(tx, band.top(), tw + 2, band.height()),
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                                 tier_name)
+                tx += tw
+                painter.setPen(QColor(96, 96, 130))
+                sw = fm.horizontalAdvance(sep)
+                painter.drawText(QRectF(tx, band.top(), sw + 2, band.height()),
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                                 sep)
+                tx += sw
+            pre = "faster than "
+            painter.setPen(Colors.TEXT_SECONDARY)
+            pw = fm.horizontalAdvance(pre)
+            painter.drawText(QRectF(tx, band.top(), pw + 2, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, pre)
+            tx += pw
+            pctt = f"{pct}%"
+            painter.setPen(ACCENT)
+            painter.drawText(QRectF(tx, band.top(), fm.horizontalAdvance(pctt) + 4, band.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, pctt)
+
+        # --- chevron (click affordance) ---
+        painter.setFont(Fonts.body())
+        painter.setPen(ACCENT if self._speed_hover else QColor(120, 120, 150))
+        painter.drawText(QRectF(chev_x, band.top() - 1, chev_w, band.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter, "›")
+        painter.restore()
+
+    def _paint_speed_bolt(self, painter, cx, cy, h, color):
+        """A crisp lightning bolt — the speed emblem in the velocity band's left
+        slot. Pure path, fixed-size, so it never clips or reads as anything but
+        'speed'."""
+        w = h * 0.52
+        left, top = cx - w / 2.0, cy - h / 2.0
+        pts = [(0.60, 0.00), (0.08, 0.56), (0.44, 0.56),
+               (0.30, 1.00), (0.92, 0.40), (0.56, 0.40)]
+        p = QPainterPath()
+        for i, (fx, fy) in enumerate(pts):
+            pt = QPointF(left + fx * w, top + fy * h)
+            p.moveTo(pt) if i == 0 else p.lineTo(pt)
+        p.closeSubpath()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        grad = QLinearGradient(left, top, left, top + h)
+        grad.setColorAt(0.0, QColor(color).lighter(140))
+        grad.setColorAt(1.0, QColor(color).darker(115))
+        painter.setPen(QPen(QColor(color).lighter(150), 0.8))
+        painter.setBrush(QBrush(grad))
+        painter.drawPath(p)
         painter.restore()
 
     def _paint_emblem(self, painter, rect, color, elite):
@@ -1756,6 +2031,106 @@ class PinnedModelCard(QWidget):
             f"<th align='right' style='padding:2px 0 4px 12px;'>WIN</th></tr>"
             f"{''.join(rows)}</table>")
         return "".join(out)
+
+    # ---- The Time Slip (speed dossier popup) ----
+
+    def speed_html(self) -> str:
+        """The 'Time Slip' dossier: both speed axes laid out with ELO-style bars,
+        the per-axis champion provider + its price, and a plain-English verdict
+        when the two axes diverge — so the band's comet-vs-tick gap is auditable."""
+        st = self._speed
+        if st is None:
+            return ""
+        r = st.ranking
+        tier_name, tier_hex = st.tier
+        tcol = _safe_color(tier_hex)
+        name = html.escape(self._display_model_name())
+        fs = st.field_size or 0
+
+        def pctn(p):
+            return f"{round(p * 100)}" if p is not None else "—"
+
+        def bar(p, color):
+            n = 2 + int(20 * (p if p is not None else 0))
+            return (f"<span style='background-color:{color};color:{color};'>"
+                    f"{'&nbsp;' * n}</span>")
+
+        def money(v):
+            return f"${v:g}/M" if v is not None else ""
+
+        def rank_cell(rank):
+            return f"#{rank}/{fs}" if rank else "—"
+
+        out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
+        out.append(
+            f"<div style='color:{tcol};font-size:9pt;font-weight:bold;margin-bottom:2px;'>"
+            f"&#9656; {html.escape(tier_name)} &nbsp;·&nbsp; faster than "
+            f"{pctn(st.throughput_pct)}% of the field</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:8px;'>"
+                   f"Speed percentile · {fs}-model field · live from openrouter.ai</div>")
+
+        tps = f"{r.p50_throughput:.0f} t/s" if r.p50_throughput is not None else "—"
+        if r.p50_latency is None:
+            lat = "—"
+        elif r.p50_latency >= 1000:
+            lat = f"{r.p50_latency / 1000:.1f}s"
+        else:
+            lat = f"{r.p50_latency:.0f} ms"
+
+        def gauge_row(label, value, p, rank, color):
+            return (
+                f"<tr>"
+                f"<td style='padding:2px 12px 2px 0;color:#a0a0c8;white-space:nowrap;'>{label}</td>"
+                f"<td style='padding:2px 10px 2px 0;color:#f0f0ff;font-weight:bold;white-space:nowrap;' align='right'>{value}</td>"
+                f"<td style='padding:2px 8px;'>{bar(p, color)}</td>"
+                f"<td style='padding:2px 0 2px 8px;color:{color};font-weight:bold;white-space:nowrap;' align='right'>{pctn(p)}th</td>"
+                f"<td style='padding:2px 0 2px 10px;color:#64648c;white-space:nowrap;' align='right'>{rank_cell(rank)}</td>"
+                f"</tr>")
+
+        out.append(
+            "<table cellspacing='0' style='border-spacing:0;margin-bottom:8px;'>"
+            + gauge_row("STREAM SPEED", tps, st.throughput_pct, st.throughput_rank, "#5bd2ff")
+            + gauge_row("FIRST TOKEN", lat, st.latency_pct, st.latency_rank, "#ffc700")
+            + "</table>")
+
+        champs = []
+        if r.best_throughput_provider:
+            champs.append(
+                f"<div style='color:#c8c8e0;font-size:9pt;'>"
+                f"<span style='color:#5bd2ff;'>&#9650; Fastest stream:</span> "
+                f"{html.escape(str(r.best_throughput_provider))} "
+                f"<span style='color:#64648c;'>{money(r.best_throughput_price)}</span></div>")
+        if r.best_latency_provider:
+            champs.append(
+                f"<div style='color:#c8c8e0;font-size:9pt;'>"
+                f"<span style='color:#ffc700;'>&#9889; Fastest first token:</span> "
+                f"{html.escape(str(r.best_latency_provider))} "
+                f"<span style='color:#64648c;'>{money(r.best_latency_price)}</span></div>")
+        out.append("".join(champs))
+
+        verdict = self._speed_verdict(st)
+        if verdict:
+            out.append(
+                f"<div style='margin-top:8px;color:{tcol};font-size:8.5pt;"
+                f"font-style:italic;'>{html.escape(verdict)}</div>")
+        out.append("<div style='margin-top:6px;color:#64648c;font-size:8pt;'>"
+                   "Percentile = share of the live field this model out-paces "
+                   "· refreshed every 5 min</div>")
+        return "".join(out)
+
+    def _speed_verdict(self, st) -> str:
+        """Plain-English read of the throughput-vs-latency split."""
+        tp, lp = st.throughput_pct, st.latency_pct
+        if tp is None or lp is None:
+            return ""
+        diff = tp - lp
+        if diff >= 0.25:
+            return "Streams fast, but slower to first token."
+        if diff <= -0.25:
+            return "Quick to first token, but mid-pack streaming."
+        if tp >= 0.75 and lp >= 0.75:
+            return "Fast both ways — quick to first token and fast streaming."
+        return ""
 
     # ---- helpers ----
 

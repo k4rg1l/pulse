@@ -121,7 +121,7 @@ class GpuCard(QWidget):
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
         p.setPen(color)
         p.setFont(Fonts.mono_small())
-        p.drawText(QRectF(right - 160, y, 160, lh),
+        p.drawText(QRectF(right - 180, y, 180, lh),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, value)
         bar_y = y + lh + self.GAP_LABEL_BAR
         bar_w = right - x

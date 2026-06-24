@@ -364,6 +364,64 @@ class SpeedRanking:
     request_count: int = 0
 
 
+# --- #4 feature layer: a fleet-relative "velocity tier" + a render-ready standing ---
+#
+# OpenRouter ranks raw p50 throughput/latency but exposes no single "how fast is
+# this, really?" signal. So — exactly as The Arena computes ranks and The Ledger
+# computes a custody grade — we distill a model's place in the whole ranked field
+# into a velocity TIER (a word + color) plus a render-ready :class:`SpeedStanding`.
+# Throughput (stream speed) is the hero axis; latency (time-to-first-token) is the
+# second story the two percentiles deliberately tell apart.
+
+# (label, min fraction-of-field-beaten, hex), fastest→slowest. WARP earns the
+# Arena-style shimmer. The palette is an "afterburner" ramp — intentionally
+# distinct from the Arena's pinks/purples and the Ledger's green→red grades.
+SPEED_TIERS = [
+    ("WARP",    0.92, "#caa6ff"),   # plasma violet — top of the field
+    ("BLAZING", 0.75, "#ff8a5c"),   # flame
+    ("SWIFT",   0.55, "#ffc24b"),   # gold
+    ("BRISK",   0.35, "#54d6b0"),   # mint
+    ("STEADY",  0.15, "#6aa9e0"),   # steel blue
+    ("IDLING",  0.00, "#8a8aa6"),   # grey
+]
+SPEED_ELITE = {"WARP"}
+
+
+def speed_tier(pct: Optional[float]):
+    """(label, hex) for a throughput percentile (fraction of the field beaten)."""
+    if pct is None:
+        return ("UNRANKED", "#64648c")
+    for label, thr, hexc in SPEED_TIERS:
+        if pct >= thr:
+            return (label, hexc)
+    return SPEED_TIERS[-1][0], SPEED_TIERS[-1][2]
+
+
+@dataclass
+class SpeedStanding:
+    """One model's render-ready place in the speed fleet: the raw ranking plus
+    both fleet-relative percentiles and integer ranks. Built by
+    :meth:`SpeedBoard.standing` so all the relative math stays pure + testable."""
+    ranking: SpeedRanking
+    throughput_pct: Optional[float] = None   # fraction of field beaten (0..1)
+    latency_pct: Optional[float] = None
+    throughput_rank: Optional[int] = None    # 1 = fastest stream
+    latency_rank: Optional[int] = None       # 1 = fastest first-token
+    field_size: int = 0                       # ranked models carrying a throughput
+
+    @property
+    def permaslug(self) -> str:
+        return self.ranking.permaslug
+
+    @property
+    def tier(self):
+        return speed_tier(self.throughput_pct)
+
+    @property
+    def is_elite(self) -> bool:
+        return self.tier[0] in SPEED_ELITE
+
+
 class SpeedBoard:
     """The whole performance fleet, with self-relative percentiles computed
     against every other ranked model (that's the 'vs the field' in #4)."""
@@ -412,6 +470,53 @@ class SpeedBoard:
             return None
         return self._percentile(
             [x.p50_latency for x in self._all], r.p50_latency, False)
+
+    def _rank(self, values: list, mine, higher_is_faster: bool) -> Optional[int]:
+        """1-based rank of `mine` in the whole field (1 = fastest). For
+        throughput, faster = greater; for latency, faster = lower. None when
+        unplaceable (no value, or an empty field)."""
+        if mine is None:
+            return None
+        vals = [v for v in values if v is not None]
+        if not vals:
+            return None
+        if higher_is_faster:
+            better = sum(1 for v in vals if v > mine)
+        else:
+            better = sum(1 for v in vals if v < mine)
+        return better + 1
+
+    def throughput_rank(self, permaslug: str) -> Optional[int]:
+        r = self._by_perma.get(permaslug)
+        if r is None:
+            return None
+        return self._rank([x.p50_throughput for x in self._all], r.p50_throughput, True)
+
+    def latency_rank(self, permaslug: str) -> Optional[int]:
+        r = self._by_perma.get(permaslug)
+        if r is None:
+            return None
+        return self._rank([x.p50_latency for x in self._all], r.p50_latency, False)
+
+    def field_size(self) -> int:
+        """Count of models carrying a throughput value (the rankable field)."""
+        return sum(1 for x in self._all if x.p50_throughput is not None)
+
+    def standing(self, permaslug: str) -> Optional[SpeedStanding]:
+        """A render-ready :class:`SpeedStanding` for a permaslug, or None if the
+        model isn't in the performance field. Bundles both percentiles + ranks so
+        the UI never re-derives fleet-relative math."""
+        r = self._by_perma.get(permaslug)
+        if r is None:
+            return None
+        return SpeedStanding(
+            ranking=r,
+            throughput_pct=self.throughput_percentile(permaslug),
+            latency_pct=self.latency_percentile(permaslug),
+            throughput_rank=self.throughput_rank(permaslug),
+            latency_rank=self.latency_rank(permaslug),
+            field_size=self.field_size(),
+        )
 
 
 def parse_performance(rows: list) -> SpeedBoard:

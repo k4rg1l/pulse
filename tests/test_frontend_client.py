@@ -13,7 +13,7 @@ import pytest
 from frontend_client import (
     parse_catalog_permaslugs, PermaslugResolver,
     parse_all_providers, ProviderTrustBook, ProviderTrust,
-    parse_performance, SpeedBoard,
+    parse_performance, SpeedBoard, SpeedStanding, speed_tier, SPEED_TIERS,
     parse_endpoint_refs, EndpointRef,
     parse_uptime_hourly, UptimeHistory,
     provider_slug_from_tag, _norm,
@@ -248,6 +248,79 @@ def test_percentile_field_of_one_is_none():
         {"slug": "only/one", "name": "One", "p50_throughput": 100, "p50_latency": 50},
     ])
     assert sb.throughput_percentile("only/one") is None
+
+
+# ---------------------------------------------------------------------------
+#  Speed standing + velocity tiers  (#4 feature layer)
+# ---------------------------------------------------------------------------
+def test_speed_tier_ladder_covers_the_field():
+    assert speed_tier(0.95)[0] == "WARP"      # top of the field earns the shimmer
+    assert speed_tier(0.80)[0] == "BLAZING"
+    assert speed_tier(0.60)[0] == "SWIFT"
+    assert speed_tier(0.40)[0] == "BRISK"
+    assert speed_tier(0.20)[0] == "STEADY"
+    assert speed_tier(0.0)[0] == "IDLING"
+    assert speed_tier(None)[0] == "UNRANKED"   # unplaceable model
+    # every tier carries a hex color and the labels are unique
+    labels = [t[0] for t in SPEED_TIERS]
+    assert len(set(labels)) == len(labels)
+    assert all(t[2].startswith("#") for t in SPEED_TIERS)
+
+
+def test_speed_standing_bundles_percentiles_ranks_and_tier():
+    sb = parse_performance(_load("fe_rankings_performance.json")["data"])
+    st = sb.standing("anthropic/claude-4.8-opus-20260528")
+    assert isinstance(st, SpeedStanding)
+    # percentiles match the field-relative math (self + ties removed)
+    assert st.throughput_pct == pytest.approx(0.375)
+    assert st.latency_pct == pytest.approx(0.125)
+    # 1-based ranks over the whole 9-row fixture field (1 = fastest)
+    assert st.throughput_rank == 6   # 5 models stream faster than 54 t/s
+    assert st.latency_rank == 8      # 7 models start faster than 1703 ms
+    assert st.field_size == 9
+    assert st.permaslug == "anthropic/claude-4.8-opus-20260528"
+    assert st.tier == speed_tier(st.throughput_pct)
+    assert st.is_elite is False      # 0.375 is mid-field, not WARP
+
+
+def test_speed_standing_carries_best_providers():
+    sb = parse_performance(_load("fe_rankings_performance.json")["data"])
+    st = sb.standing("anthropic/claude-4.8-opus-20260528")
+    # the best-speed/best-price providers ride along for the dossier
+    assert st.ranking.best_throughput_provider
+    assert st.ranking.best_latency_provider
+
+
+def test_speed_standing_unknown_model_is_none():
+    sb = parse_performance(_load("fe_rankings_performance.json")["data"])
+    assert sb.standing("nobody/nope") is None
+
+
+def test_speed_ranks_unplaceable_when_no_value():
+    sb = parse_performance([{"slug": "a/b", "name": "AB"}])  # no throughput/latency
+    assert sb.throughput_rank("a/b") is None
+    assert sb.latency_rank("a/b") is None
+    st = sb.standing("a/b")
+    assert st is not None and st.throughput_rank is None and st.field_size == 0
+
+
+def test_warp_tier_is_elite():
+    sb = parse_performance(_load("fe_rankings_performance.json")["data"])
+    # gpt-oss-120b tops the fixture field on throughput → WARP → elite shimmer.
+    st = sb.standing("openai/gpt-oss-120b")
+    assert st.tier[0] == "WARP" and st.is_elite is True
+
+
+def test_resolver_plus_board_places_a_pinned_model():
+    """The exact path the dashboard takes: public slug → permaslug → standing.
+    A pinned model is keyed by its public slug; the speed board is keyed by the
+    versioned permaslug, so the resolver is the required bridge."""
+    res = parse_catalog_permaslugs(_load("fe_catalog_slice.json")["data"])
+    sb = parse_performance(_load("fe_rankings_performance.json")["data"])
+    perma = res.permaslug("anthropic/claude-opus-4.8")
+    assert perma == "anthropic/claude-4.8-opus-20260528"
+    st = sb.standing(perma)
+    assert st is not None and st.throughput_rank == 6 and st.field_size == 9
 
 
 # ---------------------------------------------------------------------------

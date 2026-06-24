@@ -244,7 +244,7 @@ class ClaudeCard(QWidget):
 
         p.setPen(Colors.TEXT_SECONDARY)
         p.setFont(Fonts.body())
-        p.drawText(QRectF(x, y, 120, lh),
+        p.drawText(QRectF(x, y, 150, lh),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, win.label)
 
         reset = _fmt_reset(win.resets_at)
