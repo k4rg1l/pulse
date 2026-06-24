@@ -63,6 +63,7 @@ class FetchTrigger(QObject):
     fetch_permaslug_resolver = Signal()  # catalog slug↔permaslug map (slow, no-auth)
     fetch_uptime = Signal(str, str)  # (model_id, permaslug) — per-endpoint 73h uptime (#3)
     fetch_spend = Signal()          # ground-truth spend board (mgmt-key analytics, Wave 2 F3/#9)
+    fetch_autopsy = Signal(str, str)  # (t0_iso, t1_iso) — #11 lasso drill-down (interaction-fired)
     fetch_logo = Signal(str, str)   # (slug, url) — one provider logo, on demand
 
 
@@ -118,6 +119,7 @@ class OpenRouterPulse(QObject):
         self.trigger.fetch_permaslug_resolver.connect(self.api_worker.fetch_permaslug_resolver)
         self.trigger.fetch_uptime.connect(self.api_worker.fetch_uptime)
         self.trigger.fetch_spend.connect(self.api_worker.fetch_spend)
+        self.trigger.fetch_autopsy.connect(self.api_worker.fetch_autopsy)
         self.trigger.fetch_logo.connect(self.api_worker.fetch_logo)
         self.api_worker.key_info_ready.connect(self._on_key_info)
         self.api_worker.endpoints_ready.connect(self._on_endpoints)
@@ -129,6 +131,7 @@ class OpenRouterPulse(QObject):
         self.api_worker.permaslug_resolver_ready.connect(self._on_permaslug_resolver)
         self.api_worker.uptime_ready.connect(self._on_uptime)
         self.api_worker.spend_ready.connect(self._on_spend)
+        self.api_worker.autopsy_ready.connect(self._on_autopsy)
         self.api_worker.logo_ready.connect(self._on_logo_ready)
         self.api_worker.error.connect(self._on_error)
 
@@ -152,6 +155,7 @@ class OpenRouterPulse(QObject):
         # resolves each pinned model and asks the worker to fan out the
         # per-endpoint uptime fetch (model_id, permaslug).
         self.dashboard.fetch_uptime_requested.connect(self.trigger.fetch_uptime.emit)
+        self.dashboard.fetch_autopsy_requested.connect(self.trigger.fetch_autopsy.emit)
 
         # -- Tray icon --
         self.tray = TrayIcon(self.settings)
@@ -366,6 +370,12 @@ class OpenRouterPulse(QObject):
     @Slot(object)
     def _on_spend(self, board):
         self.dashboard.update_spend(board)
+
+    @Slot(str, object)
+    def _on_autopsy(self, token, report):
+        # #11 interaction-fired drill-down landed (or None on failure/locked) ->
+        # the dashboard opens the forensic dossier (keyed + debounced).
+        self.dashboard.show_autopsy(token, report)
 
     @Slot(object)
     def _on_provider_trust(self, book):

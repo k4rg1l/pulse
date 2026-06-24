@@ -4999,13 +4999,29 @@ class SpendSpectrum(QWidget):
     _measure() feeds both paint and setFixedHeight so nothing clips). The reveal
     is one-time, gated on a signature compare so 15-min polls don't re-animate.
 
-    Click entry points (signals wired now, consumed by #10/#11 later):
+    Click entry points (signals wired now, consumed by #10/#11):
       band_clicked(model_id, global_anchor)  -> #10 receipt popup
-      spike_clicked(t0_iso, t1_iso)           -> #11 autopsy
+      spike_clicked(t0_iso, t1_iso)           -> #11 autopsy (a tap = single bucket)
+      spike_selected(t0_iso, t1_iso)          -> #11 autopsy (a drag = lassoed window)
+
+    #11 THE AUTOPSY lasso (decision A): press-drag-release across the CHART BODY
+    selects a spend window; on release a drag wider than DRAG_MIN_PX emits
+    spike_selected(t0,t1) (the lassoed bucket range), while a sub-threshold tap
+    falls through to the existing single-bucket spike_clicked / band_clicked
+    hit-testing — so a normal click on a legend row (#10) is NEVER swallowed.
+    The selection band + dim-outside veil + a cursor $-readout (running Σ of the
+    touched buckets' stacked totals, from already-cached data — NO network) paint
+    INSIDE #9's already-sized chart body (zero added width/height). Locked ->
+    the lasso is disabled (mousePress does nothing).
     """
 
     band_clicked = Signal(str, QPointF)
     spike_clicked = Signal(str, str)
+    spike_selected = Signal(str, str)
+
+    # A drag narrower than this (px) is a TAP, not a lasso — the threshold that
+    # stops a normal legend/band click being swallowed by the autopsy (decision A).
+    DRAG_MIN_PX = 6.0
 
     # -- geometry constants (the measure pass derives everything from these) --
     PAD_X = 14
@@ -5028,6 +5044,10 @@ class SpendSpectrum(QWidget):
         self._spike_rect = None    # QRectF | None (the clickable spike column)
         self._legend_block_h = 0
         self._hover_model = None
+        # -- #11 lasso state (set by the press/move/release handlers) --
+        self._drag_x0 = None       # float | None: the press x while dragging
+        self._drag_x = None        # float | None: the live cursor x while dragging
+        self._selection = None     # tuple[float,float] | None: (x_left,x_right) px band
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
@@ -5162,6 +5182,64 @@ class SpendSpectrum(QWidget):
         chart_top = self.PAD_TOP + self._header_h + 8
         chart_h = self.CHART_H
         return chart_left, chart_top, chart_w, chart_h
+
+    def _chart_body_rect(self) -> QRectF:
+        cl, ct, cw, ch = self._chart_geom()
+        return QRectF(cl, ct, cw, ch)
+
+    # -- the x->bucket inverse of #9's bucket->x map (the lasso's spine) --------
+    def _x_to_bucket_index(self, x: float) -> int:
+        """Map a chart-body x to the nearest bucket index [0, n-1]. The inverse of
+        the build_geometry map xs[i] = chart_left + chart_w*i/(n-1) (and the
+        single-bucket centered case). Clamped; returns -1 when there are no
+        buckets."""
+        data = self._data
+        if data is None or not data.buckets:
+            return -1
+        n = len(data.buckets)
+        cl, _, cw, _ = self._chart_geom()
+        if n == 1:
+            return 0
+        frac = (x - cl) / cw if cw > 0 else 0.0
+        idx = int(round(frac * (n - 1)))
+        return max(0, min(n - 1, idx))
+
+    def _selection_bucket_range(self):
+        """The (i0, i1) inclusive bucket index span the current drag covers, or
+        None. i0<=i1; built from _drag_x0/_drag_x snapped to nearest buckets."""
+        if self._drag_x0 is None or self._drag_x is None:
+            return None
+        i0 = self._x_to_bucket_index(min(self._drag_x0, self._drag_x))
+        i1 = self._x_to_bucket_index(max(self._drag_x0, self._drag_x))
+        if i0 < 0 or i1 < 0:
+            return None
+        return (min(i0, i1), max(i0, i1))
+
+    def _selection_window_iso(self):
+        """The (t0_iso, t1_iso) bucket labels for the current drag span, or None.
+        t1 is the LABEL of the last touched bucket (the worker ceils it to the
+        hour) so a single-bucket drag still yields a real 1-bucket window."""
+        rng = self._selection_bucket_range()
+        if rng is None:
+            return None
+        i0, i1 = rng
+        buckets = self._data.buckets
+        return (buckets[i0], buckets[i1])
+
+    def _selection_sum(self) -> float:
+        """Running Σ of the stacked totals of the buckets the drag touches (from
+        already-cached matrix data — NO network). Drives the cursor $-readout."""
+        rng = self._selection_bucket_range()
+        if rng is None or self._data is None:
+            return 0.0
+        i0, i1 = rng
+        total = 0.0
+        for m in self._data.models:
+            row = self._data.matrix.get(m.model_id, [])
+            for i in range(i0, i1 + 1):
+                if 0 <= i < len(row):
+                    total += row[i]
+        return total
 
     def _build_geometry(self):
         self._band_polys = []
@@ -5347,7 +5425,74 @@ class SpendSpectrum(QWidget):
             self._paint_legend(painter, accent, legend_top)
 
         # 7) RESERVED savings-strip lane — intentionally BLANK (it is #12's).
+
+        # 8) #11 THE AUTOPSY lasso band + dim-outside veil + cursor $-readout —
+        #    painted LAST so it sits over the bands (decision A). Only while a
+        #    drag is live and not locked/empty.
+        if (not self._locked and self._data is not None
+                and not self._data.is_empty and self._selection is not None):
+            self._paint_lasso(painter, accent, chart_left, chart_top, chart_w,
+                              chart_h)
+
         painter.end()
+
+    def _paint_lasso(self, painter, accent, cl, ct, cw, ch):
+        """The selection band (translucent accent) + a BG_DARK veil dimming
+        OUTSIDE it + two 1px accent edges + a floating $-readout following the
+        cursor (the running Σ of touched buckets). Event-driven (one update() per
+        mouseMove) — no QTimer, no per-frame alloc beyond these transient rects."""
+        x_left, x_right = self._selection
+        x_left = max(cl, min(cl + cw, x_left))
+        x_right = max(cl, min(cl + cw, x_right))
+        if x_right < x_left:
+            x_left, x_right = x_right, x_left
+        chart_bottom = ct + ch
+        band = QRectF(x_left, ct, x_right - x_left, ch)
+
+        # dim OUTSIDE the band (TimelineChart veil idiom, but vertical).
+        veil = QColor(Colors.BG_DARK)
+        veil.setAlpha(120)
+        if x_left > cl:
+            painter.fillRect(QRectF(cl, ct, x_left - cl, ch), veil)
+        if x_right < cl + cw:
+            painter.fillRect(QRectF(x_right, ct, (cl + cw) - x_right, ch), veil)
+
+        # the translucent selection band.
+        sel = QColor(accent)
+        sel.setAlpha(40)
+        painter.fillRect(band, sel)
+        # two 1px vertical accent edges (RoundCap).
+        edge = QColor(accent)
+        painter.setPen(QPen(edge, 1.0, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(x_left, ct), QPointF(x_left, chart_bottom))
+        painter.drawLine(QPointF(x_right, ct), QPointF(x_right, chart_bottom))
+
+        # the floating cursor $-readout (running Σ of touched buckets).
+        total = self._selection_sum()
+        txt = f"${total:,.2f}"
+        f_tiny = Fonts.tiny()
+        fm = QFontMetrics(f_tiny)
+        pad = 4
+        tw = fm.horizontalAdvance(txt) + 2 * pad
+        th = fm.height() + 2
+        cx = self._drag_x if self._drag_x is not None else (x_left + x_right) / 2.0
+        rx = cx + 8
+        if rx + tw > cl + cw:
+            rx = cx - 8 - tw           # flip to the left if it would overflow
+        rx = max(cl, min(cl + cw - tw, rx))
+        ry = ct + 4
+        chip = QRectF(rx, ry, tw, th)
+        chip_bg = QColor(Colors.BG_DARK)
+        chip_bg.setAlpha(220)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(_rounded(chip, 3), QBrush(chip_bg))
+        painter.setPen(QPen(QColor(accent), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(_rounded(chip, 3))
+        painter.setPen(Colors.TEXT_PRIMARY)
+        painter.setFont(f_tiny)
+        painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, txt)
 
     def _data_range_label(self):
         # The widget receives only the spectrum; default to the standing label.
@@ -5550,12 +5695,30 @@ class SpendSpectrum(QWidget):
                              "— — —")
 
     # ------------------------------------------------------------------
-    #  Interaction (click entry points for #10 / #11)
+    #  Interaction (click entry points for #10 / #11) — with the #11 lasso
     # ------------------------------------------------------------------
+    @staticmethod
+    def _pos(event):
+        return event.position() if hasattr(event, "position") \
+            else QPointF(event.pos())
+
+    def _gpos(self, event):
+        return event.globalPosition() if hasattr(event, "globalPosition") \
+            else QPointF(self.mapToGlobal(event.pos()))
+
     def mouseMoveEvent(self, event):
         if self._locked or self._data is None:
             return
-        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        pos = self._pos(event)
+        # A live lasso drag: track the cursor x, paint the band (one update()
+        # per move — event-driven, no QTimer). Σ is from cached data (no network).
+        if self._drag_x0 is not None:
+            cl, _, cw, _ = self._chart_geom()
+            self._drag_x = max(cl, min(cl + cw, pos.x()))
+            self._selection = (self._drag_x0, self._drag_x)
+            self.update()
+            super().mouseMoveEvent(event)
+            return
         hov = None
         for mid, r in self._legend_rects:
             if r.contains(pos):
@@ -5567,13 +5730,64 @@ class SpendSpectrum(QWidget):
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
+        # LOCKED / empty -> the lasso is DISABLED and there are no click targets.
         if self._locked or self._data is None or self._data.is_empty:
             super().mousePressEvent(event)
             return
-        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
-        gpos = event.globalPosition() if hasattr(event, "globalPosition") \
-            else QPointF(self.mapToGlobal(event.pos()))
-        # spike column first (the autopsy entry, #11)
+        pos = self._pos(event)
+        gpos = self._gpos(event)
+        # 1) LEGEND ROW first -> #10 receipt; do NOT start a lasso (decision A:
+        #    a legend click must never be swallowed by the autopsy). Legend rows
+        #    sit BELOW the chart body so they never collide with the lasso zone.
+        for mid, r in self._legend_rects:
+            if r.contains(pos):
+                self.band_clicked.emit(mid, gpos)
+                return
+        # 2) CHART BODY -> begin a POTENTIAL lasso. The tap-vs-drag split is
+        #    resolved on release: the band only paints once the cursor moves, so
+        #    a plain click looks identical to today until it crosses DRAG_MIN_PX.
+        if self._chart_body_rect().contains(pos):
+            self._drag_x0 = pos.x()
+            self._drag_x = pos.x()
+            self._selection = None          # nothing to dim until a real drag
+            self._press_gpos = gpos         # for the tap-fallthrough band_clicked
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # Not in a lasso (or locked): nothing #11-specific to do.
+        if self._drag_x0 is None:
+            super().mouseReleaseEvent(event)
+            return
+        pos = self._pos(event)
+        x0 = self._drag_x0
+        x1 = pos.x()
+        width = abs(x1 - x0)
+        gpos = getattr(self, "_press_gpos", None) or self._gpos(event)
+        # clear lasso state BEFORE emitting (a re-entrant handler sees a clean slate)
+        self._drag_x0 = None
+        self._drag_x = None
+        had_band = self._selection is not None
+        self._selection = None
+
+        if width > self.DRAG_MIN_PX:
+            # A real LASSO -> emit the selected bucket window (decision A).
+            self._drag_x0 = x0          # transient: feed the inverse helper
+            self._drag_x = x1
+            win = self._selection_window_iso()
+            self._drag_x0 = None
+            self._drag_x = None
+            if win is not None:
+                self.spike_selected.emit(win[0], win[1])
+            if had_band:
+                self.update()            # erase the band
+            return
+
+        # A sub-threshold TAP -> fall through to the OLD single-bucket hit-test
+        # (spike column -> spike_clicked, else a band polygon -> band_clicked),
+        # so #9's spike tap and #10's band click are exactly as before.
+        if had_band:
+            self.update()
         if self._spike_rect is not None and self._spike_rect.contains(pos):
             si = self._data.spike_index
             if 0 <= si < len(self._data.buckets):
@@ -5582,17 +5796,11 @@ class SpendSpectrum(QWidget):
                       if si + 1 < len(self._data.buckets) else t0)
                 self.spike_clicked.emit(t0, t1)
                 return
-        # legend row -> band_clicked (#10 receipt)
-        for mid, r in self._legend_rects:
-            if r.contains(pos):
-                self.band_clicked.emit(mid, gpos)
-                return
-        # a band polygon in the chart
         for mid, poly in self._band_polys:
             if poly.containsPoint(pos, Qt.FillRule.OddEvenFill):
                 self.band_clicked.emit(mid, gpos)
                 return
-        super().mousePressEvent(event)
+        super().mouseReleaseEvent(event)
 
 
 def _format_price_pair(prompt, completion):
@@ -7722,6 +7930,252 @@ def build_seance_html(entry, diff) -> str:
         log.debug("seance ledger render failed", exc_info=True)
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
                "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
+    return "".join(out)
+
+
+# ===========================================================================
+#  #11 THE AUTOPSY — the spend cause-of-death dossier (the lasso-release sheet)
+# ===========================================================================
+# A forensic cut-sheet rendered to a QPixmap + embedded as a data-URI <img> in
+# the shared ProviderPopup (UptimeStrip idiom). One crimson "incision" bar per
+# (model,provider) drained the lassoed window, descending by $, each filled to
+# its share of the spike with a CRIMSON->accent lerp (dominant deepest crimson),
+# so "93% from ONE model @ ONE provider" is unmissable. Rows beyond 6 collapse
+# into a bounded "+N more" remainder bar. The empty window is a single muted
+# "clean window" bar (no crimson — a real populated-zero, not the locked state).
+class AutopsyStripWidget(QWidget):
+    """#11 dossier strip (mirrors UptimeStripWidget/SeanceLedgerStrip: STRIP_W=292,
+    render_pixmap()+_paint_into(p), measure-before-allocate so nothing clips).
+
+    All text is QPainter-drawn here (injection-safe); the HTML wrapper ALSO
+    html.escapes every model/provider name. devicePixelRatio-aware for crisp
+    HiDPI text."""
+
+    STRIP_W = 292
+    PAD = 8
+    BAR_H = 18
+    BAR_GAP = 6
+    TRACK_H = 8
+    CRIMSON = QColor(224, 70, 60)   # the dominant drain (a "wound"); dossier-only
+
+    def __init__(self, report, parent=None):
+        super().__init__(parent)
+        self._report = report
+        self._row_count = self._rows_drawn()
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+        # Test introspection: per drawn row -> (fill_w, track_w, is_remainder).
+        self._bar_geom = []
+
+    def _rows_drawn(self) -> int:
+        """How many bars the strip paints: visible rows (+1 for a remainder bar),
+        or exactly 1 for the empty 'clean window' state."""
+        r = self._report
+        if r is None or r.is_empty:
+            return 1
+        return len(r.visible) + (1 if r.remainder_count > 0 else 0)
+
+    def _measure_height(self) -> int:
+        # PAD*2 + rows*(BAR_H+BAR_GAP) - BAR_GAP  (the GEOMETRY_PLAN formula).
+        rows = max(1, self._row_count)
+        return int(self.PAD * 2 + rows * (self.BAR_H + self.BAR_GAP)
+                   - self.BAR_GAP)
+
+    def _value_col_w(self) -> int:
+        # Reserve a fixed value column wide enough for "$9999.99 · 100%".
+        return QFontMetrics(Fonts.mono_small()).horizontalAdvance(
+            "$9999.99 · 100%") + 8
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _row_color(self, rank: int, n: int) -> QColor:
+        """Dominant row = deepest CRIMSON; minor rows lerp toward the panel accent
+        so 'one model drained it' reads as a wound while the tail cools off."""
+        if n <= 1:
+            return QColor(self.CRIMSON)
+        t = rank / (n - 1)
+        return _lerp_color(self.CRIMSON, theme_controller.accent(), t)
+
+    def _paint_into(self, p):
+        w = self.STRIP_W
+        pad = self.PAD
+        self._bar_geom = []
+        r = self._report
+        f_body = Fonts.body()
+        f_mono = Fonts.mono_small()
+        fm_body = QFontMetrics(f_body)
+        fm_mono = QFontMetrics(f_mono)
+        val_w = self._value_col_w()
+        track_left = pad
+        track_w = w - 2 * pad
+        label_avail = max(10, track_w - val_w - 6)
+
+        # EMPTY window -> a single muted "clean window" bar (no crimson).
+        if r is None or r.is_empty:
+            y = pad
+            cy = y + self.BAR_H / 2.0
+            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                       track_w, self.TRACK_H), 4), QBrush(track))
+            self._bar_geom.append((0.0, float(track_w), False))
+            label = "No spend — clean window"
+            if r is not None:
+                label = f"No spend in {r.window_label} — clean window"
+            p.setFont(f_body)
+            p.setPen(QPen(Colors.TEXT_MUTED))
+            p.drawText(QRectF(track_left, y, track_w, self.BAR_H),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       fm_body.elidedText(label, Qt.TextElideMode.ElideRight,
+                                          int(track_w)))
+            return
+
+        n = len(r.visible) + (1 if r.remainder_count > 0 else 0)
+        spike = r.spike_total if r.spike_total > 0 else 1.0
+        y = pad
+        for rank, row in enumerate(r.visible):
+            cy = y + self.BAR_H / 2.0
+            color = self._row_color(rank, n)
+            # 1) the full-width track.
+            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                       track_w, self.TRACK_H), 4), QBrush(track))
+            # 2) the crimson incision filled to (usage/spike_total).
+            frac = max(0.0, min(1.0, row.usage / spike))
+            fill_w = max(2.0, track_w * frac) if frac > 0 else 0.0
+            if fill_w > 0:
+                p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                           fill_w, self.TRACK_H), 4),
+                           QBrush(color))
+            self._bar_geom.append((float(fill_w), float(track_w), False))
+            # 3) left label "model · provider" (elided), over the track.
+            label = f"{row.short_name} · {row.provider}"
+            p.setFont(f_body)
+            p.setPen(QPen(Colors.TEXT_PRIMARY if rank == 0
+                          else Colors.TEXT_SECONDARY))
+            p.drawText(QRectF(track_left + 2, y, label_avail, self.BAR_H),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       fm_body.elidedText(label, Qt.TextElideMode.ElideRight,
+                                          int(label_avail)))
+            # 4) right value col "$X.XX · NN%".
+            val = f"${row.usage:,.2f} · {round(row.share * 100)}%"
+            p.setFont(f_mono)
+            p.setPen(QPen(Colors.TEXT_PRIMARY if rank == 0
+                          else Colors.TEXT_SECONDARY))
+            p.drawText(QRectF(w - pad - val_w, y, val_w, self.BAR_H),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                       fm_mono.elidedText(val, Qt.TextElideMode.ElideRight,
+                                          int(val_w)))
+            y += self.BAR_H + self.BAR_GAP
+
+        # the bounded "+N more · $Y" remainder bar (TEXT_MUTED, never crimson).
+        if r.remainder_count > 0:
+            cy = y + self.BAR_H / 2.0
+            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                       track_w, self.TRACK_H), 4), QBrush(track))
+            frac = max(0.0, min(1.0, r.remainder_usage / spike))
+            fill_w = max(2.0, track_w * frac) if frac > 0 else 0.0
+            mut = QColor(Colors.TEXT_MUTED); mut.setAlpha(150)
+            if fill_w > 0:
+                p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
+                                           fill_w, self.TRACK_H), 4), QBrush(mut))
+            self._bar_geom.append((float(fill_w), float(track_w), True))
+            label = f"+{r.remainder_count} more"
+            val = f"${r.remainder_usage:,.2f}"
+            p.setFont(f_body)
+            p.setPen(QPen(Colors.TEXT_MUTED))
+            p.drawText(QRectF(track_left + 2, y, label_avail, self.BAR_H),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       label)
+            p.setFont(f_mono)
+            p.drawText(QRectF(w - pad - val_w, y, val_w, self.BAR_H),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                       val)
+
+
+def autopsy_accent_hex(report) -> str:
+    """The popup border accent for the autopsy dossier — always CRIMSON (the
+    forensic/alarm role), so the frame reads distinct from the cyan info popups
+    and the green rebate. Returns a #rrggbb."""
+    return AutopsyStripWidget.CRIMSON.name()
+
+
+def build_autopsy_html(report) -> str:
+    """The forensic dossier for the ProviderPopup: an HTML header
+    'AUTOPSY · HH:00–HH:00 · $Z drained' + the painted incision pixmap (data-URI
+    <img>) + a footer 'N reqs · M cached tokens' and, when a cache offset exists,
+    a GREEN 'caching offset −$X here' line (an offset, NEVER a drain — decision
+    D). EVERY API name reaching the HTML is html.escape'd (the pixmap text is
+    QPainter-drawn, injection-safe by construction). Returns a 'no window' card
+    when report is None; a tidy 'clean window' header when $0 was drained."""
+    crimson = _safe_color(AutopsyStripWidget.CRIMSON.name(), "#e0463c")
+    if report is None:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— NO AUTOPSY ON FILE —</div>")
+    window = html.escape(report.window_label)
+    out = []
+    if report.is_empty:
+        out.append(f"<div style='font-size:11pt;font-weight:bold;color:{crimson};'>"
+                   f"AUTOPSY · {window}</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+                   "clean window · ground truth</div>")
+    else:
+        top = report.rows[0]
+        top_name = html.escape(f"{top.short_name} · {top.provider}")
+        out.append(f"<div style='font-size:11pt;font-weight:bold;color:{crimson};'>"
+                   f"AUTOPSY · {window} · ${report.spike_total:,.2f} drained</div>")
+        out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
+                   f"top suspect: {top_name} · {round(top.share * 100)}% of the "
+                   f"spike{' · truncated' if report.truncated else ''}</div>")
+    try:
+        strip = AutopsyStripWidget(report)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{AutopsyStripWidget.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("autopsy strip render failed", exc_info=True)
+    # FOOTER: request + cached-token totals, then the GREEN caching-offset line.
+    if not report.is_empty:
+        out.append("<div style='color:#a0a0c8;font-size:8pt;'>"
+                   f"{report.request_total:,} reqs · "
+                   f"{_fmt_tok(report.cached_total)} cached tokens</div>")
+        if report.cache_offset > 0:
+            out.append("<div style='color:#2ed573;font-size:8pt;'>"
+                       f"caching offset −${report.cache_offset:,.2f} here</div>")
+    out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
+               "live from openrouter.ai · analytics · drag the chart to drill</div>")
     return "".join(out)
 
 

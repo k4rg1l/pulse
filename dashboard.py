@@ -38,6 +38,7 @@ from widgets import (
     RebateStub, build_rebate_html, rebate_accent_hex,
     GhostVeil, build_seance_html, ghost_accent_hex,
     BudgetHourglass, build_budget_html, budget_accent_hex,
+    build_autopsy_html, autopsy_accent_hex,
 )
 from nav_rail import NavRail
 from source_panel import SourcePanel
@@ -145,6 +146,7 @@ class Dashboard(QWidget):
 
     refresh_requested = Signal()
     fetch_uptime_requested = Signal(str, str)   # (model_id, permaslug) — THE PULSE (#3)
+    fetch_autopsy_requested = Signal(str, str)  # (t0_iso, t1_iso) — THE AUTOPSY (#11 lasso)
 
     def __init__(self, history=None, settings=None, parent=None):
         super().__init__(parent)
@@ -441,6 +443,9 @@ class Dashboard(QWidget):
         self.spend_spectrum = SpendSpectrum(self)
         self.spend_spectrum.band_clicked.connect(self._on_spend_band_clicked)
         self.spend_spectrum.spike_clicked.connect(self._on_spend_spike_clicked)
+        # #11 THE AUTOPSY — a lasso release across the chart body fires the hourly
+        # drill-down (interaction-fired, debounced dossier on return).
+        self.spend_spectrum.spike_selected.connect(self._on_spend_spike_selected)
         spend_layout.addWidget(self.spend_spectrum)
 
         # #10 THE TILL ROLL — per-model receipt stubs directly under the hero.
@@ -507,8 +512,54 @@ class Dashboard(QWidget):
         self._on_receipt_clicked(model_id, global_anchor)
 
     def _on_spend_spike_clicked(self, t0_iso, t1_iso):
-        # #11 autopsy attaches here later. Wired now (no-op).
-        log.debug("spend spike clicked: %s..%s", t0_iso, t1_iso)
+        # #11: a TAP on the spike column = a single-bucket autopsy. Fires the same
+        # interaction-fired hourly drill-down as a lasso (the worker clamps the
+        # bucket label to its hours).
+        log.debug("spend spike tapped: %s..%s", t0_iso, t1_iso)
+        self.fetch_autopsy_requested.emit(t0_iso, t1_iso)
+
+    def _on_spend_spike_selected(self, t0_iso, t1_iso):
+        # #11: a lasso release across the chart body -> the windowed autopsy.
+        log.debug("spend lasso: %s..%s", t0_iso, t1_iso)
+        self.fetch_autopsy_requested.emit(t0_iso, t1_iso)
+
+    def show_autopsy(self, token, report):
+        """#11 THE AUTOPSY: the worker returned the forensic report for the
+        lassoed/tapped window (or None on failure/locked). Render it into the
+        shared ProviderPopup keyed 'autopsy:{token}', replicating the established
+        just-closed/_popup_just_hidden_at debounce so the release that FIRED the
+        query doesn't immediately fight the app-wide event-filter that opens the
+        dossier. CRIMSON accent (the forensic role). None -> no popup."""
+        if report is None:
+            return
+        popup = self._ensure_provider_popup()
+        key = "autopsy:" + str(token)
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        html_str = build_autopsy_html(report)
+        if not html_str:
+            return
+        # Anchor the dossier beside the Spectrum's spike caret height (a stable
+        # point near the chart top) so it opens next to the interrogated chart.
+        anchor_y = self._dashboard_global_rect().top() + 120
+        sp = getattr(self, "spend_spectrum", None)
+        if sp is not None:
+            try:
+                anchor_y = int(sp.mapToGlobal(sp.rect().center()).y())
+            except Exception:
+                pass
+        popup.set_accent(autopsy_accent_hex(report))
+        popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
+        self._popup_model_id = key
 
     def _on_receipt_clicked(self, model_id, global_anchor):
         """#10 THE TILL ROLL: a stub (or #9's legend row) was clicked -> render

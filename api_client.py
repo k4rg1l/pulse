@@ -844,6 +844,163 @@ def build_spend_spectrum(rows: list, granularity: str = "day",
     )
 
 
+# ===========================================================================
+#  #11 THE AUTOPSY — the interaction-fired spend cause-of-death sheet (pure)
+# ===========================================================================
+# Fired ONLY on a lasso release (NOT in get_spend_board, NOT polled). The pure
+# builder decomposes a lassoed hour window into per-(model,provider) $ rows so a
+# $4 afternoon reads as "sonnet @ Anthropic · 87 reqs · $4.14 · 93% of the
+# spike". Honors every analytics quirk: bucket key detected via _bucket_key
+# (created_at__hour for provider dims), request_count/cached_tokens STRINGS via
+# _as_int, and usage_cache NEGATIVE = a caching OFFSET (a GREEN credit, NEVER a
+# drain) -> the report carries it as a POSITIVE magnitude `cache_offset`.
+AUTOPSY_MAX_ROWS = 6   # rows beyond this collapse into a bounded "+N more" bar
+
+
+def _hour_label(iso: str) -> str:
+    """'HH:00' from an ISO-ish timestamp. Accepts the lasso ISOs
+    ('2026-06-22T12:00:00+00:00') AND the live created_at__hour space form
+    ('2026-06-22 12:00:00'); falls back to the raw string if unparseable."""
+    if not iso:
+        return "··:00"
+    s = str(iso)
+    # Find the 'T' or space separator, then read the HH that follows.
+    sep = -1
+    if "T" in s:
+        sep = s.index("T")
+    elif " " in s:
+        sep = s.index(" ")
+    if sep >= 0 and len(s) >= sep + 3:
+        hh = s[sep + 1:sep + 3]
+        if hh.isdigit():
+            return f"{int(hh):02d}:00"
+    return s
+
+
+@dataclass(frozen=True)
+class AutopsyRow:
+    """One (model,provider) incision: the $ it drained from the lassoed window,
+    its request count, and its share of the spike total."""
+    model_id: str
+    short_name: str
+    provider: str
+    usage: float          # $ drained in the window
+    request_count: int    # calls in the window
+    share: float          # fraction 0..1 of the window total
+
+
+@dataclass(frozen=True)
+class AutopsyReport:
+    """#11 THE AUTOPSY payload built from the hourly dims=[model,provider] query
+    clamped to the lassoed window. `rows` is the FULL descending-$ list;
+    `visible` is the first AUTOPSY_MAX_ROWS and `remainder_*` collapse the tail
+    into one bounded bar (so the dossier pixmap height stays bounded).
+
+    Honesty contract (decision D):
+      - spike_total = Σ total_usage over the window; row.share = usage/spike_total.
+      - cache_offset = Σ abs(usage_cache) (usage_cache is NEGATIVE = a realized
+        cache credit) -> a POSITIVE magnitude, shown GREEN, NEVER a drain.
+      - request_total / cached_total are COUNTS (request_count/cached_tokens are
+        STRINGS in the API -> _as_int).
+      - window_label is 'HH:00–HH:00' (an en-dash); t0/t1 are the raw ISOs.
+    """
+    rows: tuple                  # tuple[AutopsyRow], descending by usage
+    visible: tuple               # tuple[AutopsyRow], the first AUTOPSY_MAX_ROWS
+    remainder_count: int         # how many rows collapsed into the remainder bar
+    remainder_usage: float       # Σ usage of the collapsed tail ($)
+    spike_total: float           # Σ total_usage over the window ($)
+    request_total: int           # Σ request_count over the window
+    cached_total: int            # Σ cached_tokens over the window (a COUNT)
+    cache_offset: float          # Σ abs(usage_cache) -> POSITIVE magnitude ($), GREEN
+    window_label: str            # 'HH:00–HH:00'
+    t0: str                      # the lassoed window start ISO (raw)
+    t1: str                      # the lassoed window end ISO (raw)
+    truncated: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        # Key present but $0 drained in the lassoed window -> the "clean window"
+        # state (one muted bar, no crimson). A real populated-zero, NOT locked.
+        return self.spike_total <= 0.0 or not self.rows
+
+
+def build_autopsy(rows: list, t0_iso: str, t1_iso: str,
+                  label: Optional[str] = None) -> AutopsyReport:
+    """Pure builder for #11 — aggregate the hourly dims=[model,provider] rows of
+    the lassoed window into per-(model,provider) incisions, descending by $.
+
+    - bucket key detected via _bucket_key (created_at__hour for provider dims);
+      we don't filter on it (the query is already clamped to the window) but it
+      proves the row shape and is exercised by the tests.
+    - total_usage via _as_float; request_count/cached_tokens via _as_int
+      (STRINGS); usage_cache NEGATIVE -> cache_offset = Σ abs(usage_cache).
+    - share guarded against divide-by-zero (0 when spike_total==0).
+    - rows beyond AUTOPSY_MAX_ROWS collapse into a single remainder bar.
+    - `label` overrides the window label (the client passes a date span for a
+      DAY-granularity selection); when None we derive 'HH:00–HH:00' from the ISOs.
+    """
+    rows = rows or []
+    per_pair: dict = defaultdict(lambda: {"usage": 0.0, "reqs": 0})
+    request_total = 0
+    cached_total = 0
+    cache_offset = 0.0
+    spike_total = 0.0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model = row.get("model") or ""
+        provider = row.get("provider") or ""
+        usage = _as_float(row.get("total_usage"))
+        reqs = _as_int(row.get("request_count"))
+        per_pair[(model, provider)]["usage"] += usage
+        per_pair[(model, provider)]["reqs"] += reqs
+        request_total += reqs
+        cached_total += _as_int(row.get("cached_tokens"))
+        # usage_cache is NEGATIVE = a saving; abs() -> a positive offset magnitude
+        # (an occasional positive 1-request value is handled by abs too).
+        cache_offset += abs(_as_float(row.get("usage_cache")))
+        spike_total += usage
+
+    ordered = sorted(
+        per_pair.items(),
+        key=lambda kv: (-kv[1]["usage"], kv[0][0], kv[0][1]),
+    )
+    all_rows = tuple(
+        AutopsyRow(
+            model_id=model,
+            short_name=_short_model(model),
+            provider=provider,
+            usage=v["usage"],
+            request_count=v["reqs"],
+            share=(v["usage"] / spike_total) if spike_total > 0 else 0.0,
+        )
+        for (model, provider), v in ordered
+    )
+
+    visible = all_rows[:AUTOPSY_MAX_ROWS]
+    tail = all_rows[AUTOPSY_MAX_ROWS:]
+    remainder_count = len(tail)
+    remainder_usage = sum(r.usage for r in tail)
+
+    if label is None:
+        label = f"{_hour_label(t0_iso)}–{_hour_label(t1_iso)}"   # en-dash
+
+    return AutopsyReport(
+        rows=all_rows,
+        visible=visible,
+        remainder_count=remainder_count,
+        remainder_usage=remainder_usage,
+        spike_total=spike_total,
+        request_total=request_total,
+        cached_total=cached_total,
+        cache_offset=cache_offset,
+        window_label=label,
+        t0=t0_iso or "",
+        t1=t1_iso or "",
+    )
+
+
 # --- #10 THE TILL ROLL noise-gate floors -------------------------------------
 # A "PRICE UP / DOWN" stamp fires only when ALL gates pass, so a 1-request day
 # at a weird $/call can't trigger a false alarm. Floors picked from the LIVE
@@ -1828,6 +1985,92 @@ class AnalyticsClient:
             log.exception("get_spend_board crashed")
             return None
 
+    @staticmethod
+    def _parse_iso(s: str):
+        """Best-effort parse of a lasso bucket label / ISO into an aware UTC
+        datetime. Accepts '2026-06-22', '2026-06-22T12:00:00+00:00', and the
+        live created_at__hour space form '2026-06-22 12:00:00'. Returns None if
+        unparseable (the caller degrades gracefully)."""
+        import datetime
+        if not s:
+            return None
+        txt = str(s).strip().replace(" ", "T", 1)
+        try:
+            dt = datetime.datetime.fromisoformat(txt)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+
+    @staticmethod
+    def _is_bare_date(s: str) -> bool:
+        """True for a 'YYYY-MM-DD' day-bucket label (no time component). The
+        standing 7d Spectrum is DAY granularity, so a lasso/tap there emits bare
+        dates; an hour-granularity selection carries a T/space + HH."""
+        s = str(s or "").strip()
+        return len(s) == 10 and "T" not in s and " " not in s
+
+    def get_autopsy(self, t0_iso: str, t1_iso: str) -> Optional["AutopsyReport"]:
+        """#11 — the interaction-fired drill-down. Clamps the lassoed window to a
+        whole-hour query range and runs ONE hourly dims=[model,provider] query
+        (cached by its key — F3 contract), then builds the AutopsyReport. The
+        standing Spectrum is DAY-granularity, so a lasso/tap there yields bare
+        dates -> the window is the full UTC day(s) and the label reads as the
+        date(s); an hour-grained selection clamps to [floor(t0)h, ceil(t1)h] and
+        labels 'HH:00–HH:00'. Returns None when locked / on failure (the worker
+        emits that through so the dossier degrades, never crashes). Never raises;
+        never logs the key. usage_cache NEGATIVE -> a GREEN offset (in
+        build_autopsy)."""
+        if not self.unlocked:
+            return None
+        import datetime
+        try:
+            d0 = self._parse_iso(t0_iso)
+            d1 = self._parse_iso(t1_iso)
+            if d0 is None:
+                return None
+            if d1 is None:
+                d1 = d0
+            if d1 < d0:
+                d0, d1 = d1, d0
+            day_grain = self._is_bare_date(t0_iso) and self._is_bare_date(t1_iso)
+            if day_grain:
+                # A DAY selection -> span the full UTC day(s); the query is still
+                # hour-grained (the autopsy drills the hours WITHIN the day).
+                start = d0.replace(hour=0, minute=0, second=0, microsecond=0)
+                end = (d1.replace(hour=0, minute=0, second=0, microsecond=0)
+                       + datetime.timedelta(days=1))
+                # Label as the date(s) rather than '00:00–00:00'.
+                day0 = start.date().isoformat()
+                day1 = (end - datetime.timedelta(days=1)).date().isoformat()
+                label = day0 if day0 == day1 else f"{day0} → {day1}"
+            else:
+                # An HOUR selection -> floor t0 / ceil t1 to the hour; label HH:00.
+                start = d0.replace(minute=0, second=0, microsecond=0)
+                end = d1.replace(minute=0, second=0, microsecond=0) + \
+                    datetime.timedelta(hours=1)
+                if end <= start:
+                    end = start + datetime.timedelta(hours=1)
+                label = None  # build_autopsy derives 'HH:00–HH:00' from the ISOs
+            start_iso = start.isoformat()
+            end_iso = end.isoformat()
+            metrics = ["total_usage", "request_count", "cached_tokens",
+                       "reasoning_tokens", "usage_cache"]
+            parsed = self.query(metrics, ["model", "provider"], "hour",
+                                start_iso, end_iso)
+            if parsed is None:
+                return None
+            meta = parsed.get("metadata") or {}
+            report = build_autopsy(parsed.get("rows") or [], start_iso, end_iso,
+                                   label=label)
+            if meta.get("truncated"):
+                report = replace(report, truncated=True)
+            return report
+        except Exception:
+            log.exception("get_autopsy crashed")
+            return None
+
 
 class APIClient:
     """Synchronous API client for OpenRouter."""
@@ -2018,6 +2261,7 @@ class APIWorker(QObject):
     permaslug_resolver_ready = Signal(object)  # PermaslugResolver | None (no-auth)
     uptime_ready = Signal(str, object)      # (model_id, {ep_ident: UptimeHistory}) (no-auth, #3)
     spend_ready = Signal(object)            # SpendBoard | None (mgmt-key analytics, Wave 2 F3/#9)
+    autopsy_ready = Signal(str, object)     # (token, AutopsyReport|None) — #11, interaction-fired
     logo_ready = Signal(str, object, bool)  # (slug, raw_bytes|None, is_svg)
     error = Signal(str)
 
@@ -2107,6 +2351,37 @@ class APIWorker(QObject):
         except Exception:
             log.exception("spend worker crashed")
             self.spend_ready.emit(None)
+
+    @Slot(str, str)
+    def fetch_autopsy(self, t0_iso, t1_iso):
+        """#11 THE AUTOPSY — interaction-fired (a lasso release), NOT polled and
+        NOT part of get_spend_board. Runs the hourly dims=[model,provider] query
+        clamped to [floor(t0) hour, ceil(t1) hour], builds the AutopsyReport, and
+        ALWAYS emits autopsy_ready(token, report|None) (None on failure / when
+        locked) so the dossier never crashes the app. Routed through
+        AnalyticsClient.query so it caches by its key (the F3 contract). The
+        token (f'{t0}|{t1}') keys the popup debounce. The management key is used
+        read-only and is NEVER logged."""
+        token = f"{t0_iso}|{t1_iso}"
+        try:
+            report = self.analytics.get_autopsy(t0_iso, t1_iso)
+            if report is not None and not report.is_empty:
+                top = report.rows[0]
+                log.info(
+                    "autopsy: %s %d rows, top=%s@%s $%.2f (%d%%)",
+                    report.window_label, len(report.rows),
+                    top.short_name, top.provider, top.usage,
+                    round(top.share * 100),
+                )
+            elif report is not None:
+                log.info("autopsy: %s clean window ($0 drained)",
+                         report.window_label)
+            else:
+                log.info("autopsy: none (locked or query failed)")
+            self.autopsy_ready.emit(token, report)
+        except Exception:
+            log.exception("autopsy worker crashed")
+            self.autopsy_ready.emit(token, None)
 
     @Slot()
     def fetch_provider_trust(self):

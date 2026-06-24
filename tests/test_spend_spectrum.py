@@ -281,12 +281,17 @@ def test_spectrum_spike_click_emits(qapp):
     w = _spectrum(qapp, _board().spectrum)
     captured = []
     w.spike_clicked.connect(lambda t0, t1: captured.append((t0, t1)))
-    # synthesize a press at the spike rect center
+    # A TAP on the spike column = press + release at the SAME point (a zero-width
+    # drag resolves on release to the single-bucket spike_clicked, NOT a lasso).
     c = w._spike_rect.center()
-    ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(c), QPointF(c),
-                     Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier)
-    w.mousePressEvent(ev)
+    press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(c), QPointF(c),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+    rel = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(c), QPointF(c),
+                      Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                      Qt.KeyboardModifier.NoModifier)
+    w.mousePressEvent(press)
+    w.mouseReleaseEvent(rel)
     assert captured == [("2026-06-21", "2026-06-22")]
 
 
