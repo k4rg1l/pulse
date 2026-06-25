@@ -608,6 +608,68 @@ def parse_rankings_models(rows: list) -> TrendBoard:
 
 
 # ---------------------------------------------------------------------------
+#  Public apps leaderboard  (from /api/frontend/v1/rankings/apps)
+#  — feature #18 "THE CLIMB": the weekly public apps board (top-20), keyed by
+#  rank. Each row's ``total_tokens`` is a JSON STRING (int()-coerced);
+#  ``total_requests`` is an int. The user's 6.7M weekly tokens sits in the VALLEY
+#  ~10,000x below even this board's floor (~73B), so the climb pins the user as a
+#  lone marker below the lowest rung — NEVER an "out-tokened #N" claim (recon +
+#  re-verify 2026-06-24 prove it false). NOAUTH, browser-UA session (a bare
+#  python-requests UA is connection-reset by the frontend edge).
+# ---------------------------------------------------------------------------
+@dataclass
+class AppRanking:
+    """One public app's weekly traffic line (keyed by rank). ``total_tokens`` is
+    coerced from the API's STRING to int; ``total_requests`` is already an int.
+    ``title``/``slug``/``favicon_url`` drive the rung's label + favicon-dot."""
+    rank: int = 0
+    title: str = ""
+    slug: str = ""
+    favicon_url: Optional[str] = None
+    total_tokens: int = 0          # coerced from a STRING ('7311066568924')
+    total_requests: int = 0        # already an int on this endpoint
+
+
+def parse_rankings_apps(data) -> list:
+    """Build the weekly public-apps leaderboard from a ``rankings/apps`` payload.
+    Pure.
+
+    ``data`` is the ``{day, week, month}`` dict (each a top-20 list). We read the
+    ``week`` list (#18 is a weekly board — comparable to the user's weekly token
+    total). Each row's ``total_tokens`` arrives as a STRING and is coerced via
+    int(); ``total_requests`` is an int; ``rank`` order is preserved as returned.
+    Returns a list of :class:`AppRanking` (empty list on a missing/odd payload —
+    never raises)."""
+    def _int(v) -> int:
+        if v is None or v == "":
+            return 0
+        try:
+            return int(float(v))   # tolerate '7.16e12'-ish or '123'; STRING->int
+        except (TypeError, ValueError):
+            return 0
+
+    week = []
+    if isinstance(data, dict):
+        week = data.get("week") or []
+    out = []
+    for r in week:
+        if not isinstance(r, dict):
+            continue
+        app = r.get("app") or {}
+        if not isinstance(app, dict):
+            app = {}
+        out.append(AppRanking(
+            rank=_int(r.get("rank")),
+            title=app.get("title") or app.get("slug") or "",
+            slug=app.get("slug") or "",
+            favicon_url=app.get("favicon_url") or None,
+            total_tokens=_int(r.get("total_tokens")),
+            total_requests=_int(r.get("total_requests")),
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 #  Per-provider endpoint refs + uptime history
 #  (from /api/frontend/v1/stats/endpoint and /stats/uptime-hourly)
 # ---------------------------------------------------------------------------
@@ -758,6 +820,19 @@ class FrontendClient:
             return parse_rankings_models(data)
         except Exception:
             log.warning("rankings/models fetch failed", exc_info=True)
+            return None
+
+    def get_rankings_apps(self) -> Optional[list]:
+        """THE CLIMB (#18): the no-auth weekly public-apps leaderboard (top-20,
+        keyed by rank). Returns a list of :class:`AppRanking` (parsed off the
+        ``week`` list) or None on failure so the climb keeps its last-good
+        ladder. MUST ride this client's browser-UA session (a bare requests.get
+        is connection-reset by the frontend edge)."""
+        try:
+            data = self._get_json("/api/frontend/v1/rankings/apps").get("data", {})
+            return parse_rankings_apps(data)
+        except Exception:
+            log.warning("rankings/apps fetch failed", exc_info=True)
             return None
 
     def get_endpoint_refs(self, permaslug: str, variant: str = "standard") -> list:

@@ -11111,3 +11111,864 @@ def build_recorder_dossier_html(rec) -> str:
         "A run is consecutive calendar days with logged traffic; a gap day "
         "resets it.</div>")
     return "".join(out)
+
+
+# ===========================================================================
+#  #18 THE COURT & THE CLIMB — the world's-task crown + the apps climb
+#  (the FOURTH Insights widget, the wide closer under #17)
+# ===========================================================================
+# HERALDIC GOLD-on-INDIGO + a SINGLE EMBER "you" thread used NOWHERE else in the
+# zone (instantly findable on both halves). The gold = "the world's verdict",
+# the colored chip = "which model" (spend_palette.model_color so a model keeps
+# its Spend hue), the ember = "you". Separable from #15-metal / #16-trophy-gold /
+# #17-brass and from Spend's roles. (decisions C/D/E)
+_COURT_INDIGO = QColor(0x23, 0x1A, 0x40)        # the royal-violet seat plate
+_COURT_INDIGO_HI = QColor(0x2E, 0x22, 0x52)     # seat plate gradient top
+_COURT_GROUND = QColor(0x15, 0x10, 0x28)        # the band ground (off panel bg)
+_COURT_GOLD = QColor(0xE8, 0xC4, 0x5A)          # crowns / rope rails / underlines
+_COURT_GOLD_HI = QColor(0xF6, 0xE0, 0x8E)       # finial highlight (struck-coin)
+_COURT_GOLD_DIM = QColor(0x8A, 0x6D, 0x1F)      # the dim rail / inactive gold
+_COURT_EMBER = QColor(0xFF, 0x7A, 0x3C)         # THE single "you" thread
+_COURT_EMBER_HI = QColor(0xFF, 0xA0, 0x6B)      # ember glow center
+_COURT_HAIRLINE = QColor(0x3A, 0x30, 0x5A)      # the 1px band-split hairline
+_COURT_SLATE = QColor(0x6A, 0x68, 0x84)         # muted degrade text
+_COURT_INK = QColor(0xEC, 0xEC, 0xF7)           # bright label ink
+
+
+class TaskCourt(QWidget):
+    """#18 THE COURT & THE CLIMB — two hand-painted bands fused into one heraldic
+    story (the wide closer of the Insights zone, under #17).
+
+    THE COURT (top ~118px): a horizontal rail of four throne-seats
+    (code/agent/data/general). Per seat: an indigo seat plate, a GOLD crown
+    QPolygon above it = the WORLD's #1 model for that task, a model chip (a
+    spend_palette.model_color swatch + the elided name), and a thin gold underline
+    whose width = the world's token share of that task. On ONE seat (the agentic
+    seat) a SECOND smaller EMBER chip — "the world crowns X; you reach for Y"
+    (taste-vs-world, NEVER a claim the user wins the task — decision C).
+
+    THE CLIMB (bottom ~150px): a vertical gold rope-ladder on a LOG scale of the
+    public apps board (top-20, thinned to ~6 rungs). The user's ~6.7M-token marker
+    is a single EMBER dot pinned in the VALLEY below the floor rung (NOT clamped
+    onto it) with a faint dotted "~10,000x to reach the board" connector + "you ·
+    6.7M · OpenCode". The string "out-tokened" is NEVER produced (decision D).
+
+    set_data(CourtClimb) paints both bands; None keeps the last-good. set_locked()
+    drops the ember overlays (the world court + the apps summit still render) +
+    a tidy "connect a key to place yourself" note. Clicking the COURT emits
+    court_clicked(anchor_y) -> the macro dossier; clicking the CLIMB emits
+    climb_clicked(anchor_y) -> the full 20-app ladder dossier.
+
+    Motion: ONE held QPropertyAnimation drives a DISTINCT `ascent` Property (NOT a
+    QWidget builtin — the widget never moves) animating the user ember dot's y
+    from the band bottom up to its resting valley position ONCE on the first
+    populated set_data; a same-data re-poll repaints silently. Allocation-free
+    paint: pens/brushes + the measured geometry + the token-abbreviation STRINGS
+    are built in set_data, never paintEvent."""
+
+    court_clicked = Signal(int)            # global anchor y for the court dossier
+    climb_clicked = Signal(int)            # global anchor y for the climb dossier
+
+    # -- geometry constants (the measure pass derives everything from these) --
+    COURT_H = 118
+    CLIMB_H = 150
+    PAD = 10
+    SEAT_GAP = 8
+    CROWN_W = 18                           # gold crown glyph width
+    CROWN_H = 12
+    SWATCH = 9                             # model-color chip swatch
+    ROPE_INSET = 30                        # rope rails x-inset (L/R) in the climb
+    RUNG_DOT = 6                           # the favicon-dot diameter on a rung
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cc = None                    # task_court.CourtClimb | None
+        self._locked = False
+        self._ascent = 1.0                 # 0..1 ember climb-in (animated once)
+        self._last_sig = None              # data-CHANGED gate (None == fresh)
+
+        # Cached from the measure pass (paint reads ONLY these):
+        self._total_h = self.COURT_H + 1 + self.CLIMB_H
+        self._court_rect = None            # QRectF the court band
+        self._climb_rect = None            # QRectF the climb band
+        self._seat_rects = []              # [QRectF] per seat (court)
+        self._seat_names = []              # [(world_elided, ember_elided_or_'')]
+        self._rope_left_x = 0.0
+        self._rope_right_x = 0.0
+        self._rope_top_y = 0.0
+        self._rope_bot_y = 0.0
+        self._rung_layout = []             # [(rung, y, title_elided)]
+        self._user_y_rest = 0.0            # the ember marker resting y (valley)
+        self._floor_y = 0.0                # the floor rung y (connector anchor)
+
+        # Pre-built strokes (allocation-free paint).
+        self._rope_pen = QPen(_COURT_GOLD, 2)
+        self._rope_dim_pen = QPen(_COURT_GOLD_DIM, 1)
+        self._hairline_pen = QPen(_COURT_HAIRLINE, 1)
+        self._connector_pen = QPen(_COURT_GOLD_DIM, 1, Qt.PenStyle.DotLine)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        # ONE held animation (ArcGauge/Belt idiom) — never per-frame alloc.
+        self._anim = QPropertyAnimation(self, b"ascent")
+        self._anim.setDuration(650)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.setFixedHeight(self._total_h)
+        self._measure()
+        theme_controller.changed.connect(self._on_theme_changed)
+
+    # -- the ascent Property (DISTINCT name; NOT a QWidget builtin) --
+    def get_ascent(self):
+        return self._ascent
+
+    def set_ascent(self, v):
+        self._ascent = float(v)
+        self.update()
+
+    ascent = Property(float, get_ascent, set_ascent)
+
+    def _on_theme_changed(self):
+        # the model_color swatches ride the live accent -> rebuild + repaint.
+        self._build_geometry()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+    def set_data(self, cc):
+        """cc: a task_court.CourtClimb (or None). None => keep last-good (the
+        widget never blanks). The ember climb-in fires ONCE when the data CHANGES
+        (a new signature); an identical re-distribution repaints silently."""
+        if cc is None:
+            return
+        self._locked = False
+        self._cc = cc
+        sig = self._signature(cc)
+        changed = (sig != self._last_sig)
+        self._last_sig = sig
+        self._measure()
+        self._build_geometry()
+        if changed and (cc.user_in_valley or cc.climb_available):
+            self._start_ascent()
+        else:
+            self._ascent = 1.0
+        self.update()
+
+    def set_locked(self):
+        """No management key: DROP the ember overlays (the world court + the apps
+        summit still render — both are noauth/user) + a tidy 'connect a key to
+        place yourself' note. The locked height MATCHES the populated height so
+        the section never jumps. ZERO fake data (decision E)."""
+        self._locked = True
+        self._cc = None
+        self._last_sig = None
+        self._ascent = 1.0
+        self._measure()
+        self._build_geometry()
+        self.update()
+
+    def _signature(self, cc):
+        """A cheap change-key so the climb-in only fires on a real data change."""
+        seats = tuple((s.macro, s.world_model, s.ember_model) for s in cc.seats)
+        rungs = tuple((r.rank, r.tokens) for r in cc.rungs)
+        return (seats, rungs, cc.user_tokens, cc.has_ember, cc.court_available)
+
+    # ------------------------------------------------------------------
+    #  Ascent animation (one-time, data-CHANGED gated)
+    # ------------------------------------------------------------------
+    def _start_ascent(self):
+        try:
+            import anim
+            on = anim.ANIMATIONS_ON
+        except Exception:
+            on = True
+        self._anim.stop()
+        if not on or not self.isVisible():
+            self._ascent = 1.0
+            return
+        self._ascent = 0.0
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+    # ------------------------------------------------------------------
+    #  Measure pass (drives BOTH paint and setFixedHeight — no clipping)
+    # ------------------------------------------------------------------
+    def _measure(self):
+        # The total height is fixed by the two bands + the hairline (decision E:
+        # COURT ~118 + 1 + CLIMB ~150). Stable so the section never jumps.
+        self._total_h = self.COURT_H + 1 + self.CLIMB_H
+        self.setFixedHeight(self._total_h)
+
+    def sizeHint(self) -> QSize:
+        return QSize(316, self._total_h)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(260, self._total_h)
+
+    # ------------------------------------------------------------------
+    #  Geometry build (cache seat/rope/rung rects + elided strings). Runs in
+    #  set_data/resize — NOT the paint hot path.
+    # ------------------------------------------------------------------
+    def _build_geometry(self):
+        w = max(1, self.width())
+        self._court_rect = QRectF(0, 0, w, self.COURT_H)
+        self._climb_rect = QRectF(0, self.COURT_H + 1, w, self.CLIMB_H)
+
+        self._build_court_geometry(w)
+        self._build_climb_geometry(w)
+
+    def _build_court_geometry(self, w):
+        cc = self._cc
+        seats = list(cc.seats) if (cc is not None and cc.court_available) else []
+        # When locked/unavailable we still lay out 4 placeholder seats so the band
+        # height/structure is stable; paint decides what to draw.
+        n = max(1, len(seats)) if seats else 4
+        inner = w - 2 * self.PAD
+        seat_w = (inner - (n - 1) * self.SEAT_GAP) / n
+        top = self.PAD + self.CROWN_H + 4          # seats sit below the crown band
+        seat_h = self.COURT_H - top - self.PAD
+        self._seat_rects = []
+        self._seat_names = []
+        fm_chip = QFontMetrics(Fonts.tiny())
+        for i in range(n):
+            x = self.PAD + i * (seat_w + self.SEAT_GAP)
+            self._seat_rects.append(QRectF(x, top, seat_w, seat_h))
+            if i < len(seats):
+                s = seats[i]
+                avail = int(seat_w - self.SWATCH - 8)
+                world = fm_chip.elidedText(
+                    _coin_short_name(s.world_name) or s.world_model,
+                    Qt.TextElideMode.ElideRight, max(10, avail))
+                ember = ""
+                if s.has_ember:
+                    ember = fm_chip.elidedText(
+                        _coin_short_name(s.ember_name) or s.ember_model,
+                        Qt.TextElideMode.ElideRight, max(10, avail))
+                self._seat_names.append((world, ember))
+            else:
+                self._seat_names.append(("", ""))
+
+    def _build_climb_geometry(self, w):
+        cr = self._climb_rect
+        cc = self._cc
+        self._rope_left_x = cr.x() + self.ROPE_INSET
+        self._rope_right_x = cr.x() + w - self.ROPE_INSET
+        # vertical span: leave headroom at top (summit label) + a valley band at
+        # the bottom for the user marker (decision E: 18..132 of the band).
+        self._rope_top_y = cr.y() + 18
+        self._rope_bot_y = cr.y() + self.CLIMB_H - 30
+        span = self._rope_bot_y - self._rope_top_y
+
+        self._rung_layout = []
+        self._floor_y = self._rope_bot_y
+        if cc is not None and cc.climb_available and cc.rungs:
+            fm = QFontMetrics(Fonts.tiny())
+            label_avail = int((self._rope_right_x - self._rope_left_x) - 2 * self.RUNG_DOT - 8)
+            for r in cc.rungs:
+                # y_frac 1.0 == summit (top), 0.0 == floor (bottom).
+                y = self._rope_bot_y - max(0.0, min(1.0, r.y_frac)) * span
+                title = fm.elidedText(r.title, Qt.TextElideMode.ElideRight,
+                                      max(20, label_avail))
+                self._rung_layout.append((r, y, title))
+                if r.is_floor:
+                    self._floor_y = y
+        # the user ember marker rests just BELOW the floor rung, in the valley
+        # (NOT clamped onto the floor — decision D). A few px below the lowest rung
+        # but above the band bottom so its label fits.
+        self._user_y_rest = min(cr.y() + self.CLIMB_H - 12, self._floor_y + 18)
+
+    def resizeEvent(self, event):
+        self._build_geometry()
+        super().resizeEvent(event)
+
+    # ------------------------------------------------------------------
+    #  Paint
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        # band grounds + the hairline split.
+        if self._court_rect is not None:
+            p.fillRect(self._court_rect, QBrush(_COURT_GROUND))
+        if self._climb_rect is not None:
+            p.fillRect(self._climb_rect, QBrush(_COURT_GROUND.darker(108)))
+        p.setPen(self._hairline_pen)
+        p.drawLine(QPointF(0, self.COURT_H), QPointF(self.width(), self.COURT_H))
+
+        self._paint_court(p)
+        self._paint_climb(p)
+        p.end()
+
+    # ---- COURT band -------------------------------------------------------
+    def _paint_court(self, p):
+        cc = self._cc
+        # the band caption (top-left), framed as THE WORLD (decision C).
+        cap_rect = QRectF(self.PAD, 2, self.width() - 2 * self.PAD, 12)
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(_COURT_GOLD_DIM))
+        p.drawText(cap_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "THE COURT · what the world reaches for")
+
+        if self._locked or cc is None or not cc.court_available:
+            self._paint_court_unavailable(p)
+            return
+
+        for i, seat_rect in enumerate(self._seat_rects):
+            if i >= len(cc.seats):
+                break
+            self._paint_seat(p, seat_rect, cc.seats[i], self._seat_names[i])
+
+    def _paint_seat(self, p, r, seat, names):
+        # (1) the indigo seat plate.
+        grad = QLinearGradient(r.x(), r.y(), r.x(), r.y() + r.height())
+        grad.setColorAt(0.0, _COURT_INDIGO_HI)
+        grad.setColorAt(1.0, _COURT_INDIGO)
+        plate = QPainterPath()
+        plate.addRoundedRect(r, 5, 5)
+        p.fillPath(plate, QBrush(grad))
+        p.setPen(QPen(_COURT_GOLD_DIM, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(plate)
+
+        # (2) the GOLD crown above the seat (the world's verdict).
+        cx = r.center().x()
+        crown_top = self.PAD
+        self._paint_crown(p, cx, crown_top)
+
+        # the macro label (seat caption), top of the plate.
+        lab_rect = QRectF(r.x() + 2, r.y() + 3, r.width() - 4,
+                          QFontMetrics(Fonts.tiny()).height())
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(_COURT_SLATE))
+        p.drawText(lab_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                   (seat.label or seat.macro).upper())
+
+        world_name, ember_name = names
+
+        # (3) the world model chip: a model_color swatch + the elided name.
+        chip_y = lab_rect.bottom() + 4
+        self._paint_chip(p, r, chip_y, seat.world_model, world_name,
+                         spend_palette.model_color(seat.world_model, 0), _COURT_INK)
+
+        # (4) the thin GOLD underline = the world's token share of that task.
+        share_w = max(6.0, min(r.width() - 8, (r.width() - 8) * float(seat.world_share)))
+        uy = chip_y + QFontMetrics(Fonts.tiny()).height() + 4
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(_COURT_GOLD_DIM))
+        p.drawRoundedRect(QRectF(r.x() + 4, uy, r.width() - 8, 2.5), 1, 1)
+        p.setBrush(QBrush(_COURT_GOLD))
+        p.drawRoundedRect(QRectF(r.x() + 4, uy, share_w, 2.5), 1, 1)
+
+        # THE EMBER chip — "you reach for Y" — on the ember seat ONLY (taste, not
+        # a win, decision C). A hairline 'vs' tick + the ember chip below the gold.
+        if seat.has_ember and ember_name:
+            tick_y = uy + 5
+            p.setPen(QPen(_COURT_SLATE))
+            p.setFont(Fonts.tiny())
+            p.drawText(QRectF(r.x() + 2, tick_y, r.width() - 4,
+                              QFontMetrics(Fonts.tiny()).height()),
+                       Qt.AlignmentFlag.AlignHCenter, "you reach for")
+            ember_chip_y = tick_y + QFontMetrics(Fonts.tiny()).height() + 1
+            self._paint_chip(p, r, ember_chip_y, seat.ember_model, ember_name,
+                             _COURT_EMBER, _COURT_EMBER)
+
+    def _paint_chip(self, p, r, y, model_id, name, swatch_col, text_col):
+        """A small chip: a rounded color swatch + the elided model name."""
+        sw = float(self.SWATCH)
+        sx = r.x() + 5
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(swatch_col))
+        p.drawRoundedRect(QRectF(sx, y + 1, sw, sw), 2, 2)
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(text_col))
+        p.drawText(QRectF(sx + sw + 4, y, r.width() - (sx + sw + 4 - r.x()) - 4,
+                          QFontMetrics(Fonts.tiny()).height() + 2),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+
+    def _paint_crown(self, p, cx, top):
+        """A 5-point gold crown QPolygon (zigzag base + 3 ball finials) — the
+        bespoke crest idiom (sibling to the Arena rank crest). All ints."""
+        w = float(self.CROWN_W)
+        h = float(self.CROWN_H)
+        x0 = cx - w / 2.0
+        base_y = top + h
+        crown = QPolygonF()
+        crown.append(QPointF(x0, base_y))
+        crown.append(QPointF(x0, top + h * 0.35))
+        crown.append(QPointF(x0 + w * 0.25, top + h * 0.7))
+        crown.append(QPointF(x0 + w * 0.5, top))
+        crown.append(QPointF(x0 + w * 0.75, top + h * 0.7))
+        crown.append(QPointF(x0 + w, top + h * 0.35))
+        crown.append(QPointF(x0 + w, base_y))
+        grad = QLinearGradient(x0, top, x0, base_y)
+        grad.setColorAt(0.0, _COURT_GOLD_HI)
+        grad.setColorAt(1.0, _COURT_GOLD)
+        p.setBrush(QBrush(grad))
+        p.setPen(QPen(_COURT_GOLD_DIM, 1))
+        p.drawPolygon(crown)
+        # 3 ball finials atop the points (struck-coin sheen).
+        p.setBrush(QBrush(_COURT_GOLD_HI))
+        p.setPen(Qt.PenStyle.NoPen)
+        for fx in (x0 + 1, x0 + w * 0.5, x0 + w - 1):
+            p.drawEllipse(QPointF(fx, top + 1), 1.4, 1.4)
+
+    def _paint_court_unavailable(self, p):
+        """The court band collapses to a slate note (classifications failed) — the
+        climb still renders below. ZERO fake crowns (decision E)."""
+        r = self._court_rect
+        msg = ("Connect a key to place yourself" if self._locked
+               else "World task board unavailable")
+        # draw faint ghost seats so the band reads as 'a court, empty'.
+        for seat_rect in self._seat_rects:
+            p.setPen(QPen(_COURT_HAIRLINE, 1))
+            p.setBrush(QBrush(_COURT_GROUND.lighter(115)))
+            ghost = QPainterPath()
+            ghost.addRoundedRect(seat_rect, 5, 5)
+            p.drawPath(ghost)
+        p.setFont(Fonts.body())
+        p.setPen(QPen(_COURT_SLATE))
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, msg)
+
+    # ---- CLIMB band -------------------------------------------------------
+    def _paint_climb(self, p):
+        cc = self._cc
+        cr = self._climb_rect
+        # the band caption (top-left).
+        cap_rect = QRectF(self.PAD, cr.y() + 2, self.width() - 2 * self.PAD, 12)
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(_COURT_GOLD_DIM))
+        p.drawText(cap_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "THE CLIMB · this week, across OpenRouter")
+
+        if cc is None or not cc.climb_available or not self._rung_layout:
+            p.setFont(Fonts.body())
+            p.setPen(QPen(_COURT_SLATE))
+            p.drawText(cr, Qt.AlignmentFlag.AlignCenter, "Apps ladder unavailable")
+            return
+
+        # (1) two vertical gold rope rails.
+        p.setPen(self._rope_pen)
+        p.drawLine(QPointF(self._rope_left_x, self._rope_top_y),
+                   QPointF(self._rope_left_x, self._floor_y))
+        p.drawLine(QPointF(self._rope_right_x, self._rope_top_y),
+                   QPointF(self._rope_right_x, self._floor_y))
+
+        # (2) the thinned rungs (favicon-dot + elided title + abbreviated tokens).
+        for (r, y, title) in self._rung_layout:
+            self._paint_rung(p, r, y, title)
+
+        # (3) the dotted gap connector from the floor rung down to the user marker
+        # + the user ember valley marker (animated climb-in).
+        if cc.user_in_valley and cc.user_tokens > 0:
+            self._paint_user_marker(p, cc)
+        elif cc.user_tokens > 0:
+            # somehow on/above the floor — still NEVER an 'out-tokened' claim;
+            # mark the user honestly at the floor without a beat-claim.
+            self._paint_user_marker(p, cc)
+
+    def _paint_rung(self, p, r, y, title):
+        lx, rx = self._rope_left_x, self._rope_right_x
+        # the rung line between the rails.
+        p.setPen(QPen(_COURT_GOLD, 2))
+        p.drawLine(QPointF(lx, y), QPointF(rx, y))
+        # the favicon-dot at the left rail (a gold disc; the real favicon would be
+        # fetched async — the dot is the honest placeholder).
+        p.setBrush(QBrush(_COURT_GOLD_HI))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(lx + 1, y), self.RUNG_DOT / 2.0, self.RUNG_DOT / 2.0)
+        # the elided app title (just above the rung).
+        p.setFont(Fonts.tiny())
+        fm = QFontMetrics(Fonts.tiny())
+        p.setPen(QPen(_COURT_INK))
+        p.drawText(QRectF(lx + self.RUNG_DOT + 4, y - fm.height() - 1,
+                          rx - lx - self.RUNG_DOT - 4, fm.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, title)
+        # the abbreviated tokens (right-aligned, just above the rung).
+        p.setPen(QPen(_COURT_GOLD))
+        p.drawText(QRectF(lx, y - fm.height() - 1, rx - lx - 2, fm.height()),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+                   r.tokens_abbr)
+
+    def _paint_user_marker(self, p, cc):
+        # the resting valley y, lifted by the climb-in (animate from band bottom
+        # UP to the resting y as ascent goes 0->1).
+        band_bottom = self._climb_rect.y() + self.CLIMB_H
+        rest = self._user_y_rest
+        y = band_bottom - (band_bottom - rest) * max(0.0, min(1.0, self._ascent))
+        ux = self._rope_left_x
+
+        # (a) the faint dotted gold connector from the floor rung down to the user
+        # marker (only meaningful when the user is in the valley below the floor).
+        if cc.user_in_valley:
+            p.setPen(self._connector_pen)
+            p.drawLine(QPointF(ux, self._floor_y), QPointF(ux, y))
+            # the gap caption beside the connector (NEVER 'out-tokened').
+            gap = cc.gap_abbr
+            if gap:
+                p.setFont(Fonts.tiny())
+                p.setPen(QPen(_COURT_GOLD_DIM))
+                p.drawText(QRectF(ux + 8, (self._floor_y + y) / 2.0 - 7,
+                                  self._rope_right_x - ux - 8, 14),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           gap)
+
+        # (b) a static 2px ember glow ring + the solid ember dot = "you".
+        glow = QRadialGradient(QPointF(ux, y), 7)
+        glow.setColorAt(0.0, QColor(_COURT_EMBER_HI.red(), _COURT_EMBER_HI.green(),
+                                    _COURT_EMBER_HI.blue(), 120))
+        glow.setColorAt(1.0, QColor(_COURT_EMBER.red(), _COURT_EMBER.green(),
+                                    _COURT_EMBER.blue(), 0))
+        p.setBrush(QBrush(glow))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(ux, y), 7, 7)
+        p.setBrush(QBrush(_COURT_EMBER))
+        p.drawEllipse(QPointF(ux, y), 4, 4)
+
+        # (c) the "you · 6.7M · OpenCode" label beside the dot.
+        bits = ["you"]
+        if cc.user_abbr:
+            bits.append(cc.user_abbr)
+        if cc.user_app:
+            bits.append(cc.user_app)
+        label = " · ".join(bits)
+        fm = QFontMetrics(Fonts.tiny())
+        label = fm.elidedText(label, Qt.TextElideMode.ElideRight,
+                              int(self._rope_right_x - ux - 12))
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(_COURT_EMBER))
+        p.drawText(QRectF(ux + 10, y - fm.height() / 2.0,
+                          self._rope_right_x - ux - 10, fm.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+
+    # ------------------------------------------------------------------
+    #  Interaction — the COURT band and the CLIMB band are separate targets
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        cc = self._cc
+        if self._locked or cc is None:
+            super().mousePressEvent(event)
+            return
+        y = event.position().y()
+        gy = int(self.mapToGlobal(QPoint(0, int(y))).y())
+        if y <= self.COURT_H:
+            if cc.court_available:
+                self.court_clicked.emit(gy)
+        else:
+            if cc.climb_available:
+                self.climb_clicked.emit(gy)
+
+
+# ---- #18 COURT / CLIMB DOSSIERS (the tap-through popups) -------------------
+class CourtDossierStrip(QWidget):
+    """The painted court dossier body: the top-3 world models per macro + the
+    macro shares. All text QPainter-drawn (injection-safe); the HTML wrapper ALSO
+    html.escapes names. devicePixelRatio-aware. Measure-before-allocate."""
+
+    STRIP_W = 304
+    PAD = 12
+    ROW_H = 16
+    MACRO_GAP = 6
+
+    def __init__(self, cc, board=None, parent=None):
+        super().__init__(parent)
+        self._cc = cc
+        self._board = board                # task_court.TaskBoard (top-3 source)
+        self._rows = self._build_rows()
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _build_rows(self):
+        # [(macro_label, world_share, [(name, share), ...top3])]
+        rows = []
+        cc = self._cc
+        from task_court import humanize_model
+        for s in cc.seats:
+            top3 = []
+            if self._board is not None:
+                ranked = self._board.macro_models.get(s.macro, [])
+                for mid, sh in ranked[:3]:
+                    top3.append((humanize_model(mid), sh))
+            if not top3 and s.world_model:
+                top3 = [(s.world_name, s.world_share)]
+            rows.append((s.label or s.macro, s.world_share, top3, s.ember_name))
+        return rows
+
+    def _measure_height(self) -> int:
+        head_h = QFontMetrics(Fonts.mono_small()).height() + 6
+        body = 0
+        for (_, _, top3, _) in self._rows:
+            body += self.ROW_H                              # the macro header row
+            body += max(1, len(top3)) * self.ROW_H         # the model rows
+            body += self.MACRO_GAP
+        return int(self.PAD * 2 + head_h + body)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        w = self.STRIP_W
+        pad = self.PAD
+        f_head = Fonts.mono_small()
+        fm_head = QFontMetrics(f_head)
+        p.setFont(f_head)
+        p.setPen(QPen(_COURT_GOLD))
+        p.drawText(QRectF(pad, pad, w - 2 * pad, fm_head.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "\U0001F451 The world's task court")     # 👑
+        y = pad + fm_head.height() + 6
+        fm = QFontMetrics(Fonts.tiny())
+        for (label, wshare, top3, ember) in self._rows:
+            p.setFont(Fonts.label())
+            p.setPen(QPen(_COURT_GOLD))
+            p.drawText(QRectF(pad, y, w - 2 * pad, self.ROW_H),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       f"{label.upper()}  ·  {wshare * 100:.0f}% of world tokens")
+            y += self.ROW_H
+            p.setFont(Fonts.tiny())
+            for i, (name, sh) in enumerate(top3):
+                crown = "\U0001F451 " if i == 0 else "   "    # crown the #1
+                p.setPen(QPen(_COURT_INK if i == 0 else Colors.TEXT_SECONDARY))
+                p.drawText(QRectF(pad + 6, y, w - 2 * pad - 80, self.ROW_H),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           f"{crown}{name}")
+                p.setPen(QPen(_COURT_GOLD_DIM))
+                p.drawText(QRectF(w - pad - 76, y, 76, self.ROW_H),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           f"{sh * 100:.1f}%")
+                y += self.ROW_H
+            if ember:
+                p.setPen(QPen(_COURT_EMBER))
+                p.drawText(QRectF(pad + 6, y - self.ROW_H, w - 2 * pad, self.ROW_H),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           f"you reach for {ember}")
+            y += self.MACRO_GAP
+
+
+class ClimbDossierStrip(QWidget):
+    """The painted climb dossier body: the FULL 20-app ladder with the user's row
+    highlighted in EMBER at the foot. All text QPainter-drawn (injection-safe);
+    the HTML wrapper ALSO html.escapes names. NEVER an 'out-tokened' claim."""
+
+    STRIP_W = 304
+    PAD = 12
+    ROW_H = 15
+
+    def __init__(self, cc, apps=None, parent=None):
+        super().__init__(parent)
+        self._cc = cc
+        self._apps = apps or []            # the FULL AppRanking list (top-20)
+        self._rows = self._build_rows()
+        self._h = self._measure_height()
+        self.setFixedSize(self.STRIP_W, self._h)
+
+    def _build_rows(self):
+        from task_court import abbr_tokens
+        rows = []
+        if self._apps:
+            ordered = sorted(self._apps, key=lambda a: -int(getattr(a, "total_tokens", 0)))
+            for a in ordered:
+                rows.append((int(getattr(a, "rank", 0)),
+                             getattr(a, "title", "") or getattr(a, "slug", ""),
+                             abbr_tokens(int(getattr(a, "total_tokens", 0))), False))
+        else:
+            for r in self._cc.rungs:
+                rows.append((r.rank, r.title, r.tokens_abbr, False))
+        return rows
+
+    def _measure_height(self) -> int:
+        head_h = QFontMetrics(Fonts.mono_small()).height() + 6
+        body = (len(self._rows) + 1) * self.ROW_H        # +1 the user row
+        return int(self.PAD * 2 + head_h + 8 + body)
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+    def _paint_into(self, p):
+        w = self.STRIP_W
+        pad = self.PAD
+        cc = self._cc
+        f_head = Fonts.mono_small()
+        fm_head = QFontMetrics(f_head)
+        p.setFont(f_head)
+        p.setPen(QPen(_COURT_GOLD))
+        p.drawText(QRectF(pad, pad, w - 2 * pad, fm_head.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "⛰ The apps climb · this week")       # ⛰
+        y = pad + fm_head.height() + 8
+        fm = QFontMetrics(Fonts.tiny())
+        for (rank, title, abbr, _) in self._rows:
+            p.setFont(Fonts.tiny())
+            p.setPen(QPen(Colors.TEXT_MUTED))
+            p.drawText(QRectF(pad, y, 26, self.ROW_H),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       f"#{rank}")
+            title_el = fm.elidedText(title, Qt.TextElideMode.ElideRight, int(w - pad - 26 - 90))
+            p.setPen(QPen(Colors.TEXT_SECONDARY))
+            p.drawText(QRectF(pad + 28, y, w - pad - 28 - 84, self.ROW_H),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       title_el)
+            p.setPen(QPen(_COURT_GOLD_DIM))
+            p.drawText(QRectF(w - pad - 82, y, 82, self.ROW_H),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       abbr + " tok")
+            y += self.ROW_H
+        # the user row at the FOOT, highlighted in ember (the honest valley line).
+        p.setBrush(QBrush(QColor(_COURT_EMBER.red(), _COURT_EMBER.green(),
+                                 _COURT_EMBER.blue(), 28)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(QRectF(pad - 2, y, w - 2 * pad + 4, self.ROW_H), 3, 3)
+        p.setFont(Fonts.tiny())
+        p.setPen(QPen(_COURT_EMBER))
+        you = "you"
+        if cc.user_app:
+            you = f"you · {cc.user_app}"
+        p.drawText(QRectF(pad + 28, y, w - pad - 28 - 84, self.ROW_H),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, you)
+        p.drawText(QRectF(w - pad - 82, y, 82, self.ROW_H),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   (cc.user_abbr or "0") + " tok")
+
+
+def build_court_dossier_html(cc, board=None) -> str:
+    """The #18 COURT dossier for the ProviderPopup: a header + the painted top-3
+    per macro strip + the WORLD framing spelled out (taste-vs-world, NEVER the
+    user's split). Every API-sourced name is html.escape'd before the wrapper (the
+    pixmap text is QPainter-drawn so it's injection-safe). Returns '' when empty."""
+    if cc is None or not cc.court_available:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— WORLD TASK BOARD UNAVAILABLE —</div>")
+    out = [
+        "<div style='font-size:11pt;font-weight:bold;color:#E8C45A;'>"
+        "\U0001F451 The world's task court</div>",
+        "<div style='color:#6A6884;font-size:8pt;margin-bottom:6px;'>"
+        "Which model the whole of OpenRouter reaches for, per task — global "
+        "market share, not your split.</div>",
+    ]
+    try:
+        strip = CourtDossierStrip(cc, board)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{CourtDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("court dossier render failed", exc_info=True)
+    # the ember taste line, framed honestly (decision C).
+    ember = ""
+    for s in cc.seats:
+        if s.has_ember and s.ember_name:
+            ember = html.escape(s.ember_name)
+            seatlabel = html.escape(s.label or s.macro)
+            world = html.escape(s.world_name or s.world_model)
+            out.append(
+                f"<div style='margin-top:2px;color:#FF7A3C;font-size:8.5pt;'>"
+                f"On {seatlabel.lower()}, the world crowns {world}; "
+                f"you reach for {ember} — taste, not a verdict.</div>")
+            break
+    if not ember:
+        out.append(
+            "<div style='margin-top:2px;color:#9AA0AD;font-size:8pt;'>"
+            "Connect a management key to seat your own top model beside the "
+            "world's pick.</div>")
+    return "".join(out)
+
+
+def build_climb_dossier_html(cc, apps=None) -> str:
+    """The #18 CLIMB dossier for the ProviderPopup: a header + the painted FULL
+    20-app ladder with the user's row at the foot + the honest gap spelled out.
+    NEVER an 'out-tokened' claim (decision D). Every API-sourced name is
+    html.escape'd before the wrapper. Returns '' when empty."""
+    if cc is None or not cc.climb_available:
+        return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
+                "— APPS LADDER UNAVAILABLE —</div>")
+    out = [
+        "<div style='font-size:11pt;font-weight:bold;color:#E8C45A;'>"
+        "⛰ The apps climb</div>",
+        "<div style='color:#6A6884;font-size:8pt;margin-bottom:6px;'>"
+        "The public apps leaderboard this week, across OpenRouter.</div>",
+    ]
+    try:
+        strip = ClimbDossierStrip(cc, apps)
+        pm = strip.render_pixmap()
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG")
+        buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        out.append(
+            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
+            f"width='{ClimbDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+    except Exception:
+        log.debug("climb dossier render failed", exc_info=True)
+    # the honest distance — the delight, NEVER an 'out-tokened' claim.
+    app_label = html.escape(cc.user_app or "your app")
+    if cc.user_in_valley and cc.gap_abbr:
+        from task_court import _abbr_multiple
+        mult = html.escape(_abbr_multiple(cc.gap_multiple))
+        out.append(
+            f"<div style='margin-top:2px;color:#FF7A3C;font-size:8.5pt;'>"
+            f"Your traffic runs through {app_label} — {cc.user_abbr} tokens this "
+            f"week. You're a climber at base camp: ~{mult}x to reach the board.</div>")
+    else:
+        out.append(
+            f"<div style='margin-top:2px;color:#FF7A3C;font-size:8.5pt;'>"
+            f"Your traffic runs through {app_label} — {cc.user_abbr or '0'} tokens "
+            f"this week.</div>")
+    return "".join(out)

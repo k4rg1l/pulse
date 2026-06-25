@@ -2266,6 +2266,32 @@ class APIClient:
             log.warning("benchmarks fetch failed: %s", e)
             return None
 
+    def get_task_classifications(self):
+        """#18 THE COURT — the WORLD's task board: which model the whole of
+        OpenRouter reaches for in each macro-category (code/agent/data/general).
+        USER-key-gated (sibling to get_benchmarks; rides this client's USER-auth
+        self.session — recon proves it 401s noauth, so it is NOT a FrontendClient
+        no-auth call). The window param ONLY accepts '7d' (any other value ->
+        rejected), so it is HARDCODED. Returns a TaskBoard (parsed) or None on
+        failure so the court degrades to its 'world task board unavailable' slate
+        without sinking the climb.
+
+        IMPORTANT (decision C): this is GLOBAL market-share of ALL OpenRouter
+        traffic, NOT the user's personal task split (scope params are ignored and
+        analytics has no task dimension). The widget frames every crown as 'the
+        world', NEVER as the user's own mix."""
+        try:
+            from task_court import parse_task_classifications
+            url = f"{BASE_URL}/api/v1/classifications/task"
+            # window=7d is the ONLY accepted value (hardcoded — decision A/E).
+            resp = self.session.get(url, params={"window": "7d"}, timeout=20)
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+            return parse_task_classifications(data)
+        except Exception as e:
+            log.warning("classifications/task fetch failed: %s", e)
+            return None
+
 
 class APIWorker(QObject):
     """Background worker that fetches data and emits signals."""
@@ -2429,7 +2455,75 @@ class APIWorker(QObject):
                 log.exception("flight recorder build failed")
                 recorder = None
 
-            board = InsightsBoard(week=week, recorder=recorder)
+            # ---- #18 THE COURT & THE CLIMB — the wide closer (decision B) ----
+            # Rides this same fetch (no new worker slot). It REUSES #16's weekly
+            # top model + #17's lifetime token total from the AnalyticsClient
+            # cache (the identical query args re-hit the cache for FREE) and adds
+            # the two NEW network methods it owns: get_task_classifications()
+            # (USER-auth, window=7d) + get_rankings_apps() (NOAUTH browser-UA).
+            # A failure in ANY #18 source degrades ONLY board.court to None WITHOUT
+            # wiping #16's .week or #17's .recorder (independent try/except), and a
+            # PER-HALF degrade lives inside build_court_climb (court vs climb).
+            court = None
+            try:
+                from task_court import build_court_climb
+
+                # (a) THE COURT — the WORLD task board (USER/mgmt; None -> the
+                # court band collapses to 'world task board unavailable').
+                task_board = None
+                try:
+                    task_board = self.client.get_task_classifications()
+                except Exception:
+                    log.exception("court: classifications fetch failed")
+                    task_board = None
+
+                # (c) THE CLIMB — the public apps ladder (NOAUTH browser-UA;
+                # almost always renders). None -> the climb half can't render.
+                apps = None
+                try:
+                    apps = self.frontend.get_rankings_apps()
+                except Exception:
+                    log.exception("climb: rankings/apps fetch failed")
+                    apps = None
+
+                # (b) REUSE #16's weekly top model + #17's token total + the
+                # dims=[app] label from the analytics CACHE (free hits — same
+                # args as the #16/#17 queries above). The ember overlay needs the
+                # top model (mgmt); when locked these all return None -> the
+                # ember is dropped, the world court + summit still render.
+                top_model = None
+                if week is not None and not week.is_empty:
+                    top_model = week.champion_id            # reuse #16 (no query)
+                user_tokens = recorder.lifetime_tokens if recorder is not None else 0
+                user_app = ""
+                try:
+                    # dims=[app] over the SAME 60d window — a small extra mgmt
+                    # query for the 'your app' label ('OpenCode'). Degrades to ''.
+                    parsed_app = self.analytics.query(
+                        ["total_usage", "tokens_total", "request_count"],
+                        ["app"], "day", r_start.isoformat(), now.isoformat())
+                    if parsed_app is not None:
+                        agg_app: dict = {}
+                        for row in (parsed_app.get("rows") or []):
+                            label = str(row.get("app") or "")
+                            if not label:
+                                continue
+                            agg_app[label] = agg_app.get(label, 0) + _as_int(
+                                row.get("tokens_total"))
+                        if agg_app:
+                            user_app = max(agg_app.items(), key=lambda kv: kv[1])[0]
+                except Exception:
+                    log.exception("court: dims=[app] label query failed")
+                    user_app = ""
+
+                court = build_court_climb(
+                    task_board, apps, top_model, user_tokens, user_app)
+            except Exception:
+                # #18 must never sink the whole board — degrade its slot to None.
+                log.exception("court & climb build failed")
+                court = None
+
+            board = InsightsBoard(week=week, recorder=recorder, court=court)
 
             # INFO lines so the live boot can confirm each slot landed. Magnitudes
             # only (ids/shares/counts) — NEVER the management key.
@@ -2449,6 +2543,18 @@ class APIWorker(QObject):
                 log.info("flight recorder: no traffic logged yet (empty)")
             else:
                 log.info("flight recorder: none (locked or query failed)")
+
+            if court is not None and not court.is_empty:
+                # crowns=N, apps floor=Ntok, you=Mtok (Xx below) — the honest
+                # headline of the whole feature (NEVER an 'out-tokened' claim).
+                gap = (f"{court.gap_multiple:,.0f}x below" if court.user_in_valley
+                       else "on the board")
+                log.info("court & climb: crowns=%d, apps floor=%d tok, "
+                         "you=%d tok (%s), ember=%s",
+                         len(court.seats), court.floor_tokens, court.user_tokens,
+                         gap, court.has_ember)
+            else:
+                log.info("court & climb: none (both sources locked/failed)")
 
             self.insights_ready.emit(board)
         except Exception:

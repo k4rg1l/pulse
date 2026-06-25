@@ -42,6 +42,7 @@ from widgets import (
     ValueAssayWidget, build_assay_certificate_html, assay_accent_hex,
     ModelOfWeekBelt, build_week_dossier_html,
     TokenRecorder, build_recorder_dossier_html,
+    TaskCourt, build_court_dossier_html, build_climb_dossier_html,
 )
 import value_assay
 from nav_rail import NavRail
@@ -567,9 +568,18 @@ class Dashboard(QWidget):
         self._token_recorder.recorder_clicked.connect(self._on_recorder_clicked)
         insights_layout.addWidget(self._token_recorder)
 
-        # NOTE (scaffold): #18 TaskCourt addWidget here LATER (under the recorder).
-        # Its set_locked()/set_data dispatch already lives in update_insights below
-        # (guarded by getattr) so wiring it is purely additive.
+        # #18 THE COURT & THE CLIMB — FOURTH widget, the wide CLOSER: the WORLD's
+        # task crown (taste-vs-world) over an HONEST base-camp apps ladder (the
+        # user pinned in the valley, never an 'out-tokened' claim). MIXED auth,
+        # degrades per-half (the court half needs user/mgmt; the climb half is
+        # noauth and always renders). Rides fetch_insights -> board.court;
+        # update_insights below already routes board.court -> set_data and the
+        # locked path -> set_locked (guarded by getattr). HERALDIC gold-on-indigo
+        # + the single ember 'you' thread, separable from every sibling lane.
+        self._task_court = TaskCourt(self)
+        self._task_court.court_clicked.connect(self._on_court_clicked)
+        self._task_court.climb_clicked.connect(self._on_climb_clicked)
+        insights_layout.addWidget(self._task_court)
 
         self._or_layout.addWidget(self._insights_container)
 
@@ -872,6 +882,70 @@ class Dashboard(QWidget):
         if not html_str or (rec is not None and rec.is_empty):
             return
         popup.set_accent("#E8A23D")          # brass/amber (decision E)
+        popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
+        self._popup_model_id = key
+
+    # ---- Wave 3 #18 THE COURT & THE CLIMB click-through ----
+
+    def _on_court_clicked(self, anchor_y):
+        """#18 THE COURT: the court band was tapped -> render the world-task
+        dossier (top-3 world models per macro + the macro shares + the honest
+        taste-vs-world ember line) to a pixmap and show it in the shared popup.
+        Mirrors _on_recorder_clicked (keyed 'insight:court', debounced via the
+        _popup_just_hidden_at<0.15 just-closed guard, toggle-hide). GOLD accent
+        (the world's verdict). No popup when the world board is unavailable."""
+        popup = self._ensure_provider_popup()
+        key = "insight:court"
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        w = getattr(self, "_task_court", None)
+        cc = getattr(w, "_cc", None) if w is not None else None
+        if cc is None or not cc.court_available:
+            return
+        html_str = build_court_dossier_html(cc, getattr(cc, "task_board", None))
+        if not html_str:
+            return
+        popup.set_accent("#E8C45A")          # heraldic gold (the world's verdict)
+        popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
+        self._popup_model_id = key
+
+    def _on_climb_clicked(self, anchor_y):
+        """#18 THE CLIMB: the climb band was tapped -> render the full 20-app
+        ladder dossier with the user's row highlighted in EMBER at the foot (the
+        honest base-camp distance, NEVER an 'out-tokened' claim) to a pixmap and
+        show it in the shared popup. Mirrors _on_court_clicked (keyed
+        'insight:climb', debounced, toggle-hide). EMBER accent (the 'you' thread).
+        No popup when the ladder is unavailable."""
+        popup = self._ensure_provider_popup()
+        key = "insight:climb"
+        just_closed = (
+            time.monotonic() - self._popup_just_hidden_at < 0.15
+            and self._popup_model_id == key
+        )
+        if just_closed:
+            self._popup_model_id = None
+            return
+        if popup.isVisible() and self._popup_model_id == key:
+            popup.hide()
+            self._popup_model_id = None
+            return
+        w = getattr(self, "_task_court", None)
+        cc = getattr(w, "_cc", None) if w is not None else None
+        if cc is None or not cc.climb_available:
+            return
+        html_str = build_climb_dossier_html(cc, getattr(cc, "all_apps", None))
+        if not html_str:
+            return
+        popup.set_accent("#FF7A3C")          # the single ember 'you' thread
         popup.show_beside(html_str, self._dashboard_global_rect(), int(anchor_y))
         self._popup_model_id = key
 
