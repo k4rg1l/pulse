@@ -4,7 +4,7 @@
 - **New agent?** Read THIS top-to-bottom first, then [AGENTS.md](AGENTS.md). That's the whole onboarding — you'll know the vision, the current state, and exactly what to build next.
 - **Outgoing agent?** Update this as your *last act*: Status, what you shipped, what's next, any new decision/gotcha. When something becomes a permanent rule, move it into AGENTS.md. Keep **THE VISION** section stable.
 
-**Last updated:** 2026-06-24 · **v0.8.0 RELEASED** (*The Arena* + logging; pushed/tagged/release w/ `Pulse.exe`). **Unpushed on local `main` since v0.8.0:** Wave 1 **#2 "The Ledger"** + **F2**, then **#4 "Speed Percentile"** (fleet-relative velocity band) + an **app-wide pixel-alignment pass**. **205 tests green.** Not pushed/released. **NEXT: the Orchestrator** (see [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)) finishes the OpenRouter roadmap on a branch, then deep-dives Claude.
+**Last updated:** 2026-06-24 · **Phase A COMPLETE.** All 18 OpenRouter roadmap features (#1–#18) + all 4 foundations (F1–F4) are shipped on branch `openrouter-roadmap` (off `main`). **599 tests green.** Branch left for review — NOT merged, NOT pushed, NOT released. **NEXT: Phase B — Claude deep-dive** (see [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)), on a fresh branch off `main`.
 
 ---
 
@@ -33,30 +33,29 @@ Follow the roadmap. **Re-verify any endpoint live right before building it** —
 ## Status — where we are
 
 - **Released `v0.8.0`** (`origin/main`, tagged, GitHub release w/ binary): **The Arena** + **structured logging**.
-- **Unpushed on local `main` since v0.8.0:**
-  - **Foundation F2** (`frontend_client.py`): no-auth client for `openrouter.ai/api/frontend/*` + slug↔permaslug resolver + pure parsers, unit-tested against captured public fixtures.
-  - **#2 "The Ledger"** — per-provider **Trust Seals** (Custody Score S→F) + **Custody Dossier** popup + real logos. Opt-out `show_trust_seals`.
-  - **#4 "Speed Percentile"** — a fleet-relative **velocity band** on each pinned card: a lightning-bolt emblem + a clean percentile meter (gradient fill + glowing knob) + tier word ("BRISK · faster than 40%") + a click-through **Speed dossier** (STREAM SPEED vs FIRST TOKEN, both percentile bars, champion providers). Pure layer = `SpeedStanding` / `speed_tier` / `SpeedBoard.standing`. Opt-out `show_speed`.
-  - **App-wide pixel-alignment pass** — driven by a 9-agent audit. Bands + provider rows now share ONE left rail (`_icon_col_cx` / `_content_col_x`); uniform vertical rhythm (`BAND_GAP`/`ROWS_GAP`); BurnRateBar / ArcGauge / source cards / panels / settings all squared up. Locked by a `qapp` geometry test.
-- **Green:** `python -m pytest -q` → **205 passed**.
+- **On `main` (unpushed since v0.8.0):** F2 + #2 The Ledger + #4 Speed Percentile + app-wide pixel-alignment pass.
+- **On branch `openrouter-roadmap` (off `main`) — Phase A COMPLETE, NOT merged/pushed/released:**
+  - **Wave 1 — Pinned-card enrichments:** #1 The Arena (F4), #2 The Ledger (F2), #3 The Pulse (73h Uptime Ribbon), #4 Speed Percentile, #5 The Threshold / Cheapest Door (F1), #6 The Waterline / Hidden-Cost Badges, #7 The Tape / Trending Arrow, #8 The Fault Line / Price-Drift Watcher.
+  - **Wave 2 — Ground-truth Spend zone:** #9 The Spectrum / Spend X-Ray (F3 AnalyticsClient — `AnalyticsClient`: `/analytics/meta` + cached `/analytics/query`, management key; SPEND zone replaces the estimated Usage/Burn-Rate), #10 The Till Roll / Per-Request Receipt, #11 The Autopsy / Spend Autopsy, #12 The Rebate Stub / Cache & Reasoning Savings, #13 The Séance / Ghost Model Detector, #14 The Hourglass / Budget Burn-Down.
+  - **Wave 3 — Insights zone:** #15 The Assay / Value Index (+ Insights scaffold), #16 The Title Belt / Model of the Week, #17 The Flight Recorder / Token Odometer + Records, #18 The Court & The Climb / Task Crown + Out-tokened X.
+  - **New top-level pure modules:** `price_drift.py`, `spend_palette.py`, `value_assay.py`, `model_of_week.py`, `token_recorder.py`, `task_court.py`.
+  - **Mgmt-key features:** render live on this machine (a `management_api_key` is present); degrade to honest locked/young-account states (zero fake data) when absent.
+- **Green:** `python -m pytest -q` → **599 passed** (was 205 at branch start).
 - **Gotcha banked (see AGENTS.md + memory):** Pulse 401 / $0.00 ⇒ `config.API_KEY` resolved **empty** — env `OPENROUTER_API_KEY` first, then `settings.json`. A persistent User-scope `OPENROUTER_API_KEY` is now set on this machine so `pulse-rebuild` launches authed. **Also:** assistant tool reads can be an isolated FS snapshot ≠ the user's live machine — verify from the user's own shell.
-- Running `dist/Pulse.exe` is the new build. **The OpenRouter roadmap is NOT finished** — #3 (Uptime Ribbon), the rest of Wave 1/2/3, and the management-key/Analytics features remain. That's the Orchestrator's job (below).
+- **The OpenRouter roadmap is DONE.** Next is Phase B (Claude deep-dive) on a fresh branch off `main`.
 
 ---
 
-## ▶ THE NEXT BUILD — hand the wheel to the Orchestrator
+## ▶ THE NEXT BUILD — Phase B: Claude deep-dive
+
+**Phase A is complete.** Branch `openrouter-roadmap` holds all 18 features + F1–F4 and is left for review.
 
 The next phase runs through an **Orchestrator agent** — full operating manual in **[docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)** (that file IS the prompt). It *manages*; it does not code. It spawns high-effort Opus 4.8 worker agents with detailed, self-contained specs and keeps its own context lean.
-
-**Phase A — finish the OpenRouter roadmap on a branch.** Build every remaining roadmap feature ([docs/OPENROUTER-ROADMAP.md](docs/OPENROUTER-ROADMAP.md)) to the WILD bar, one validated commit each, on a dedicated branch (`openrouter-roadmap`). First item: **#3 73-Hour Uptime Ribbon**, then the rest of Waves 1–3 incl. the management-key Analytics tier. Leave the branch for review — **do NOT merge to main, do NOT release.**
 
 **Phase B — Claude deep-dive.** Back to `main` → new branch → reverse-engineer Claude's local data + APIs as thoroughly as OpenRouter (grow [docs/CLAUDE-LOCAL-DATA.md](docs/CLAUDE-LOCAL-DATA.md) into a full `docs/CLAUDE-RESEARCH.md` + a curated wild-feature `docs/CLAUDE-ROADMAP.md`), then orchestrate building those.
 
 ### The build flow for each enrichment (non-negotiable — every worker follows this)
 pure parser unit-tested against a captured sample → render (font-metric-driven; reuse `widgets.py` patterns) → **deterministic validation** (a `qapp` test that measures the result) + a careful live check → **/security-review (Sonnet over `git diff --staged`)** → commit. One enrichment, one commit. **The user does the visual QA — keep it fast + precise; never screenshot-click.**
-
-### #3 — 73-Hour Uptime Ribbon (first roadmap item for the Orchestrator)
-Source: `/api/frontend/v1/stats/endpoint?permaslug=…&variant=standard` → endpoint UUIDs (`parse_endpoint_refs`, built) → `stats/uptime-hourly?id=<UUID>` → `parse_uptime_hourly` → 73 chronological `{date, uptime}` points (built + tested). *Wild seed:* a **GitHub-style 73-cell hourly heat-strip** per provider, not a number. **Heads-up:** N× requests (1 stats/endpoint + 1 uptime-hourly per provider per model) — poll sparingly + cache hard.
 
 ### Lessons banked (read these; pass them to every worker)
 - **Re-verify endpoints live first** — the frontend API drifts; `stats/*` 404 on the public slug (need the versioned permaslug). Tools: `tools/or_probe_frontend.py`; captures land in gitignored `tools/_probe_out/`.
@@ -116,4 +115,4 @@ The **active** nav-rail slot for vivid accents (GPU green / System teal / Settin
 - **Dashboard height doesn't shrink per tab.** Switching to a shorter panel (Claude/GPU/System) without re-summoning leaves empty space below the content (the dashboard keeps the taller panel's height). Minor; a real polish item is to size the dashboard to the active panel's content on tab switch.
 - The `/security-review` gate activates at session start; if you just changed it, restart.
 - Deps: `nvidia-ml-py`, `psutil` (optional, graceful if absent). Logos use `PySide6.QtSvg`.
-- `win_backdrop.py` is dormant (acrylic scrapped); safe to delete. The `top_provider` field in `ModelInfo` is dead/unused — clean it up when the pricing model gets built (roadmap #5/#6).
+- `win_backdrop.py` is dormant (acrylic scrapped); safe to delete. The dead `top_provider` field in `ModelInfo` was removed when F1 shipped with #5.
