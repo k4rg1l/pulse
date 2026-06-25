@@ -6,6 +6,8 @@
 
 **Last updated:** 2026-06-24 · **Phase A COMPLETE.** All 18 OpenRouter roadmap features (#1–#18) + all 4 foundations (F1–F4) are shipped on branch `openrouter-roadmap` (off `main`). **599 tests green.** Branch left for review — NOT merged, NOT pushed, NOT released. **NEXT: Phase B — Claude deep-dive** (see [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)), on a fresh branch off `main`.
 
+> **Validating Phase A?** See **[docs/PHASE-A-VALIDATION.md](docs/PHASE-A-VALIDATION.md)** — the complete cold-start QA playbook (per-feature table, toggles, log markers, honesty contract, known non-blockers).
+
 ---
 
 ## ★ THE VISION — read once; it's the *why* behind everything
