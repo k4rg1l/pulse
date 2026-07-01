@@ -25,6 +25,8 @@ import requests
 from dataclasses import dataclass, field
 from typing import Optional
 
+from num import as_float, as_int
+
 log = logging.getLogger("pulse.frontend")
 
 BASE_URL = "https://openrouter.ai"
@@ -522,12 +524,6 @@ class SpeedBoard:
 def parse_performance(rows: list) -> SpeedBoard:
     """Build a :class:`SpeedBoard` from ``rankings/performance`` rows. Pure.
     Rows are keyed by permaslug (the ``id``/``slug`` fields are identical)."""
-    def _f(v):
-        try:
-            return float(v) if v is not None else None
-        except (TypeError, ValueError):
-            return None
-
     out = []
     for r in rows or []:
         if not isinstance(r, dict):
@@ -535,12 +531,12 @@ def parse_performance(rows: list) -> SpeedBoard:
         out.append(SpeedRanking(
             permaslug=r.get("slug") or r.get("id") or "",
             name=r.get("name", ""),
-            p50_throughput=_f(r.get("p50_throughput")),
-            p50_latency=_f(r.get("p50_latency")),
+            p50_throughput=as_float(r.get("p50_throughput"), None),
+            p50_latency=as_float(r.get("p50_latency"), None),
             best_throughput_provider=r.get("best_throughput_provider"),
-            best_throughput_price=_f(r.get("best_throughput_price")),
+            best_throughput_price=as_float(r.get("best_throughput_price"), None),
             best_latency_provider=r.get("best_latency_provider"),
-            best_latency_price=_f(r.get("best_latency_price")),
+            best_latency_price=as_float(r.get("best_latency_price"), None),
             provider_count=int(r.get("provider_count") or 0),
             request_count=int(r.get("request_count") or 0),
         ))
@@ -588,12 +584,6 @@ def parse_rankings_models(rows: list) -> TrendBoard:
     fraction; a missing/null/non-numeric change is retained as the key mapping
     to None (33/424 rows live), so the card can tell "ranked but no delta" from
     "absent from the board"."""
-    def _f(v):
-        try:
-            return float(v) if v is not None else None
-        except (TypeError, ValueError):
-            return None
-
     by_perma = {}
     for r in rows or []:
         if not isinstance(r, dict):
@@ -603,7 +593,7 @@ def parse_rankings_models(rows: list) -> TrendBoard:
             continue
         # Last writer wins on a permaslug collision (e.g. a :free variant row
         # sharing a base permaslug); the standard variant is listed first live.
-        by_perma.setdefault(perma, _f(r.get("change")))
+        by_perma.setdefault(perma, as_float(r.get("change"), None))
     return TrendBoard(by_perma)
 
 
@@ -640,14 +630,6 @@ def parse_rankings_apps(data) -> list:
     int(); ``total_requests`` is an int; ``rank`` order is preserved as returned.
     Returns a list of :class:`AppRanking` (empty list on a missing/odd payload —
     never raises)."""
-    def _int(v) -> int:
-        if v is None or v == "":
-            return 0
-        try:
-            return int(float(v))   # tolerate '7.16e12'-ish or '123'; STRING->int
-        except (TypeError, ValueError):
-            return 0
-
     week = []
     if isinstance(data, dict):
         week = data.get("week") or []
@@ -659,12 +641,12 @@ def parse_rankings_apps(data) -> list:
         if not isinstance(app, dict):
             app = {}
         out.append(AppRanking(
-            rank=_int(r.get("rank")),
+            rank=as_int(r.get("rank")),
             title=app.get("title") or app.get("slug") or "",
             slug=app.get("slug") or "",
             favicon_url=app.get("favicon_url") or None,
-            total_tokens=_int(r.get("total_tokens")),
-            total_requests=_int(r.get("total_requests")),
+            total_tokens=as_int(r.get("total_tokens")),
+            total_requests=as_int(r.get("total_requests")),
         ))
     return out
 
@@ -787,40 +769,39 @@ class FrontendClient:
         r.raise_for_status()
         return r.json()
 
-    def get_permaslug_resolver(self) -> Optional[PermaslugResolver]:
+    def _fetch(self, path, parser, *, default=None, params=None, timeout=20,
+               unwrap="data", unwrap_default=None, label=None):
+        """Shared GET -> parse -> degrade skeleton for the wrappers below.
+        Never raises (callers run on the worker thread): logs and returns
+        ``default`` on any failure. ``unwrap`` pulls ``payload[unwrap]`` before
+        parsing (None = pass the whole payload). ``label`` is the log tag."""
         try:
-            data = self._get_json("/api/frontend/v1/catalog/models", timeout=30).get("data", [])
-            return parse_catalog_permaslugs(data)
+            payload = self._get_json(path, params=params, timeout=timeout)
+            if unwrap is not None:
+                payload = payload.get(unwrap, unwrap_default)
+            return parser(payload)
         except Exception:
-            log.warning("catalog/models fetch failed", exc_info=True)
-            return None
+            log.warning("%s fetch failed", label or path, exc_info=True)
+            return default
+
+    def get_permaslug_resolver(self) -> Optional[PermaslugResolver]:
+        return self._fetch("/api/frontend/v1/catalog/models", parse_catalog_permaslugs,
+                           timeout=30, unwrap_default=[], label="catalog/models")
 
     def get_provider_trust(self) -> Optional[ProviderTrustBook]:
-        try:
-            data = self._get_json("/api/frontend/all-providers").get("data", [])
-            return parse_all_providers(data)
-        except Exception:
-            log.warning("all-providers fetch failed", exc_info=True)
-            return None
+        return self._fetch("/api/frontend/all-providers", parse_all_providers,
+                           unwrap_default=[], label="all-providers")
 
     def get_speed_board(self) -> Optional[SpeedBoard]:
-        try:
-            data = self._get_json("/api/frontend/v1/rankings/performance").get("data", [])
-            return parse_performance(data)
-        except Exception:
-            log.warning("rankings/performance fetch failed", exc_info=True)
-            return None
+        return self._fetch("/api/frontend/v1/rankings/performance", parse_performance,
+                           unwrap_default=[], label="rankings/performance")
 
     def get_rankings_models(self) -> Optional[TrendBoard]:
         """THE TAPE (#7): the no-auth week-over-week request-momentum board
         (~191KB, keyed by permaslug). Returns None on failure so cards keep
         their last-good tape."""
-        try:
-            data = self._get_json("/api/frontend/v1/rankings/models").get("data", [])
-            return parse_rankings_models(data)
-        except Exception:
-            log.warning("rankings/models fetch failed", exc_info=True)
-            return None
+        return self._fetch("/api/frontend/v1/rankings/models", parse_rankings_models,
+                           unwrap_default=[], label="rankings/models")
 
     def get_rankings_apps(self) -> Optional[list]:
         """THE CLIMB (#18): the no-auth weekly public-apps leaderboard (top-20,
@@ -828,29 +809,15 @@ class FrontendClient:
         ``week`` list) or None on failure so the climb keeps its last-good
         ladder. MUST ride this client's browser-UA session (a bare requests.get
         is connection-reset by the frontend edge)."""
-        try:
-            data = self._get_json("/api/frontend/v1/rankings/apps").get("data", {})
-            return parse_rankings_apps(data)
-        except Exception:
-            log.warning("rankings/apps fetch failed", exc_info=True)
-            return None
+        return self._fetch("/api/frontend/v1/rankings/apps", parse_rankings_apps,
+                           unwrap_default={}, label="rankings/apps")
 
     def get_endpoint_refs(self, permaslug: str, variant: str = "standard") -> list:
-        try:
-            data = self._get_json(
-                "/api/frontend/v1/stats/endpoint",
-                params={"permaslug": permaslug, "variant": variant},
-            ).get("data", [])
-            return parse_endpoint_refs(data)
-        except Exception:
-            log.warning("stats/endpoint(%s) fetch failed", permaslug, exc_info=True)
-            return []
+        return self._fetch("/api/frontend/v1/stats/endpoint", parse_endpoint_refs,
+                           default=[], params={"permaslug": permaslug, "variant": variant},
+                           unwrap_default=[], label=f"stats/endpoint({permaslug})")
 
     def get_uptime_hourly(self, endpoint_id: str) -> Optional[UptimeHistory]:
-        try:
-            payload = self._get_json(
-                "/api/frontend/v1/stats/uptime-hourly", params={"id": endpoint_id})
-            return parse_uptime_hourly(payload)
-        except Exception:
-            log.warning("stats/uptime-hourly(%s) fetch failed", endpoint_id, exc_info=True)
-            return None
+        return self._fetch("/api/frontend/v1/stats/uptime-hourly", parse_uptime_hourly,
+                           params={"id": endpoint_id}, unwrap=None,
+                           label=f"stats/uptime-hourly({endpoint_id})")

@@ -16,6 +16,7 @@ from config import (
     API_KEY, API_KEY_ENDPOINT, MODELS_ENDPOINT,
     ANALYTICS_QUERY_ENDPOINT,
 )
+from num import as_float as _as_float, as_int as _as_int
 
 log = logging.getLogger("pulse.api")
 
@@ -146,14 +147,8 @@ def parse_model_endpoints(model_id: str, data: dict) -> ModelEndpoints:
     endpoints = []
     for ep in (data or {}).get("endpoints", []):
         pricing = ep.get("pricing", {})
-        try:
-            pp = float(pricing.get("prompt", "0"))
-        except (ValueError, TypeError):
-            pp = 0.0
-        try:
-            cp = float(pricing.get("completion", "0"))
-        except (ValueError, TypeError):
-            cp = 0.0
+        pp = _as_float(pricing.get("prompt", "0"))
+        cp = _as_float(pricing.get("completion", "0"))
         endpoints.append(EndpointInfo(
             provider_name=ep.get("provider_name", ""),
             tag=ep.get("tag", ""),
@@ -633,30 +628,6 @@ def parse_benchmarks(da_rows: list, aa_rows: list) -> BenchmarkBoard:
 #   dims=[model, provider]  -> created_at__day / created_at__hour / ...
 # So NEVER hardcode date__day — detect the single key matching this regex.
 _BUCKET_KEY_RE = re.compile(r"^(date|created_at)__(minute|hour|day|week|month)$")
-
-
-def _as_float(v) -> float:
-    """Coerce an analytics metric to float. total_usage/usage_cache/
-    cache_hit_rate come back as JSON numbers, but be defensive — some metrics
-    arrive as JSON strings. None/'' -> 0.0."""
-    if v is None or v == "":
-        return 0.0
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _as_int(v) -> int:
-    """Coerce an analytics COUNT metric to int. request_count and ALL tokens_*
-    arrive as JSON STRINGS ("1","8685"); coerce via float() first so "1.0" and
-    1.0 both work. None/'' -> 0."""
-    if v is None or v == "":
-        return 0
-    try:
-        return int(float(v))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _bucket_key(row: dict):
@@ -2126,16 +2097,8 @@ class APIClient:
             models = []
             for m in data:
                 pricing = m.get("pricing", {})
-                prompt_price = pricing.get("prompt", "0")
-                completion_price = pricing.get("completion", "0")
-                try:
-                    pp = float(prompt_price)
-                except (ValueError, TypeError):
-                    pp = 0.0
-                try:
-                    cp = float(completion_price)
-                except (ValueError, TypeError):
-                    cp = 0.0
+                pp = _as_float(pricing.get("prompt", "0"))
+                cp = _as_float(pricing.get("completion", "0"))
                 models.append(ModelInfo(
                     id=m.get("id", ""),
                     name=m.get("name", m.get("id", "")),

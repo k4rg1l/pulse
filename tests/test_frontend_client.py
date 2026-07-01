@@ -18,6 +18,7 @@ from frontend_client import (
     parse_uptime_hourly, UptimeHistory,
     provider_slug_from_tag, _norm,
     custody_score, CustodyGrade, TRUST_TIERS,
+    FrontendClient,
 )
 
 FIX = Path(__file__).parent / "fixtures"
@@ -396,3 +397,51 @@ def test_uptime_hourly_handles_nulls_and_empty():
     assert hist.average == 100.0
     assert parse_uptime_hourly({}).points == []
     assert parse_uptime_hourly({"data": {}}).worst is None
+
+
+# ---------------------------------------------------------------------------
+#  _fetch — the shared GET->parse->degrade skeleton behind the wrappers
+# ---------------------------------------------------------------------------
+def _client_with(get_json):
+    c = FrontendClient()
+    c._get_json = get_json
+    return c
+
+
+def test_fetch_unwraps_data_and_parses():
+    seen = {}
+
+    def parser(data):
+        seen["data"] = data
+        return "PARSED"
+
+    c = _client_with(lambda path, params=None, timeout=20: {"data": [1, 2, 3]})
+    assert c._fetch("/x", parser) == "PARSED"
+    assert seen["data"] == [1, 2, 3]
+
+
+def test_fetch_returns_default_on_error():
+    def boom(path, params=None, timeout=20):
+        raise RuntimeError("network down")
+
+    c = _client_with(boom)
+    assert c._fetch("/x", lambda d: "nope", default=None) is None
+    assert c._fetch("/x", lambda d: "nope", default=[]) == []
+
+
+def test_fetch_unwrap_none_passes_whole_payload():
+    seen = {}
+
+    def parser(payload):
+        seen["p"] = payload
+        return "ok"
+
+    c = _client_with(lambda path, params=None, timeout=20: {"outer": {"pts": []}})
+    assert c._fetch("/x", parser, unwrap=None) == "ok"
+    assert seen["p"] == {"outer": {"pts": []}}
+
+
+def test_fetch_unwrap_default_when_key_missing():
+    c = _client_with(lambda path, params=None, timeout=20: {})
+    assert c._fetch("/x", lambda d: d, unwrap_default=[]) == []
+    assert c._fetch("/x", lambda d: d, unwrap_default={}) == {}
