@@ -60,6 +60,20 @@ def _alpha(color, a) -> QColor:
     return c
 
 
+def _strip_img_div(strip, margin="4px") -> str:
+    """Render a PopupStrip to a PNG data-URI <img> in the standard popup <div>.
+    Collapses the repeated QByteArray/QBuffer/toBase64 embed idiom. The caller
+    wraps this in its own try/except (constructing a strip can fail)."""
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    strip.render_pixmap().save(buf, "PNG")
+    buf.close()
+    b64 = bytes(ba.toBase64()).decode("ascii")
+    return (f"<div style='margin-bottom:{margin};'><img src='data:image/png;base64,"
+            f"{b64}' width='{strip.STRIP_W}' height='{strip._h}'></div>")
+
+
 def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
     """Linear blend a→b by t∈[0,1]. Returns a fresh QColor (callers that need
     the allocation-free hot path must precompute, not call this in paint)."""
@@ -3394,16 +3408,7 @@ class PinnedModelCard(QWidget):
 
         # The honest 2-point ramp, embedded as a data-URI image.
         try:
-            pm = TrendRampWidget(ch, line_col).render_pixmap()
-            ba = QByteArray()
-            buf = QBuffer(ba)
-            buf.open(QIODevice.OpenModeFlag.WriteOnly)
-            pm.save(buf, "PNG")
-            buf.close()
-            b64 = bytes(ba.toBase64()).decode("ascii")
-            out.append(
-                f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-                f"width='{TrendRampWidget.STRIP_W}' height='{TrendRampWidget.STRIP_H}'></div>")
+            out.append(_strip_img_div(TrendRampWidget(ch, line_col)))
             out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
                        "&#9664; last week &nbsp;&nbsp;&nbsp; now &#9654;</div>")
         except Exception:
@@ -3723,16 +3728,7 @@ class PinnedModelCard(QWidget):
 
         # The painted 73-bar strip, embedded as a data-URI image.
         try:
-            pm = UptimeStripWidget(hist).render_pixmap()
-            ba = QByteArray()
-            buf = QBuffer(ba)
-            buf.open(QIODevice.OpenModeFlag.WriteOnly)
-            pm.save(buf, "PNG")
-            buf.close()
-            b64 = bytes(ba.toBase64()).decode("ascii")
-            out.append(
-                f"<div style='margin-bottom:6px;'><img src='data:image/png;base64,{b64}' "
-                f"width='{UptimeStripWidget.STRIP_W}' height='{UptimeStripWidget.STRIP_H}'></div>")
+            out.append(_strip_img_div(UptimeStripWidget(hist), "6px"))
             out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
                        "&#9664; 73h ago &nbsp;&nbsp;&nbsp; now &#9654;</div>")
         except Exception:
@@ -5956,16 +5952,7 @@ def build_receipt_html(receipt) -> str:
                "per-call receipt · 7-day average · ground truth</div>")
     try:
         strip = ReceiptStripWidget(receipt)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{ReceiptStripWidget.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("receipt strip render failed", exc_info=True)
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
@@ -6565,16 +6552,7 @@ def build_rebate_html(savings) -> str:
                f"{(' · top: ' + top_name) if top_name else ''}</div>")
     try:
         strip = RebateBreakdownStrip(savings)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{RebateBreakdownStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("rebate strip render failed", exc_info=True)
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
@@ -7306,16 +7284,7 @@ def build_seance_html(entry, diff) -> str:
                f"via {provider} · {note}</div>")
     try:
         strip = SeanceLedgerStrip(entry, diff)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{SeanceLedgerStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("seance ledger render failed", exc_info=True)
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
@@ -7519,16 +7488,7 @@ def build_autopsy_html(report) -> str:
                    f"spike{' · truncated' if report.truncated else ''}</div>")
     try:
         strip = AutopsyStripWidget(report)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{AutopsyStripWidget.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("autopsy strip render failed", exc_info=True)
     # FOOTER: request + cached-token totals, then the GREEN caching-offset line.
@@ -8172,16 +8132,7 @@ def build_budget_html(budget) -> str:
                f"{head}</div>")
     try:
         strip = BudgetBurndownStrip(budget)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{BudgetBurndownStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("budget burndown render failed", exc_info=True)
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
@@ -8823,16 +8774,7 @@ def build_assay_certificate_html(model, result) -> str:
                "quality-per-dollar · all three AA indices · USER key</div>")
     try:
         strip = AssayCertificateStrip(model, result)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{AssayCertificateStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("assay certificate render failed", exc_info=True)
     # The auditable footnote: the EXACT denominator the PRICE column shows.
@@ -9556,16 +9498,7 @@ def build_week_dossier_html(mow) -> str:
     ]
     try:
         strip = WeekDossierStrip(mow)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{WeekDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("week dossier render failed", exc_info=True)
     # The honest comparison footnote: Week-1 grace OR the real momentum line.
@@ -10344,16 +10277,7 @@ def build_recorder_dossier_html(rec) -> str:
     ]
     try:
         strip = RecorderDossierStrip(rec)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{RecorderDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("recorder dossier render failed", exc_info=True)
     # the record day, spelled out.
@@ -11117,16 +11041,7 @@ def build_court_dossier_html(cc, board=None) -> str:
     ]
     try:
         strip = CourtDossierStrip(cc, board)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{CourtDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("court dossier render failed", exc_info=True)
     # the ember taste line, framed honestly (decision C).
@@ -11165,16 +11080,7 @@ def build_climb_dossier_html(cc, apps=None) -> str:
     ]
     try:
         strip = ClimbDossierStrip(cc, apps)
-        pm = strip.render_pixmap()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pm.save(buf, "PNG")
-        buf.close()
-        b64 = bytes(ba.toBase64()).decode("ascii")
-        out.append(
-            f"<div style='margin-bottom:4px;'><img src='data:image/png;base64,{b64}' "
-            f"width='{ClimbDossierStrip.STRIP_W}' height='{strip._h}'></div>")
+        out.append(_strip_img_div(strip))
     except Exception:
         log.debug("climb dossier render failed", exc_info=True)
     # the honest distance — the delight, NEVER an 'out-tokened' claim.
