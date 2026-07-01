@@ -52,6 +52,14 @@ def _safe_color(value, fallback="#a0a0c8"):
     return value if isinstance(value, str) and _HEX_COLOR.match(value) else fallback
 
 
+def _alpha(color, a) -> QColor:
+    """A fresh QColor from `color` with alpha `a` (0-255). Replaces the repeated
+    QColor()+setAlpha() creation idiom; never mutates the input."""
+    c = QColor(color)
+    c.setAlpha(a)
+    return c
+
+
 def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
     """Linear blend a→b by t∈[0,1]. Returns a fresh QColor (callers that need
     the allocation-free hot path must precompute, not call this in paint)."""
@@ -178,8 +186,7 @@ class ArcGauge(QWidget):
         value_span = int(-270 * 16 * self._display_percent)
 
         # Glow effect
-        glow_color = QColor(color)
-        glow_color.setAlpha(40)
+        glow_color = _alpha(color, 40)
         glow_pen = QPen(glow_color, arc_width + 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(glow_pen)
         painter.drawArc(rect, start_angle, value_span)
@@ -578,7 +585,6 @@ class UptimeStripWidget(PopupStrip):
     STRIP_W = 292
     STRIP_H = 64
     PAD = 8
-    CRIMSON = QColor(224, 70, 60)   # a darker "wound" red, dossier-only
 
     def __init__(self, hist, parent=None):
         super().__init__(parent)
@@ -599,7 +605,7 @@ class UptimeStripWidget(PopupStrip):
             t = (99.0 - v) / 4.0
             return _lerp_color(QColor(Colors.GREEN), QColor(Colors.YELLOW), t)
         t = (95.0 - v) / 55.0    # 95→0, 40→1
-        return _lerp_color(QColor(Colors.YELLOW), self.CRIMSON, t)
+        return _lerp_color(QColor(Colors.YELLOW), Colors.CRIMSON, t)
 
     def _paint_into(self, p):
         hist = self._hist
@@ -616,8 +622,7 @@ class UptimeStripWidget(PopupStrip):
         inner_w = self.STRIP_W - 2 * pad
 
         # 1. dim baseline frame.
-        frame = QColor(Colors.TEXT_MUTED)
-        frame.setAlpha(70)
+        frame = _alpha(Colors.TEXT_MUTED, 70)
         p.setPen(QPen(frame, 1))
         p.drawLine(QPointF(pad, chart_bottom), QPointF(self.STRIP_W - pad, chart_bottom))
 
@@ -646,8 +651,7 @@ class UptimeStripWidget(PopupStrip):
             if day and day != prev_day:
                 prev_day = day
                 x = x_of(i)
-                tick = QColor(Colors.TEXT_MUTED)
-                tick.setAlpha(60)
+                tick = _alpha(Colors.TEXT_MUTED, 60)
                 p.setPen(QPen(tick, 1))
                 p.drawLine(QPointF(x, chart_top), QPointF(x, chart_bottom))
 
@@ -674,13 +678,13 @@ class UptimeStripWidget(PopupStrip):
             if worst_date is not None and date_str == worst_date:
                 self._strip_worst_x = x
                 # crimson outline + a caret above the worst bar.
-                p.setPen(QPen(self.CRIMSON, 1))
+                p.setPen(QPen(Colors.CRIMSON, 1))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(QRectF(x - bar_w / 2, top_y, bar_w, chart_bottom - top_y))
                 caret = QPolygonF([
                     QPointF(x, chart_top + 1), QPointF(x - 3, chart_top - 3),
                     QPointF(x + 3, chart_top - 3)])
-                p.setBrush(QBrush(self.CRIMSON))
+                p.setBrush(QBrush(Colors.CRIMSON))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawPolygon(caret)
 
@@ -721,7 +725,7 @@ class TrendRampWidget(PopupStrip):
         midy = (top + bottom) / 2.0
 
         # dim baseline frame at the "last week" index level (the mid-line).
-        frame = QColor(Colors.TEXT_MUTED); frame.setAlpha(70)
+        frame = _alpha(Colors.TEXT_MUTED, 70)
         p.setPen(QPen(frame, 1))
         p.drawLine(QPointF(left, midy), QPointF(right, midy))
 
@@ -738,7 +742,7 @@ class TrendRampWidget(PopupStrip):
         p.drawLine(tail, head)
         # anchor dots
         p.setPen(Qt.PenStyle.NoPen)
-        dim = QColor(self._line); dim.setAlpha(150)
+        dim = _alpha(self._line, 150)
         p.setBrush(QBrush(dim)); p.drawEllipse(tail, 2.6, 2.6)
         p.setBrush(QBrush(self._line)); p.drawEllipse(head, 3.4, 3.4)
 
@@ -2299,8 +2303,7 @@ class PinnedModelCard(QWidget):
                     QRectF(self.PAD_X - 4, y + 2, w - 2 * (self.PAD_X - 4), self.ROW_H - 4),
                     6, 6,
                 )
-                hi = QColor(Colors.CYAN)
-                hi.setAlpha(18)
+                hi = _alpha(Colors.CYAN, 18)
                 painter.fillPath(hi_path, QBrush(hi))
                 # A 2px gold accent at the row's left edge marks the best
                 # provider without fighting the seal for the left slot.
@@ -2435,23 +2438,23 @@ class PinnedModelCard(QWidget):
         if classes:
             # (2) WATER FILL: the calm steel-teal sea the price floats on.
             wl = QRectF(tx, strip_top, pw, 3.0)
-            surf = QColor(WATERLINE_SURFACE); surf.setAlpha(90)
+            surf = _alpha(WATERLINE_SURFACE, 90)
             sea = QPainterPath(); sea.addRoundedRect(wl, 1.5, 1.5)
             painter.fillPath(sea, QBrush(surf))
             # the SUBMERGED portion grows from the LEFT (deep end), pw*depth wide.
             sub_w = max(0.0, pw * depth)
             if sub_w > 0:
-                abyss = QColor(WATERLINE_ABYSS); abyss.setAlpha(160)
+                abyss = _alpha(WATERLINE_ABYSS, 160)
                 sub = QPainterPath()
                 sub.addRoundedRect(QRectF(tx, wl.top(), sub_w, 3.0), 1.5, 1.5)
                 painter.fillPath(sub, QBrush(abyss))
             # (3) WATERLINE EDGE: a 1px pale-aqua sea-level line on top.
-            edge = QColor(WATERLINE_EDGE); edge.setAlpha(200)
+            edge = _alpha(WATERLINE_EDGE, 200)
             painter.setPen(QPen(edge, 1))
             painter.drawLine(QPointF(tx, wl.top()), QPointF(tx + pw, wl.top()))
             # (4) FEE TICKS: one 2px notch per present class, hanging below the
             # strip — short ticks = submerged mass. Evenly spread across pw.
-            tick = QColor(WATERLINE_ABYSS); tick.setAlpha(150)
+            tick = _alpha(WATERLINE_ABYSS, 150)
             painter.setPen(QPen(tick, 2))
             present = [c for c in FEE_CLASS_ORDER if c in classes]
             nticks = len(present)
@@ -2475,7 +2478,7 @@ class PinnedModelCard(QWidget):
             cy = y + self.ROW_H / 2.0
             if is_best:
                 cy += 4.0                   # clear the gold best-accent bar
-            ring = QColor(WATERLINE_ABYSS); ring.setAlpha(200)
+            ring = _alpha(WATERLINE_ABYSS, 200)
             painter.setPen(QPen(ring, 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             buoy_rect = QRectF(cx - d / 2.0, cy - d / 2.0, d, d)
@@ -2515,8 +2518,7 @@ class PinnedModelCard(QWidget):
         self._pulse_avg = m["avg"]
 
         # 1. faint isoelectric baseline guide — a "monitor" feel.
-        guide = QColor(base)
-        guide.setAlpha(46)
+        guide = _alpha(base, 46)
         painter.setPen(QPen(guide, 1))
         painter.drawLine(QPointF(inner_left, baseline_y),
                          QPointF(inner_right, baseline_y))
@@ -2580,13 +2582,11 @@ class PinnedModelCard(QWidget):
         self._crest_hit_rect = band
 
         painter.save()
-        bg = QColor(tier)
-        bg.setAlpha(46 if self._crest_hover else 26)
+        bg = _alpha(tier, 46 if self._crest_hover else 26)
         bpath = QPainterPath()
         bpath.addRoundedRect(band, 8, 8)
         painter.fillPath(bpath, QBrush(bg))
-        bd = QColor(tier)
-        bd.setAlpha(110 if self._crest_hover else 55)
+        bd = _alpha(tier, 110 if self._crest_hover else 55)
         painter.setPen(QPen(bd, 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(bpath)
@@ -2669,10 +2669,10 @@ class PinnedModelCard(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         # Band backing (same idiom as the crest band, but brand cyan).
-        bg = QColor(ACCENT); bg.setAlpha(34 if self._speed_hover else 18)
+        bg = _alpha(ACCENT, 34 if self._speed_hover else 18)
         bpath = QPainterPath(); bpath.addRoundedRect(band, 8, 8)
         painter.fillPath(bpath, QBrush(bg))
-        bd = QColor(ACCENT); bd.setAlpha(105 if self._speed_hover else 45)
+        bd = _alpha(ACCENT, 105 if self._speed_hover else 45)
         painter.setPen(QPen(bd, 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(bpath)
 
@@ -2829,10 +2829,10 @@ class PinnedModelCard(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         # --- pill backing (lane@26, hover 42) + stroke (lane@70, hover 130) ---
-        bg = QColor(line_col); bg.setAlpha(42 if hover else 26)
+        bg = _alpha(line_col, 42 if hover else 26)
         bpath = QPainterPath(); bpath.addRoundedRect(pill, 4, 4)
         painter.fillPath(bpath, QBrush(bg))
-        bd = QColor(line_col); bd.setAlpha(130 if hover else 70)
+        bd = _alpha(line_col, 130 if hover else 70)
         painter.setPen(QPen(bd, 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(bpath)
 
@@ -2914,10 +2914,10 @@ class PinnedModelCard(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         # 1) BAND BACKING (same idiom as the crest/speed bands, but amber/emerald)
-        bg = QColor(ACCENT); bg.setAlpha(34 if self._door_hover else 18)
+        bg = _alpha(ACCENT, 34 if self._door_hover else 18)
         bpath = QPainterPath(); bpath.addRoundedRect(band, 8, 8)
         painter.fillPath(bpath, QBrush(bg))
-        bd = QColor(ACCENT); bd.setAlpha(105 if self._door_hover else 45)
+        bd = _alpha(ACCENT, 105 if self._door_hover else 45)
         painter.setPen(QPen(bd, 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(bpath)
 
@@ -2971,11 +2971,11 @@ class PinnedModelCard(QWidget):
             leaf_grad.setColorAt(0.0, QColor(0xb0, 0x7a, 0x2e, 150))
             leaf_grad.setColorAt(1.0, QColor(0xe0, 0xa1, 0x3a, 150))
         painter.setBrush(QBrush(leaf_grad))
-        outline = QColor(ACCENT); outline.setAlpha(180)
+        outline = _alpha(ACCENT, 180)
         painter.setPen(QPen(outline, 1))
         painter.drawPolygon(leaf)
         # one vertical panel-groove line inside the leaf
-        groove = QColor(ACCENT); groove.setAlpha(90)
+        groove = _alpha(ACCENT, 90)
         painter.setPen(QPen(groove, 1))
         gx = hinge_x + (swing_x - hinge_x) * 0.5
         painter.drawLine(QPointF(gx, band.top() + 7), QPointF(gx, band.bottom() - 6))
@@ -3069,8 +3069,7 @@ class PinnedModelCard(QWidget):
 
         if elite:
             for k, alpha in ((1.8, 46), (2.8, 22)):
-                gc = QColor(color)
-                gc.setAlpha(alpha)
+                gc = _alpha(color, alpha)
                 painter.setPen(QPen(gc, 1.4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPath(hexagon(r + k))
@@ -3145,14 +3144,12 @@ class PinnedModelCard(QWidget):
 
         # S-tier (and hover) earn a soft outer glow — calm, not animated.
         if grade.is_top or hover:
-            glow = QColor(color)
-            glow.setAlpha(70 if hover else 45)
+            glow = _alpha(color, 70 if hover else 45)
             painter.setPen(QPen(glow, 2.4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(self._shield_path(cx, top - 1, sw + 2.2, sh + 2.2))
 
-        body = QColor(color)
-        body.setAlpha(64 if hover else 42)
+        body = _alpha(color, 64 if hover else 42)
         painter.setBrush(QBrush(body))
         painter.setPen(QPen(color, 1.3))
         painter.drawPath(shield)
@@ -4012,8 +4009,7 @@ class ModelPickerRow(QWidget):
         if self._hover:
             path = QPainterPath()
             path.addRoundedRect(QRectF(2, 2, w - 4, h - 4), 6, 6)
-            bg = QColor(Colors.CYAN)
-            bg.setAlpha(18)
+            bg = _alpha(Colors.CYAN, 18)
             painter.fillPath(path, QBrush(bg))
 
         # Star (filled if pinned, hollow if not)
@@ -4408,8 +4404,7 @@ class ErrorBanner(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 6, 6)
 
-        bg = QColor(Colors.RED)
-        bg.setAlpha(40)
+        bg = _alpha(Colors.RED, 40)
         painter.fillPath(path, QBrush(bg))
 
         # Left edge accent stripe
@@ -4928,16 +4923,14 @@ class SpendSpectrum(QWidget):
         band = QRectF(x_left, ct, x_right - x_left, ch)
 
         # dim OUTSIDE the band (TimelineChart veil idiom, but vertical).
-        veil = QColor(Colors.BG_DARK)
-        veil.setAlpha(120)
+        veil = _alpha(Colors.BG_DARK, 120)
         if x_left > cl:
             painter.fillRect(QRectF(cl, ct, x_left - cl, ch), veil)
         if x_right < cl + cw:
             painter.fillRect(QRectF(x_right, ct, (cl + cw) - x_right, ch), veil)
 
         # the translucent selection band.
-        sel = QColor(accent)
-        sel.setAlpha(40)
+        sel = _alpha(accent, 40)
         painter.fillRect(band, sel)
         # two 1px vertical accent edges (RoundCap).
         edge = QColor(accent)
@@ -4961,8 +4954,7 @@ class SpendSpectrum(QWidget):
         rx = max(cl, min(cl + cw - tw, rx))
         ry = ct + 4
         chip = QRectF(rx, ry, tw, th)
-        chip_bg = QColor(Colors.BG_DARK)
-        chip_bg.setAlpha(220)
+        chip_bg = _alpha(Colors.BG_DARK, 220)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.fillPath(_rounded(chip, 3), QBrush(chip_bg))
         painter.setPen(QPen(QColor(accent), 1))
@@ -4981,8 +4973,7 @@ class SpendSpectrum(QWidget):
         data = self._data
         # spike glow column behind the bands
         if self._spike_rect is not None:
-            glow = QColor(accent)
-            glow.setAlpha(28)
+            glow = _alpha(accent, 28)
             painter.fillRect(self._spike_rect, glow)
         # bands bottom→top; reveal scales each band height from the baseline
         rv = self._reveal
@@ -4996,8 +4987,8 @@ class SpendSpectrum(QWidget):
                     for p in poly
                 ])
             grad = QLinearGradient(0, ct, 0, chart_bottom)
-            c_top = QColor(color); c_top.setAlpha(110)
-            c_bot = QColor(color); c_bot.setAlpha(18)
+            c_top = _alpha(color, 110)
+            c_bot = _alpha(color, 18)
             grad.setColorAt(0, c_top)
             grad.setColorAt(1, c_bot)
             painter.setPen(Qt.PenStyle.NoPen)
@@ -5052,8 +5043,7 @@ class SpendSpectrum(QWidget):
         chart_bottom = ct + ch
         # faint ghosted stacked-spectrum silhouette (a teaser, NOT data):
         # three greyed bands at ~12% alpha TEXT_MUTED.
-        ghost = QColor(Colors.TEXT_MUTED)
-        ghost.setAlpha(31)  # ~12%
+        ghost = _alpha(Colors.TEXT_MUTED, 31)  # ~12%
         fractions = [0.5, 0.78, 0.93]  # cumulative tops of 3 fake bands
         prev = 0.0
         n = 5
@@ -5161,8 +5151,7 @@ class SpendSpectrum(QWidget):
             mid_y = y + row_h / 2.0
             sw = self.SWATCH
             sw_rect = QRectF(self.PAD_X, mid_y - sw / 2.0, sw, sw)
-            ghost = QColor(Colors.TEXT_MUTED)
-            ghost.setAlpha(80)
+            ghost = _alpha(Colors.TEXT_MUTED, 80)
             painter.setPen(QPen(ghost, 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(sw_rect, 3, 3)
@@ -5588,8 +5577,7 @@ class ReceiptStubList(QWidget):
     def _paint_row(self, p, idx, r, row_rect, accent, f_body, f_mono, f_tiny,
                    fm_body, fm_mono):
         # 1) faint parchment wash (the stub reads as paper, not a broken theme).
-        wash = QColor(RECEIPT_PARCHMENT)
-        wash.setAlpha(26)   # ~10%
+        wash = _alpha(RECEIPT_PARCHMENT, 26)   # ~10%
         body = QRectF(row_rect.left() + 1, row_rect.top(), row_rect.width() - 2,
                       row_rect.height())
         path = QPainterPath()
@@ -5597,8 +5585,7 @@ class ReceiptStubList(QWidget):
         p.fillPath(path, QBrush(wash))
 
         # 2) the LEFT perforated edge — a column of dots down the gutter.
-        dot = QColor(Colors.TEXT_MUTED)
-        dot.setAlpha(128)
+        dot = _alpha(Colors.TEXT_MUTED, 128)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(dot))
         gx = row_rect.left() + self.PAD_X + self.GUTTER / 2.0
@@ -5657,8 +5644,7 @@ class ReceiptStubList(QWidget):
         p.translate(c)
         p.rotate(-7)
         p.translate(-c)
-        fill = QColor(color)
-        fill.setAlpha(46)   # ~18%
+        fill = _alpha(color, 46)   # ~18%
         path = QPainterPath()
         path.addRoundedRect(rect, 3, 3)
         p.fillPath(path, QBrush(fill))
@@ -5675,8 +5661,7 @@ class ReceiptStubList(QWidget):
         # a single dim parchment ghost stub with a DOTTED outline + unlock copy.
         w = self.width()
         row_rect = QRectF(1, 0, w - 2, self._row_h)
-        wash = QColor(RECEIPT_PARCHMENT)
-        wash.setAlpha(16)
+        wash = _alpha(RECEIPT_PARCHMENT, 16)
         path = QPainterPath()
         path.addRoundedRect(row_rect, 4, 4)
         p.fillPath(path, QBrush(wash))
@@ -5830,7 +5815,7 @@ class ReceiptStripWidget(PopupStrip):
 
         # 2) centered mono header.
         center(r.short_name if r else "", RECEIPT_INK, f_mono)
-        faint = QColor(RECEIPT_INK); faint.setAlpha(120)
+        faint = _alpha(RECEIPT_INK, 120)
         center("OPENROUTER · RECEIPT", faint, Fonts.tiny())
         center("7-DAY AVG / CALL", faint, Fonts.tiny())
 
@@ -5838,7 +5823,7 @@ class ReceiptStripWidget(PopupStrip):
         def rule():
             nonlocal y
             y += 3
-            dotted = QColor(RECEIPT_INK); dotted.setAlpha(110)
+            dotted = _alpha(RECEIPT_INK, 110)
             p.setPen(QPen(dotted, 1, Qt.PenStyle.DotLine))
             p.drawLine(QPointF(pad, y), QPointF(w - pad, y))
             y += 3
@@ -5868,7 +5853,7 @@ class ReceiptStripWidget(PopupStrip):
                 lead_l = left + label_w + 4
                 lead_r = right - val_w - 4
                 if lead_r > lead_l:
-                    leader = QColor(RECEIPT_INK); leader.setAlpha(90)
+                    leader = _alpha(RECEIPT_INK, 90)
                     p.setPen(QPen(leader, 1, Qt.PenStyle.DotLine))
                     ly = y + fm.ascent() - 3
                     p.drawLine(QPointF(lead_l, ly), QPointF(lead_r, ly))
@@ -5891,7 +5876,7 @@ class ReceiptStripWidget(PopupStrip):
         y += line_h
 
         # 6) tie-back to #9: TIMES N CALLS = $range_total (muted).
-        tie = QColor(RECEIPT_INK); tie.setAlpha(120)
+        tie = _alpha(RECEIPT_INK, 120)
         p.setFont(Fonts.tiny())
         p.setPen(QPen(tie))
         p.drawText(QRectF(pad, y, w - 2 * pad, line_h),
@@ -5904,7 +5889,7 @@ class ReceiptStripWidget(PopupStrip):
             up = r.stamp_dir > 0
             col = Colors.RED if up else Colors.GREEN
             band = QRectF(pad, y, w - 2 * pad, 18)
-            fill = QColor(col); fill.setAlpha(40)
+            fill = _alpha(col, 40)
             p.fillRect(band, fill)
             p.setPen(QPen(col, 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -5919,7 +5904,7 @@ class ReceiptStripWidget(PopupStrip):
 
         # 8) YOUNG-account footnote (no false trigger; building history).
         if r and r.young:
-            fn = QColor(RECEIPT_INK); fn.setAlpha(120)
+            fn = _alpha(RECEIPT_INK, 120)
             p.setFont(Fonts.tiny())
             p.setPen(QPen(fn))
             p.drawText(QRectF(pad, y, w - 2 * pad, line_h),
@@ -5932,7 +5917,7 @@ class ReceiptStripWidget(PopupStrip):
         y += 22
 
         # 10) the joke line (muted).
-        joke = QColor(RECEIPT_INK); joke.setAlpha(110)
+        joke = _alpha(RECEIPT_INK, 110)
         p.setFont(Fonts.tiny())
         p.setPen(QPen(joke))
         p.drawText(QRectF(0, y, w, line_h),
@@ -6235,8 +6220,7 @@ class RebateStub(QWidget):
         p.drawEllipse(QPointF(w, notch_y), 4.0, 4.0)
 
         # The perforation dots across the top tear line (evenly distributed).
-        dot = QColor(Colors.TEXT_MUTED)
-        dot.setAlpha(230)
+        dot = _alpha(Colors.TEXT_MUTED, 230)
         p.setBrush(QBrush(dot))
         inner = w - 16
         steps = max(1, round(inner / self.PERF_PITCH))
@@ -6289,7 +6273,7 @@ class RebateStub(QWidget):
         p.drawPolygon(chev)
         # faint ghosted minus (the negative-usage credit becomes a + for the user)
         amt_left = chev_cx + 9
-        ghost = QColor(Colors.TEXT_MUTED); ghost.setAlpha(120)
+        ghost = _alpha(Colors.TEXT_MUTED, 120)
         p.setFont(f_amt)
         p.setPen(QPen(ghost))
         minus_w = fm_amt.horizontalAdvance("-")
@@ -6315,7 +6299,7 @@ class RebateStub(QWidget):
         start_angle = 180 * 16
         track_pen = QPen(QColor(Colors.TEXT_MUTED), 3, Qt.PenStyle.SolidLine,
                          Qt.PenCapStyle.RoundCap)
-        track = QColor(Colors.TEXT_MUTED); track.setAlpha(90)
+        track = _alpha(Colors.TEXT_MUTED, 90)
         track_pen.setColor(track)
         p.setPen(track_pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -6348,7 +6332,7 @@ class RebateStub(QWidget):
         never imply a reasoning dollar figure (decision D)."""
         m = self._meter_rect
         # capsule track
-        track = QColor(Colors.TEXT_MUTED); track.setAlpha(60)
+        track = _alpha(Colors.TEXT_MUTED, 60)
         cap = QPainterPath()
         cap.addRoundedRect(m, self.METER_W / 2.0, self.METER_W / 2.0)
         p.fillPath(cap, QBrush(track))
@@ -6407,13 +6391,13 @@ class RebateStub(QWidget):
         cx = box.center().x()
         acy = box.top() + box.height() * 0.46
         rr = self.ARC_R
-        track = QColor(Colors.TEXT_MUTED); track.setAlpha(70)
+        track = _alpha(Colors.TEXT_MUTED, 70)
         p.setPen(QPen(track, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawArc(QRectF(cx - rr, acy - rr, 2 * rr, 2 * rr), 180 * 16, -180 * 16)
         # the meter as an empty capsule outline (no purple fill).
         m = self._meter_rect
-        cap = QColor(Colors.TEXT_MUTED); cap.setAlpha(70)
+        cap = _alpha(Colors.TEXT_MUTED, 70)
         p.setPen(QPen(cap, 1))
         p.drawRoundedRect(m, self.METER_W / 2.0, self.METER_W / 2.0)
 
@@ -6526,7 +6510,7 @@ class RebateBreakdownStrip(PopupStrip):
             bar_w = max(2.0, bar_max_w * frac)
             bar_cy = ry + row_h / 2.0
             bar_rect = QRectF(bar_left, bar_cy - 4, bar_w, 8)
-            track = QColor(Colors.GREEN); track.setAlpha(40)
+            track = _alpha(Colors.GREEN, 40)
             p.fillPath(_rounded(bar_rect, 4), QBrush(track))
             p.fillPath(_rounded(bar_rect, 4), QBrush(Colors.GREEN))
             # the $ rebate at the row's right edge, GREEN mono.
@@ -6965,14 +6949,14 @@ class GhostVeil(QWidget):
         y = self._veil_y
         accent = theme_controller.accent()
         if self._locked:
-            dim = QColor(accent); dim.setAlpha(40)
+            dim = _alpha(accent, 40)
             pen = QPen(dim, 1, Qt.PenStyle.DotLine)
             p.setPen(pen)
             p.drawLine(QPointF(self.PAD_X, y), QPointF(w - self.PAD_X, y))
             return
         grad = QLinearGradient(self.PAD_X, 0, w - self.PAD_X, 0)
-        edge = QColor(accent); edge.setAlpha(0)
-        mid = QColor(accent); mid.setAlpha(90)
+        edge = _alpha(accent, 0)
+        mid = _alpha(accent, 90)
         grad.setColorAt(0.0, edge)
         grad.setColorAt(0.5, mid)
         grad.setColorAt(1.0, edge)
@@ -6980,8 +6964,8 @@ class GhostVeil(QWidget):
         p.drawLine(QPointF(self.PAD_X, y), QPointF(w - self.PAD_X, y))
         # a faint echo line just below (reads as a membrane depth).
         echo = QLinearGradient(self.PAD_X, 0, w - self.PAD_X, 0)
-        e_edge = QColor(accent); e_edge.setAlpha(0)
-        e_mid = QColor(accent); e_mid.setAlpha(30)
+        e_edge = _alpha(accent, 0)
+        e_mid = _alpha(accent, 30)
         echo.setColorAt(0.0, e_edge)
         echo.setColorAt(0.5, e_mid)
         echo.setColorAt(1.0, e_edge)
@@ -7042,8 +7026,8 @@ class GhostVeil(QWidget):
         TEXT_MUTED label, a 3-dot fading trail ABOVE it, and a 'last seen Nd'
         caption below. NEVER crimson (a vanish is not an error)."""
         base = spend_palette.model_color(entry.pair.model_id, entry.rank)
-        fill = QColor(base); fill.setAlpha(18)
-        outline = QColor(base); outline.setAlpha(110)
+        fill = _alpha(base, 18)
+        outline = _alpha(base, 110)
         path = QPainterPath()
         path.addRoundedRect(rect, 4, 4)
         p.fillPath(path, QBrush(fill))
@@ -7063,7 +7047,7 @@ class GhostVeil(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         cx = rect.center().x()
         for i, alpha in enumerate((90, 50, 20)):
-            d = QColor(base); d.setAlpha(alpha)
+            d = _alpha(base, alpha)
             p.setBrush(QBrush(d))
             ty = rect.top() - 3.0 - i * 3.5
             p.drawEllipse(QPointF(cx, ty), 1.4, 1.4)
@@ -7106,7 +7090,7 @@ class GhostVeil(QWidget):
                           rect.width() + 2 * grow, rect.height() + 2 * grow)
             # alpha 200 -> a resting 70 (never fully gone, so the marker persists).
             alpha = int(200 - (200 - 70) * f)
-            col = QColor(accent); col.setAlpha(alpha)
+            col = _alpha(accent, alpha)
             p.setPen(QPen(col, 2))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(ring, 6, 6)
@@ -7229,7 +7213,7 @@ class SeanceLedgerStrip(PopupStrip):
                        lbl)
             frac = (reqs / ref) if ref > 0 else 0.0
             bw = max(2.0, bar_max * frac) if present else 0.0
-            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            track = _alpha(Colors.TEXT_MUTED, 40)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(_rounded(QRectF(bar_left, row_cy - 4, bar_max, 8), 4),
                        QBrush(track))
@@ -7362,7 +7346,6 @@ class AutopsyStripWidget(PopupStrip):
     BAR_H = 18
     BAR_GAP = 6
     TRACK_H = 8
-    CRIMSON = QColor(224, 70, 60)   # the dominant drain (a "wound"); dossier-only
 
     def __init__(self, report, parent=None):
         super().__init__(parent)
@@ -7396,9 +7379,9 @@ class AutopsyStripWidget(PopupStrip):
         """Dominant row = deepest CRIMSON; minor rows lerp toward the panel accent
         so 'one model drained it' reads as a wound while the tail cools off."""
         if n <= 1:
-            return QColor(self.CRIMSON)
+            return QColor(Colors.CRIMSON)
         t = rank / (n - 1)
-        return _lerp_color(self.CRIMSON, theme_controller.accent(), t)
+        return _lerp_color(Colors.CRIMSON, theme_controller.accent(), t)
 
     def _paint_into(self, p):
         w = self.STRIP_W
@@ -7418,7 +7401,7 @@ class AutopsyStripWidget(PopupStrip):
         if r is None or r.is_empty:
             y = pad
             cy = y + self.BAR_H / 2.0
-            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            track = _alpha(Colors.TEXT_MUTED, 40)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
                                        track_w, self.TRACK_H), 4), QBrush(track))
@@ -7441,7 +7424,7 @@ class AutopsyStripWidget(PopupStrip):
             cy = y + self.BAR_H / 2.0
             color = self._row_color(rank, n)
             # 1) the full-width track.
-            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            track = _alpha(Colors.TEXT_MUTED, 40)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
                                        track_w, self.TRACK_H), 4), QBrush(track))
@@ -7476,13 +7459,13 @@ class AutopsyStripWidget(PopupStrip):
         # the bounded "+N more · $Y" remainder bar (TEXT_MUTED, never crimson).
         if r.remainder_count > 0:
             cy = y + self.BAR_H / 2.0
-            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            track = _alpha(Colors.TEXT_MUTED, 40)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
                                        track_w, self.TRACK_H), 4), QBrush(track))
             frac = max(0.0, min(1.0, r.remainder_usage / spike))
             fill_w = max(2.0, track_w * frac) if frac > 0 else 0.0
-            mut = QColor(Colors.TEXT_MUTED); mut.setAlpha(150)
+            mut = _alpha(Colors.TEXT_MUTED, 150)
             if fill_w > 0:
                 p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
                                            fill_w, self.TRACK_H), 4), QBrush(mut))
@@ -7504,7 +7487,7 @@ def autopsy_accent_hex(report) -> str:
     """The popup border accent for the autopsy dossier — always CRIMSON (the
     forensic/alarm role), so the frame reads distinct from the cyan info popups
     and the green rebate. Returns a #rrggbb."""
-    return AutopsyStripWidget.CRIMSON.name()
+    return Colors.CRIMSON.name()
 
 
 def build_autopsy_html(report) -> str:
@@ -7515,7 +7498,7 @@ def build_autopsy_html(report) -> str:
     D). EVERY API name reaching the HTML is html.escape'd (the pixmap text is
     QPainter-drawn, injection-safe by construction). Returns a 'no window' card
     when report is None; a tidy 'clean window' header when $0 was drained."""
-    crimson = _safe_color(AutopsyStripWidget.CRIMSON.name(), "#e0463c")
+    crimson = _safe_color(Colors.CRIMSON.name(), "#e0463c")
     if report is None:
         return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
                 "— NO AUTOPSY ON FILE —</div>")
@@ -7866,9 +7849,9 @@ class BudgetHourglass(QWidget):
         accent = theme_controller.accent()
         rect = QRectF(x, y, min(pill_w, self.width() - x - self.PAD), pill_h)
         # a dashed accent-tinted pill (a call to action, not an alarm).
-        outline = QColor(accent); outline.setAlpha(150)
+        outline = _alpha(accent, 150)
         p.setPen(QPen(outline, 1.2, Qt.PenStyle.DashLine))
-        fill = QColor(accent); fill.setAlpha(22)
+        fill = _alpha(accent, 22)
         p.setBrush(QBrush(fill))
         p.drawRoundedRect(rect, pill_h / 2.0, pill_h / 2.0)
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -7925,7 +7908,7 @@ class BudgetHourglass(QWidget):
             p.setClipPath(self._top_path)
             fill_h = self._bulb_h * remaining_frac
             fill_top = self._pinch_y_top - fill_h
-            sand = QColor(accent); sand.setAlpha(140)
+            sand = _alpha(accent, 140)
             # body of the sand below the ripple line.
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(sand))
@@ -7939,7 +7922,7 @@ class BudgetHourglass(QWidget):
                 rx = (cx - half_w) + t * self.BULB_W
                 ry = fill_top + 2 + math.sin(t * math.pi * 3) * 2.0
                 ripple.append(QPointF(rx, ry))
-            crest = QColor(accent); crest.setAlpha(200)
+            crest = _alpha(accent, 200)
             p.setPen(QPen(crest, 1.4))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPolyline(ripple)
@@ -7970,7 +7953,7 @@ class BudgetHourglass(QWidget):
             p.drawPath(hump)
             # the crest line of the mound glows RED when over-pace, else accent.
             crest_col = Colors.RED if over else QColor(accent)
-            cc = QColor(crest_col); cc.setAlpha(220)
+            cc = _alpha(crest_col, 220)
             crest = QPainterPath()
             crest.moveTo(cx - half_w, peak_y + 4)
             crest.quadTo(cx, peak_y - 4, cx + half_w, peak_y + 4)
@@ -7981,14 +7964,14 @@ class BudgetHourglass(QWidget):
 
         # --- the falling-grain line bridges the pinch when burning is live ----
         if 0.001 < frac < 0.999:
-            grain = QColor(accent); grain.setAlpha(200)
+            grain = _alpha(accent, 200)
             p.setPen(QPen(grain, self.PINCH_W * 0.7))
             p.drawLine(QPointF(cx, self._pinch_y_top - 2),
                        QPointF(cx, self._pinch_y_bot + 2))
 
         # --- the pinch glow (accent on-track / RED over-pace) -----------------
         pinch_glow = Colors.RED if over else QColor(accent)
-        pg = QColor(pinch_glow); pg.setAlpha(230)
+        pg = _alpha(pinch_glow, 230)
         p.setPen(QPen(pg, 2.2))
         p.drawLine(QPointF(cx - self.PINCH_W, self._pinch_y_top),
                    QPointF(cx + self.PINCH_W, self._pinch_y_top))
@@ -8003,7 +7986,7 @@ class BudgetHourglass(QWidget):
         edge_x = cx + half_w
         tick_col = Colors.TEXT_ACCENT
         # dotted leader across the glass at the pace height.
-        leader = QColor(tick_col); leader.setAlpha(120)
+        leader = _alpha(tick_col, 120)
         p.setPen(QPen(leader, 1, Qt.PenStyle.DotLine))
         p.drawLine(QPointF(cx - half_w, pace_y), QPointF(edge_x, pace_y))
         # the 10px diagonal accent dash just outside the right edge.
@@ -8119,7 +8102,7 @@ class BudgetBurndownStrip(PopupStrip):
         if max_v > 0 and getattr(b, "avg_daily", 0.0) > 0:
             avg_frac = min(1.0, b.avg_daily / max_v)
             avg_y = base_y - chart_h * avg_frac
-            pace = QColor(Colors.TEXT_ACCENT); pace.setAlpha(170)
+            pace = _alpha(Colors.TEXT_ACCENT, 170)
             p.setPen(QPen(pace, 1, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(chart_left, avg_y), QPointF(chart_right, avg_y))
             p.setFont(f_tiny)
@@ -8555,7 +8538,7 @@ class ValueAssayWidget(QWidget):
         if g["hollow"]:
             # Unassayable: rim-only ring + a struck "no benchmark". No metal.
             rim = spend_palette.model_color(m.model_id, m.spend_rank)
-            ring = QColor(rim); ring.setAlpha(150)
+            ring = _alpha(rim, 150)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(ring, 2, Qt.PenStyle.DashLine))
             p.drawEllipse(rect)
@@ -8778,7 +8761,7 @@ class AssayCertificateStrip(PopupStrip):
             p.drawText(QRectF(pad, y, self.LABEL_W - 4, self.ROW_H),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, k)
             # track.
-            track = QColor(Colors.TEXT_MUTED); track.setAlpha(40)
+            track = _alpha(Colors.TEXT_MUTED, 40)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
                                        track_w, self.TRACK_H), 4), QBrush(track))
@@ -9402,7 +9385,7 @@ class ModelOfWeekBelt(QWidget):
         delta = mow.wow_delta or 0.0
         up = delta >= 0
         col = Colors.GREEN if up else Colors.RED
-        band = QColor(col); band.setAlpha(36)
+        band = _alpha(col, 36)
         self._paint_ribbon_band(p, rr, band)
         # the chevron at the left of the band.
         cy = rr.center().y()
@@ -10062,7 +10045,7 @@ class TokenRecorder(QWidget):
             clip.addRect(sliver)
             p.setClipPath(clip)
             p.setFont(self._drum_font)
-            peek = QColor(_REC_DRUM_INK); peek.setAlpha(70)
+            peek = _alpha(_REC_DRUM_INK, 70)
             p.setPen(QPen(peek))
             # draw the next glyph shifted up so only its TOP peeks into the sliver.
             p.drawText(r.translated(0, -r.height() * 0.62),
@@ -10164,7 +10147,7 @@ class TokenRecorder(QWidget):
         if lit >= 1:
             bx0 = inner.x() + spacing * (first_lit + 0.5)
             bx1 = inner.x() + spacing * (slots - 0.5)
-            bar = QColor(_REC_AMBER); bar.setAlpha(150)
+            bar = _alpha(_REC_AMBER, 150)
             p.setPen(QPen(bar, 2))
             p.drawLine(QPointF(bx0, cl_y), QPointF(bx1, cl_y))
 
@@ -10180,7 +10163,7 @@ class TokenRecorder(QWidget):
             pad = QRectF(cx - pad_r, cl_y - pad_r, pad_r * 2, pad_r * 2)
             if is_lit and lit_now:
                 # a soft glow + a lit amber pad.
-                glow = QColor(_REC_AMBER); glow.setAlpha(40)
+                glow = _alpha(_REC_AMBER, 40)
                 p.setBrush(QBrush(glow))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawEllipse(pad.adjusted(-3, -3, 3, 3))

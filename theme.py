@@ -26,6 +26,7 @@ class Colors:
     RED = QColor(255, 71, 87)
     RED_DIM = QColor(255, 71, 87, 60)
     ORANGE = QColor(255, 165, 2)
+    CRIMSON = QColor(224, 70, 60)   # dossier "wound" red (uptime dip / autopsy drain)
 
     TEXT_PRIMARY = QColor(240, 240, 255)
     TEXT_SECONDARY = QColor(160, 160, 200)
