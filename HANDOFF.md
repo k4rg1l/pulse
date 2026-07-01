@@ -29,11 +29,20 @@ throughout - **no UI/sizing changes** (Phase 4 is owner-driven, below).
   memory leak, +2 tests); the permaslug resolver is fetched once per refresh
   (was doubling the per-model uptime fan-out).
 
+**Update 2026-07-01 (round 2):** resumed autonomously; shipped 2 more Phase-1 DRY
+commits — `c04c638` (Colors.CRIMSON + `_alpha()` helper, 82 `setAlpha` sites) and
+`efe039f` (`_strip_img_div()` collapsing the 12 strip-embed blocks). So of the
+Phase-1 items below, **`_alpha`/CRIMSON/`strip_to_img_html` are now DONE**; `_elide`
+was intentionally SKIPPED (its sites reuse an existing QFontMetrics, so a helper
+would ADD allocations). **16 commits total; 611 tests green.** The `PinnedModelCard`
+split was re-evaluated and kept deferred: an ~800-LOC move on the core surface whose
+dossier HTML isn't unit-tested — it wants visual QA (open the popups) even though a
+same-file mixin would be runtime-safe. Everything still listed below is deferred.
+
 **Deferred (safe but not done - for owner review):**
-- *Phase 1:* `_alpha(color,a)` helper (141 `QColor().setAlpha()` dupes) + `_elide()`
-  (~30) - SAFE but 141 scattered PAINT sites with alpha not covered by the geometry
-  tests, so risky to sweep blind. `strip_to_img_html()` for the 13 identical
-  HTML-embed blocks (~80 LOC). `CRIMSON` (defined 2x) -> `theme.Colors`.
+- *Phase 1:* ~~`_alpha`/`strip_to_img_html`/`CRIMSON`~~ DONE (round 2). `_elide()`
+  (~30 sites) SKIPPED — those sites reuse an existing QFontMetrics, so a helper
+  would ADD per-call allocations (not a clean win).
 - *Color tokens:* ~348 hex literals (only 27 in `theme.py`) -> route through
   `theme.Colors` at IDENTICAL values. Behaviour-preserving but large, and it's the
   prerequisite for Phase-4 theming - do it WITH the UI overhaul.
