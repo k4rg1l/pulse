@@ -43,6 +43,10 @@ state.json
 # Research probe output — contains real account usage/activity data, never commit
 tools/_probe_out/
 
+# Postman extension workspace sync (OpenAI/Cline/OpenRouter collections) — local tooling, not project source
+.postman/
+postman/
+
 # Scratch / capture files used during development
 .run.err
 .run.log
