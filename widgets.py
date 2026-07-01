@@ -525,7 +525,49 @@ class ProviderPopup(QWidget):
 # ---------------------------------------------------------------------------
 #  THE PULSE — the dossier's painted 73-bar Vitals strip (#3)
 # ---------------------------------------------------------------------------
-class UptimeStripWidget(QWidget):
+class PopupStrip(QWidget):
+    """Base for the small fixed-width strips embedded (as data-URI <img>) in the
+    provider/info popups. Measure-before-allocate: a subclass sets the class attr
+    ``STRIP_W`` and its ``__init__`` sizes the widget from ``_measure_height()``
+    (font-metric height driving BOTH the widget and the pixmap so nothing clips),
+    and ``_paint_into(p)`` does all the drawing. The base owns the scaffolding
+    every strip repeated: a devicePixelRatio-aware ``render_pixmap()`` and
+    ``paintEvent()``."""
+
+    STRIP_W = 300  # subclasses override
+
+    def _measure_height(self) -> int:  # subclasses override
+        raise NotImplementedError
+
+    def _paint_into(self, p):          # subclasses override
+        raise NotImplementedError
+
+    def render_pixmap(self) -> QPixmap:
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        dpr = dpr if dpr and dpr > 0 else 1.0
+        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self._paint_into(p)
+        p.end()
+        return pm
+
+    def paintEvent(self, event):
+        if not _safe_paint(self):
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_into(p)
+        p.end()
+
+
+class UptimeStripWidget(PopupStrip):
     """The Vitals dossier's hero: 73 hourly bars rendered at full resolution
     with a continuous green→amber→crimson depth ramp, a day axis, a "now"
     marker, and the worst hour called out. This is the ONLY surface that can
@@ -541,7 +583,8 @@ class UptimeStripWidget(QWidget):
     def __init__(self, hist, parent=None):
         super().__init__(parent)
         self._hist = hist
-        self.setFixedSize(self.STRIP_W, self.STRIP_H)
+        self._h = self.STRIP_H
+        self.setFixedSize(self.STRIP_W, self._h)
         # Test introspection.
         self._strip_bar_xs = []
         self._strip_worst_x = None
@@ -557,23 +600,6 @@ class UptimeStripWidget(QWidget):
             return _lerp_color(QColor(Colors.GREEN), QColor(Colors.YELLOW), t)
         t = (95.0 - v) / 55.0    # 95→0, 40→1
         return _lerp_color(QColor(Colors.YELLOW), self.CRIMSON, t)
-
-    def render_pixmap(self) -> QPixmap:
-        pm = QPixmap(self.STRIP_W, self.STRIP_H)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         hist = self._hist
@@ -669,7 +695,7 @@ class UptimeStripWidget(QWidget):
 # ---------------------------------------------------------------------------
 #  THE TAPE — the dossier's 2-point "last 7d" momentum ramp (#7)
 # ---------------------------------------------------------------------------
-class TrendRampWidget(QWidget):
+class TrendRampWidget(PopupStrip):
     """The Tape dossier's hero: a HONEST 2-point ramp (last-week index → now)
     drawn from the SINGLE week-over-week `change` fraction. We have ONE delta,
     so we draw exactly two anchored points (NOT a fabricated multi-point series),
@@ -685,24 +711,8 @@ class TrendRampWidget(QWidget):
         super().__init__(parent)
         self._change = change
         self._line = QColor(line_color)
-        self.setFixedSize(self.STRIP_W, self.STRIP_H)
-
-    def render_pixmap(self) -> QPixmap:
-        pm = QPixmap(self.STRIP_W, self.STRIP_H)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
+        self._h = self.STRIP_H
+        self.setFixedSize(self.STRIP_W, self._h)
 
     def _paint_into(self, p):
         pad = self.PAD
@@ -5708,7 +5718,7 @@ def _stamp_mult_label(mult: float) -> str:
     return f"{mult:.1f}"
 
 
-class ReceiptStripWidget(QWidget):
+class ReceiptStripWidget(PopupStrip):
     """The full itemized THERMAL RECEIPT (#10 click-through), rendered to a
     QPixmap and embedded as a data-URI <img> in the shared ProviderPopup
     (UptimeStripWidget idiom). The ONE fully-light surface in the app — warm
@@ -5772,30 +5782,6 @@ class ReceiptStripWidget(QWidget):
              + line_h          # joke line
              + tear)
         return int(h)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_tear(self, p, y, w, down: bool):
         """A jagged sawtooth tear (6px teeth) across the paper width."""
@@ -6453,7 +6439,7 @@ class RebateStub(QWidget):
         self.rebate_clicked.emit(gpos)
 
 
-class RebateBreakdownStrip(QWidget):
+class RebateBreakdownStrip(PopupStrip):
     """The per-model rebate breakdown (#12 click-through), rendered to a QPixmap
     and embedded as a data-URI <img> in the shared ProviderPopup (UptimeStrip
     idiom). A 7-day sparkline of daily abs(usage_cache) on top, then one GREEN
@@ -6484,30 +6470,6 @@ class RebateBreakdownStrip(QWidget):
         n = max(1, len(self._rows))
         footer_h = QFontMetrics(Fonts.tiny()).height() + 6
         return int(8 + spark_h + n * self._row_h() + footer_h + 8)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         w = self.STRIP_W
@@ -7201,7 +7163,7 @@ class GhostVeil(QWidget):
         super().mousePressEvent(event)
 
 
-class SeanceLedgerStrip(QWidget):
+class SeanceLedgerStrip(PopupStrip):
     """The per-pair SÉANCE LEDGER (the #13 click-through), rendered to a QPixmap
     and embedded as a data-URI <img> in the shared ProviderPopup (UptimeStrip
     idiom). A two-bar last-week/this-week mini-timeline of the pair's presence
@@ -7228,30 +7190,6 @@ class SeanceLedgerStrip(QWidget):
         notes = 2                     # first/last-seen + (apparition/reroute)
         return int(10 + fm.height() + 6 + rows * 20 + 6 + notes * (fm.height() + 4)
                    + 10)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         e = self._entry
@@ -7411,7 +7349,7 @@ def build_seance_html(entry, diff) -> str:
 # so "93% from ONE model @ ONE provider" is unmissable. Rows beyond 6 collapse
 # into a bounded "+N more" remainder bar. The empty window is a single muted
 # "clean window" bar (no crimson — a real populated-zero, not the locked state).
-class AutopsyStripWidget(QWidget):
+class AutopsyStripWidget(PopupStrip):
     """#11 dossier strip (mirrors UptimeStripWidget/SeanceLedgerStrip: STRIP_W=292,
     render_pixmap()+_paint_into(p), measure-before-allocate so nothing clips).
 
@@ -7453,30 +7391,6 @@ class AutopsyStripWidget(QWidget):
         # Reserve a fixed value column wide enough for "$9999.99 · 100%".
         return QFontMetrics(Fonts.mono_small()).horizontalAdvance(
             "$9999.99 · 100%") + 8
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _row_color(self, rank: int, n: int) -> QColor:
         """Dominant row = deepest CRIMSON; minor rows lerp toward the panel accent
@@ -8143,7 +8057,7 @@ class BudgetHourglass(QWidget):
         self.budget_clicked.emit(gpos)
 
 
-class BudgetBurndownStrip(QWidget):
+class BudgetBurndownStrip(PopupStrip):
     """The #14 click-through dossier, rendered to a QPixmap and embedded as a
     data-URI <img> in the shared ProviderPopup (the UptimeStrip idiom). A 7-bar
     daily-spend column chart with the avg-daily pace line overlaid + the
@@ -8164,30 +8078,6 @@ class BudgetBurndownStrip(QWidget):
         fm = QFontMetrics(Fonts.tiny())
         # the column chart block + 3 figure/math lines.
         return int(12 + 64 + 12 + 3 * (fm.height() + 4) + 10)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         b = self._b
@@ -8825,7 +8715,7 @@ def _coin_short_name(display: str) -> str:
 
 # ---- #15 assay CERTIFICATE (the tap-through dossier) ----------------------
 
-class AssayCertificateStrip(QWidget):
+class AssayCertificateStrip(PopupStrip):
     """The painted 3-category assay certificate for one model: a header score row
     + three mini value-bars (intelligence / coding / agentic), each a strip with
     its 2-decimal value (and the winner's × multiple vs the field). All text is
@@ -8852,30 +8742,6 @@ class AssayCertificateStrip(QWidget):
         rows = len(METRICS)
         return int(self.PAD * 2 + header_h + 6
                    + rows * (self.ROW_H + self.ROW_GAP) - self.ROW_GAP)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         from value_assay import METRICS
@@ -9621,7 +9487,7 @@ class ModelOfWeekBelt(QWidget):
 
 
 # ---- #16 week DOSSIER (the tap-through popup) -----------------------------
-class WeekDossierStrip(QWidget):
+class WeekDossierStrip(PopupStrip):
     """The painted week dossier body for THE TITLE BELT: the champion header +
     the exact week spend/tokens/requests + the runner-up trace. All text is
     QPainter-drawn (injection-safe); the HTML wrapper ALSO html.escapes names.
@@ -9657,30 +9523,6 @@ class WeekDossierStrip(QWidget):
         head_h = QFontMetrics(Fonts.mono_small()).height() + 6
         body = len(self._rows) * (self.ROW_H + self.ROW_GAP) - self.ROW_GAP
         return int(self.PAD * 2 + head_h + 6 + body)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         w = self.STRIP_W
@@ -10424,7 +10266,7 @@ class TokenRecorder(QWidget):
 
 
 # ---- #17 flight-recorder DOSSIER (the tap-through popup) -------------------
-class RecorderDossierStrip(QWidget):
+class RecorderDossierStrip(PopupStrip):
     """The painted flight-recorder dossier body for THE FLIGHT RECORDER: the
     lifetime totals header + a TIMELINE of every active day as a mini amber bar
     (reusing the BurnRateBar mini-bar vocabulary) + the record day + the streak
@@ -10451,30 +10293,6 @@ class RecorderDossierStrip(QWidget):
         head_h = QFontMetrics(Fonts.mono_small()).height() + 6
         body = len(self._rows) * (self.ROW_H + self.ROW_GAP)
         return int(self.PAD * 2 + head_h + 8 + body)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         w = self.STRIP_W
@@ -11135,7 +10953,7 @@ class TaskCourt(QWidget):
 
 
 # ---- #18 COURT / CLIMB DOSSIERS (the tap-through popups) -------------------
-class CourtDossierStrip(QWidget):
+class CourtDossierStrip(PopupStrip):
     """The painted court dossier body: the top-3 world models per macro + the
     macro shares. All text QPainter-drawn (injection-safe); the HTML wrapper ALSO
     html.escapes names. devicePixelRatio-aware. Measure-before-allocate."""
@@ -11178,30 +10996,6 @@ class CourtDossierStrip(QWidget):
             body += self.MACRO_GAP
         return int(self.PAD * 2 + head_h + body)
 
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
-
     def _paint_into(self, p):
         w = self.STRIP_W
         pad = self.PAD
@@ -11241,7 +11035,7 @@ class CourtDossierStrip(QWidget):
             y += self.MACRO_GAP
 
 
-class ClimbDossierStrip(QWidget):
+class ClimbDossierStrip(PopupStrip):
     """The painted climb dossier body: the FULL 20-app ladder with the user's row
     highlighted in EMBER at the foot. All text QPainter-drawn (injection-safe);
     the HTML wrapper ALSO html.escapes names. NEVER an 'out-tokened' claim."""
@@ -11276,30 +11070,6 @@ class ClimbDossierStrip(QWidget):
         head_h = QFontMetrics(Fonts.mono_small()).height() + 6
         body = (len(self._rows) + 1) * self.ROW_H        # +1 the user row
         return int(self.PAD * 2 + head_h + 8 + body)
-
-    def render_pixmap(self) -> QPixmap:
-        try:
-            dpr = self.devicePixelRatioF()
-        except Exception:
-            dpr = 1.0
-        dpr = dpr if dpr and dpr > 0 else 1.0
-        pm = QPixmap(int(self.STRIP_W * dpr), int(self._h * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self._paint_into(p)
-        p.end()
-        return pm
-
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint_into(p)
-        p.end()
 
     def _paint_into(self, p):
         w = self.STRIP_W
