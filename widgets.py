@@ -522,9 +522,6 @@ class ProviderPopup(QWidget):
         super().hideEvent(event)
 
 
-# ---------------------------------------------------------------------------
-#  THE PULSE — the dossier's painted 73-bar Vitals strip (#3)
-# ---------------------------------------------------------------------------
 class PopupStrip(QWidget):
     """Base for the small fixed-width strips embedded (as data-URI <img>) in the
     provider/info popups. Measure-before-allocate: a subclass sets the class attr
@@ -567,6 +564,9 @@ class PopupStrip(QWidget):
         p.end()
 
 
+# ---------------------------------------------------------------------------
+#  THE PULSE — the dossier's painted 73-bar Vitals strip (#3)
+# ---------------------------------------------------------------------------
 class UptimeStripWidget(PopupStrip):
     """The Vitals dossier's hero: 73 hourly bars rendered at full resolution
     with a continuous green→amber→crimson depth ramp, a day axis, a "now"
