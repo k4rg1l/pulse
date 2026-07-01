@@ -21,8 +21,8 @@ from PySide6.QtCore import QThread, QTimer, Qt, Slot, Signal, QObject
 
 from config import (
     APP_NAME, APP_ORG, API_KEY, ENDPOINTS_REFRESH_INTERVAL,
-    CREDIT_WARNING_THRESHOLD, CREDIT_CRITICAL_THRESHOLD,
 )
+from alerts import balance_severity
 from theme import STYLESHEET, accent_for
 from api_client import APIWorker
 from tray_icon import TrayIcon
@@ -170,7 +170,10 @@ class OpenRouterPulse(QObject):
         # -- Timers --
         self.key_timer = QTimer(self)
         self.key_timer.timeout.connect(self._fetch_key_info)
-        self.key_timer.start(self.settings.key_refresh_seconds * 1000)
+        # Guard: a 0 / negative key_refresh_seconds would spin a 0 ms
+        # tight-loop timer. Fall back to the 60 s default; 5 s floor.
+        refresh_s = self.settings.key_refresh_seconds or 60
+        self.key_timer.start(max(5, refresh_s) * 1000)
 
         # Endpoints refresh on its own cadence (slower than balance polling).
         self.endpoints_timer = QTimer(self)
@@ -456,14 +459,11 @@ class OpenRouterPulse(QObject):
             "openrouter", self._openrouter_severity(key_info))
 
     def _openrouter_severity(self, key_info):
-        rem = key_info.remaining
-        if rem is None:
-            return "normal"
-        if rem <= CREDIT_CRITICAL_THRESHOLD:
-            return "critical"
-        if rem <= CREDIT_WARNING_THRESHOLD:
-            return "warning"
-        return "normal"
+        return balance_severity(
+            key_info.remaining,
+            self.settings.balance_warning,
+            self.settings.balance_critical,
+        )
 
     def _save_history(self):
         try:

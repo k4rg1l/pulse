@@ -77,10 +77,6 @@ ANALYTICS_QUERY_ENDPOINT = f"{BASE_URL}/api/v1/analytics/query"
 # -- Refresh Intervals (milliseconds, fallback when settings missing) --
 ENDPOINTS_REFRESH_INTERVAL = 300_000  # pinned-model health, every 5 min
 
-# -- Alert Thresholds (fallback when settings missing) --
-CREDIT_WARNING_THRESHOLD = 5.0
-CREDIT_CRITICAL_THRESHOLD = 1.0
-
 # -- Window Settings --
 DASHBOARD_WIDTH = 560
 DASHBOARD_MIN_HEIGHT = 760
