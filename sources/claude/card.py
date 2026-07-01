@@ -14,11 +14,12 @@ import re
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QBrush, QFontMetrics, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPen
 
 from theme import Colors, Fonts
 import theme_controller
+
+from sources.base_card import BaseCard
 
 
 def _fmt_tokens(n) -> str:
@@ -84,40 +85,16 @@ def _sev_color(sev: str):
     return theme_controller.accent()
 
 
-class ClaudeCard(QWidget):
-    PAD_X = 14
-    PAD_Y = 12
-    BAR_H = 6
-    # vertical gaps (px)
-    GAP_HEADER = 10     # below the tier header
-    GAP_LABEL_BAR = 4   # between a window's label and its bar
-    GAP_ROW = 10        # below a window's bar (before the next row)
+class ClaudeCard(BaseCard):
     GAP_MSG = 12        # below the stale/empty message
     GAP_DIV = 6         # around the footer divider
     GAP_FOOT = 4        # between footer lines
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._data = None
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(96)
-        theme_controller.changed.connect(self.update)
-
-    def render(self, data):
-        self._data = data
-        _, total = self._build_ops()
-        self.setFixedHeight(int(total))
-        self.update()
 
     # ---- geometry (single source of truth for paint + height) ----
 
     def _windows(self):
         d = self._data
         return d.usage.windows if (d and d.usage and d.usage.windows) else []
-
-    @staticmethod
-    def _fm_h(font):
-        return QFontMetrics(font).height()
 
     def _build_ops(self):
         """Return (ops, total_height). `ops` is a list of (kind, y, *extra)
@@ -161,12 +138,7 @@ class ClaudeCard(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
-
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(0, 0, w, h), 10, 10)
-        p.fillPath(path, QBrush(Colors.BG_CARD))
-        p.setPen(QPen(Colors.BORDER, 1))
-        p.drawPath(path)
+        self._paint_chrome(p, w, h)
 
         d = self._data
         x = self.PAD_X
