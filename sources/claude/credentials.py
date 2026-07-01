@@ -26,7 +26,6 @@ class ClaudeCredentials:
     access_token: str
     expires_at_ms: int          # NOTE: milliseconds, not seconds
     subscription_type: str = ""  # "max" | "pro" | "free" | "team" | ...
-    rate_limit_tier: str = ""
 
     @property
     def is_expired(self) -> bool:
@@ -60,7 +59,6 @@ def read_credentials(path: Optional[Path] = None) -> Optional[ClaudeCredentials]
         access_token=str(token),
         expires_at_ms=expires,
         subscription_type=str(oauth.get("subscriptionType", "") or ""),
-        rate_limit_tier=str(oauth.get("rateLimitTier", "") or ""),
     )
 
 

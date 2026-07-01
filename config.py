@@ -72,23 +72,14 @@ MANAGEMENT_KEY = _load_management_key()
 BASE_URL = "https://openrouter.ai"
 API_KEY_ENDPOINT = f"{BASE_URL}/api/v1/key"
 MODELS_ENDPOINT = f"{BASE_URL}/api/v1/models"
-MODELS_COUNT_ENDPOINT = f"{BASE_URL}/api/v1/models/count"  # unused in MVP
-GENERATION_ENDPOINT = f"{BASE_URL}/api/v1/generation"
-ANALYTICS_META_ENDPOINT = f"{BASE_URL}/api/v1/analytics/meta"
 ANALYTICS_QUERY_ENDPOINT = f"{BASE_URL}/api/v1/analytics/query"
-STATUS_URL = "https://status.openrouter.ai"
 
 # -- Refresh Intervals (milliseconds, fallback when settings missing) --
-KEY_REFRESH_INTERVAL = 60_000
-STATUS_REFRESH_INTERVAL = 120_000
-MODELS_REFRESH_INTERVAL = 1_800_000
 ENDPOINTS_REFRESH_INTERVAL = 300_000  # pinned-model health, every 5 min
 
 # -- Alert Thresholds (fallback when settings missing) --
 CREDIT_WARNING_THRESHOLD = 5.0
 CREDIT_CRITICAL_THRESHOLD = 1.0
-CREDIT_DANGER_PERCENT = 0.20
-CREDIT_CRITICAL_PERCENT = 0.05
 
 # -- Window Settings --
 DASHBOARD_WIDTH = 560

@@ -31,8 +31,8 @@ from config import (
     OPENROUTER_DASHBOARD_URL, OPENROUTER_CREDITS_URL, OPENROUTER_MODELS_URL,
 )
 from widgets import (
-    ArcGauge, StatCard, SectionHeader, BurnRateBar, GradientStrip,
-    ErrorBanner, TimelineChart, PinnedModelCard, PinnedColumnHeader,
+    ArcGauge, SectionHeader, GradientStrip,
+    ErrorBanner, PinnedModelCard, PinnedColumnHeader,
     ModelPicker, ProviderPopup, SpendSpectrum, ReceiptStubList,
     build_receipt_html, receipt_accent_hex,
     RebateStub, build_rebate_html, rebate_accent_hex,
@@ -73,33 +73,6 @@ def _fmt_money(x):
     return f"${x:.2f}"
 
 
-class IconButton(QPushButton):
-    """Small icon-style button."""
-    def __init__(self, text, tooltip="", parent=None):
-        super().__init__(text, parent)
-        self.setFixedSize(28, 28)
-        self.setToolTip(tooltip)
-        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setStyleSheet("""
-            QPushButton {
-                background: #242442;
-                color: #a0a0c8;
-                border: 1px solid #323250;
-                border-radius: 6px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #2e2e52;
-                color: #00d2ff;
-                border-color: #00d2ff;
-            }
-            QPushButton:pressed {
-                background: #1a1a30;
-            }
-        """)
-
-
 class LinkButton(QPushButton):
     def __init__(self, text, url, parent=None):
         super().__init__(text, parent)
@@ -123,27 +96,6 @@ class LinkButton(QPushButton):
             }
         """)
         self.clicked.connect(lambda: webbrowser.open(self._url))
-
-
-class CardFrame(QWidget):
-    """A card-style container with rounded background."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-    def paintEvent(self, event):
-        if self.width() <= 0 or self.height() <= 0:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(0, 0, self.width(), self.height())
-        path = QPainterPath()
-        path.addRoundedRect(rect, 10, 10)
-        painter.fillPath(path, QBrush(Colors.BG_CARD))
-        pen = QPen(Colors.BORDER, 1)
-        painter.setPen(pen)
-        painter.drawPath(path)
-        painter.end()
 
 
 class Dashboard(QWidget):

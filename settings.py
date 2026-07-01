@@ -49,8 +49,6 @@ class Settings:
 
     # -- Refresh cadences (seconds)
     key_refresh_seconds: int = 60
-    status_refresh_seconds: int = 120
-    models_refresh_seconds: int = 1800
 
     # -- UI
     dismiss_on_focus_loss: bool = True  # close dashboard when user clicks elsewhere

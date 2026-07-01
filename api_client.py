@@ -14,15 +14,13 @@ from PySide6.QtCore import QObject, Signal, Slot, QThread
 
 from config import (
     API_KEY, API_KEY_ENDPOINT, MODELS_ENDPOINT,
-    MODELS_COUNT_ENDPOINT, STATUS_URL,
-    ANALYTICS_META_ENDPOINT, ANALYTICS_QUERY_ENDPOINT,
+    ANALYTICS_QUERY_ENDPOINT,
 )
 
 log = logging.getLogger("pulse.api")
 
 BASE_URL = "https://openrouter.ai"
 CREDITS_ENDPOINT = f"{BASE_URL}/api/v1/credits"
-PROVIDERS_ENDPOINT = f"{BASE_URL}/api/v1/providers"
 BENCHMARKS_ENDPOINT = f"{BASE_URL}/api/v1/benchmarks"
 
 HEADERS = {
@@ -96,22 +94,6 @@ class ModelInfo:
     @property
     def price_per_mtok_completion(self):
         return self.pricing_completion * 1_000_000
-
-
-@dataclass
-class ServiceStatus:
-    chat_api: str = "unknown"
-    data_api: str = "unknown"
-    homepage: str = "unknown"
-    overall: str = "unknown"
-
-
-@dataclass
-class ProviderInfo:
-    name: str
-    slug: str
-    status_page_url: Optional[str] = None
-    headquarters: Optional[str] = None
 
 
 # The extended pricing keys F1 retains beyond prompt/completion. Every one is a
@@ -1405,21 +1387,8 @@ class GhostDiff:
     week_bucket_b: str = ""         # the API's prior-week bucket date
 
     @property
-    def is_locked_placeholder(self) -> bool:
-        return False
-
-    @property
     def has_ghosts(self) -> bool:
         return bool(self.vanished or self.appeared)
-
-    def living_pairs(self) -> tuple:
-        return tuple(e.pair.key for e in self.living)
-
-    def vanished_pairs(self) -> tuple:
-        return tuple(e.pair.key for e in self.vanished)
-
-    def appeared_pairs(self) -> tuple:
-        return tuple(e.pair.key for e in self.appeared)
 
 
 def _ghost_pairs(rows: list, only_bucket: Optional[str] = None) -> tuple:
@@ -1776,7 +1745,6 @@ class AnalyticsClient:
         })
         self._cache: dict = {}
         self.last_error: Optional[str] = None
-        self._meta = None  # lazy; optional granularity/dimension validation
 
     def query(self, metrics: list, dimensions: list, granularity: str,
               start: str, end: str) -> Optional[dict]:
@@ -2150,24 +2118,6 @@ class APIClient:
             log.warning("key_info: unexpected failure", exc_info=True)
         return None
 
-    def get_providers(self) -> list:
-        try:
-            resp = self.session.get(PROVIDERS_ENDPOINT, timeout=15)
-            resp.raise_for_status()
-            data = resp.json().get("data", [])
-            return [
-                ProviderInfo(
-                    name=p.get("name", ""),
-                    slug=p.get("slug", ""),
-                    status_page_url=p.get("status_page_url"),
-                    headquarters=p.get("headquarters"),
-                )
-                for p in data
-            ]
-        except Exception as e:
-            log.warning("providers fetch failed: %s", e)
-            return []
-
     def get_models(self) -> list:
         try:
             resp = self.session.get(MODELS_ENDPOINT, timeout=30)
@@ -2198,16 +2148,6 @@ class APIClient:
             log.warning("models fetch failed: %s", e)
             return []
 
-    def get_model_count(self) -> int:
-        try:
-            resp = self.session.get(MODELS_COUNT_ENDPOINT, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("count", data.get("data", {}).get("count", 0))
-        except Exception as e:
-            log.warning("model count fetch failed: %s", e)
-            return 0
-
     def get_model_endpoints(self, model_id: str) -> Optional[ModelEndpoints]:
         """Fetch per-provider data for a single model."""
         try:
@@ -2219,31 +2159,6 @@ class APIClient:
         except Exception as e:
             log.warning("endpoints(%s) fetch failed: %s", model_id, e)
             return None
-
-    def get_service_status(self) -> ServiceStatus:
-        try:
-            resp = self.session.get(STATUS_URL, timeout=10)
-            text = resp.text.lower()
-            status = ServiceStatus()
-            if "all systems operational" in text:
-                status.overall = "operational"
-                status.chat_api = "operational"
-                status.data_api = "operational"
-                status.homepage = "operational"
-            elif "operational" in text:
-                status.overall = "degraded"
-                status.chat_api = "operational"
-                status.data_api = "operational"
-                status.homepage = "operational"
-            else:
-                status.overall = "degraded"
-                status.chat_api = "degraded"
-                status.data_api = "degraded"
-                status.homepage = "degraded"
-            return status
-        except Exception as e:
-            log.warning("status fetch failed: %s", e)
-            return ServiceStatus()
 
     def get_benchmarks(self) -> Optional[BenchmarkBoard]:
         """Fetch DesignArena (+ Artificial Analysis) standings and build the
@@ -2297,9 +2212,6 @@ class APIWorker(QObject):
     """Background worker that fetches data and emits signals."""
     key_info_ready = Signal(object)
     models_ready = Signal(object)
-    model_count_ready = Signal(int)
-    status_ready = Signal(object)
-    providers_ready = Signal(object)
     endpoints_ready = Signal(str, object)   # (model_id, ModelEndpoints|None)
     benchmarks_ready = Signal(object)       # BenchmarkBoard | None
     provider_trust_ready = Signal(object)   # ProviderTrustBook | None  (no-auth)
@@ -2340,30 +2252,6 @@ class APIWorker(QObject):
         try:
             models = self.client.get_models()
             self.models_ready.emit(models)
-        except Exception as e:
-            self.error.emit(str(e))
-
-    @Slot()
-    def fetch_model_count(self):
-        try:
-            count = self.client.get_model_count()
-            self.model_count_ready.emit(count)
-        except Exception as e:
-            self.error.emit(str(e))
-
-    @Slot()
-    def fetch_status(self):
-        try:
-            status = self.client.get_service_status()
-            self.status_ready.emit(status)
-        except Exception as e:
-            self.error.emit(str(e))
-
-    @Slot()
-    def fetch_providers(self):
-        try:
-            providers = self.client.get_providers()
-            self.providers_ready.emit(providers)
         except Exception as e:
             self.error.emit(str(e))
 

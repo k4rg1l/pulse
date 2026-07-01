@@ -29,7 +29,6 @@ class GpuCard(QWidget):
     GAP_HEADER = 10
     GAP_LABEL_BAR = 4
     GAP_ROW = 10
-    GAP_FOOT = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
