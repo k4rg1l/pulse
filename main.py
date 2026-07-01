@@ -318,13 +318,17 @@ class OpenRouterPulse(QObject):
             self.trigger.fetch_benchmarks.emit()
         if getattr(self.settings, "show_trust_seals", True):
             self.trigger.fetch_provider_trust.emit()
+        # The permaslug resolver is a SHARED dependency of Speed (#4), the
+        # Tape (#7) and the Pulse (#3 uptime). Fetch it ONCE if either
+        # consumer is on -- emitting it per-feature re-ran the fetch AND its
+        # uptime fan-out twice (the boot path already de-dupes this).
+        if (getattr(self.settings, "show_speed", True)
+                or getattr(self.settings, "show_trend", True)):
+            self.trigger.fetch_permaslug_resolver.emit()
         if getattr(self.settings, "show_speed", True):
-            self.trigger.fetch_permaslug_resolver.emit()
             self.trigger.fetch_speed_board.emit()
-        # #7 THE TAPE: re-fetch the WoW momentum board (and ensure the resolver
-        # it needs is fetched even when Speed is off).
+        # #7 THE TAPE: re-fetch the WoW momentum board.
         if getattr(self.settings, "show_trend", True):
-            self.trigger.fetch_permaslug_resolver.emit()
             self.trigger.fetch_trend.emit()
         # #5 THE THRESHOLD: no fetch; re-apply the gate so a settings toggle
         # takes effect on manual refresh (the per-model door re-resolves when
