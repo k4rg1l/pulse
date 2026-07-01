@@ -1700,6 +1700,10 @@ class AnalyticsClient:
     # TTL a touch under the 15-min poll so a re-poll of an unchanged key reuses
     # the cached envelope instead of re-hitting the rate-limited endpoint.
     CACHE_TTL_SECONDS = 14 * 60
+    # Hard cap on cached envelopes. The cache key embeds a now()-based date
+    # window, so each poll mints new keys; the cap evicts old poll cycles'
+    # entries so the dict can't grow without bound over a long uptime.
+    CACHE_MAX = 64
 
     def __init__(self):
         import config
@@ -1746,6 +1750,9 @@ class AnalyticsClient:
             inner = j.get("data", j) if isinstance(j, dict) else {}
             parsed = parse_analytics_query(inner)
             self._cache[key] = (time.time(), parsed)
+            # Dicts keep insertion order -> pop the oldest once past the cap.
+            while len(self._cache) > self.CACHE_MAX:
+                self._cache.pop(next(iter(self._cache)))
             self.last_error = None
             return parsed
         except requests.exceptions.HTTPError as e:
