@@ -6,6 +6,60 @@
 
 **Last updated:** 2026-06-24 · **Phase A COMPLETE.** All 18 OpenRouter roadmap features (#1–#18) + all 4 foundations (F1–F4) are shipped on branch `openrouter-roadmap` (off `main`). **599 tests green.** Branch left for review — NOT merged, NOT pushed, NOT released. **NEXT: Phase B — Claude deep-dive** (see [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md)), on a fresh branch off `main`.
 
+---
+
+## Cleanup pass - 2026-06-30 (autonomous, branch `openrouter-roadmap`)
+
+A debloat / DRY / de-monolith / efficiency pass (13 commits, `13f76d1`..`a101d29`).
+**609 tests green** (was 599); every commit security-reviewed. Behaviour-preserving
+throughout - **no UI/sizing changes** (Phase 4 is owner-driven, below).
+
+**Done:**
+- **Phase 0 debloat:** removed ~710 LOC dead code (6 unused widget classes, 3
+  unwired api_client chains, dead constants/imports/symbols). Fixed 2 real bugs:
+  the low-balance alert now honours `balance_warning`/`balance_critical` (was
+  hardcoded config constants); guarded a `key_refresh_seconds=0` 0ms-timer loop.
+- **Phase 1 DRY:** `num.py` (shared coercion) + `FrontendClient._fetch` (7 clone
+  wrappers -> 1, +4 tests); `PopupStrip` base for the 12 popup strips (-230 LOC,
+  + fixed a HiDPI-blur bug on 2 stale strips); `BaseCard` for GPU/System/Claude
+  source cards (+ a ClaudeCard paint smoke test); pricing-block dedup.
+- **Phase 2 de-monolith:** extracted `spend_model.py` (~1,050 pure LOC) from
+  `api_client.py` (2,707 -> 1,510), re-exported so every import still resolves.
+- **Phase 3 efficiency:** bounded the `AnalyticsClient` cache (was an unbounded
+  memory leak, +2 tests); the permaslug resolver is fetched once per refresh
+  (was doubling the per-model uptime fan-out).
+
+**Deferred (safe but not done - for owner review):**
+- *Phase 1:* `_alpha(color,a)` helper (141 `QColor().setAlpha()` dupes) + `_elide()`
+  (~30) - SAFE but 141 scattered PAINT sites with alpha not covered by the geometry
+  tests, so risky to sweep blind. `strip_to_img_html()` for the 13 identical
+  HTML-embed blocks (~80 LOC). `CRIMSON` (defined 2x) -> `theme.Colors`.
+- *Color tokens:* ~348 hex literals (only 27 in `theme.py`) -> route through
+  `theme.Colors` at IDENTICAL values. Behaviour-preserving but large, and it's the
+  prerequisite for Phase-4 theming - do it WITH the UI overhaul.
+- *Phase 2:* `PinnedModelCard` (~3.2k-line class) -> a `Band` interface (8 bands)
+  + a `DossierFormatter` (~950 LOC of HTML f-strings). Big; do with visual review
+  (it's the core OpenRouter surface). Then split `widgets.py` (~11k LOC) into a pkg.
+- *Phase 3:* GPU/System declare 2-3s `poll_interval` but `main.py` floors to 15s
+  (pick the intended live cadence - a resource tradeoff, owner's call); cache
+  per-paint `QFont`/`QFontMetrics`; `_paint_fault_line` rebuilds its cached path
+  every paint (honour the cache); `config.py` parses `settings.json` 3x at import
+  (-> once, but tread carefully: this is the 401/empty-key path); boot-path resolver
+  can double-fire if speed off + trend+uptime on (narrow edge, not the refresh one).
+
+**FYI:** `tools/_probe_out/_probe_ghost_13.py` calls the removed `GhostDiff`
+`*_pairs()` methods - that dir is gitignored scratch (not shipped, not tested); harmless.
+
+**NEXT = Phase 4: the UI / sizing overhaul - OWNER-DRIVEN.** The foundation the
+owner asked for: a `metrics` module configured once in `main.py` (right after
+`QApplication(sys.argv)`, before `Dashboard(...)`) deriving one base unit from
+`QScreen.availableGeometry()` + DPI; then a spacing/type/radius scale in `theme.py`;
+then dashboard size-to-content (kills the empty void on the GPU/System/Claude tabs);
+then the visual cleanup (redundancy - e.g. "next top-up" printed 3x; the dense
+provider wall; uneven rhythm; the too-bright active nav slot). Everything today is
+import-time fixed px (`config.DASHBOARD_WIDTH=560`, `setFixedWidth`-locked). Do NOT
+start until the owner drives it (they will nitpick UI heavily - it is theirs).
+
 > **Validating Phase A?** See **[docs/PHASE-A-VALIDATION.md](docs/PHASE-A-VALIDATION.md)** — the complete cold-start QA playbook (per-feature table, toggles, log markers, honesty contract, known non-blockers).
 
 ---
