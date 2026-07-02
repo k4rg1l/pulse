@@ -129,6 +129,37 @@ def test_build_spend_spectrum_divide_by_zero_and_empty():
     assert z.models[0].share == 0.0   # guarded, not ZeroDivisionError
 
 
+def test_build_spend_spectrum_zero_fills_the_day_axis():
+    """The API returns only days WITH usage. A one-day-old account used to
+    render one giant full-chart block; with a parseable start/end the day
+    axis is zero-filled so that day reads as a spike inside the real week."""
+    rows = [
+        {"date__day": "2026-07-01", "model": SONNET, "total_usage": 0.13,
+         "request_count": "19"},
+    ]
+    sp = build_spend_spectrum(rows, granularity="day",
+                              start="2026-06-25T12:00:00+00:00",
+                              end="2026-07-01T12:00:00+00:00")
+    assert sp.buckets == ("2026-06-25", "2026-06-26", "2026-06-27",
+                          "2026-06-28", "2026-06-29", "2026-06-30",
+                          "2026-07-01")
+    assert sp.spike_index == 6                      # the real day, last slot
+    assert sp.matrix[SONNET][:6] == [0.0] * 6       # zero-filled
+    assert sp.matrix[SONNET][6] == pytest.approx(0.13)
+    assert sp.total == pytest.approx(0.13)
+
+
+def test_build_spend_spectrum_zero_fill_tolerates_junk_range():
+    # unparseable start/end (the tests' "s"/"e" convention) -> rows-only axis.
+    sp = build_spend_spectrum(_model_fixture_rows(), granularity="day",
+                              start="s", end="e")
+    assert sp.buckets == ("2026-06-20", "2026-06-21", "2026-06-22")
+    # and an EMPTY range never fabricates buckets (the tidy empty state).
+    e = build_spend_spectrum([], granularity="day",
+                             start="2026-06-25", end="2026-07-01")
+    assert e.buckets == () and e.is_empty
+
+
 def test_analytics_client_locked_no_network(monkeypatch):
     # No management key -> unlocked False -> query()/get_spend_board return None
     # WITHOUT hitting the network (the LOCKED sentinel). We assert no POST is
@@ -224,17 +255,35 @@ def test_spectrum_fixed_height_matches_formula(qapp):
     from PySide6.QtGui import QFontMetrics
     from theme import Fonts
     w = _spectrum(qapp, _board().spectrum)
-    # formula = pad_top + header_h + 8 + chart_h + 10 + legend_block + savings + pad_bottom
-    header_h = QFontMetrics(Fonts.mono_large()).height() + QFontMetrics(Fonts.tiny()).height()
-    legend_row_h = QFontMetrics(Fonts.body()).height() + 6
+    # formula = pad_top + header_h + 8 + chart_h + axis_lane + 8 + legend_block
+    #           + pad_bottom  (2026-07-01: the dead reserved savings lane is
+    #           gone; the x-axis dates own a real lane; rows are click-height;
+    #           the header is ONE calm line, not the 22pt hero block)
+    header_h = max(QFontMetrics(Fonts.label()).height(),
+                   QFontMetrics(Fonts.metric()).height())
+    legend_row_h = QFontMetrics(Fonts.body()).height() + 10
     legend_block = legend_row_h * 2          # exactly 2 models
-    savings = QFontMetrics(Fonts.tiny()).height() + 8
-    expected = (w.PAD_TOP + header_h + 8 + w.CHART_H + 10 + legend_block
-                + savings + w.PAD_BOTTOM)
+    axis_h = QFontMetrics(Fonts.tiny()).height() + 4
+    expected = (w.PAD_TOP + header_h + 8 + w.CHART_H + axis_h + 8 + legend_block
+                + w.PAD_BOTTOM)
     assert w.height() == int(expected)
     # and the grab is full-size (no clip)
     img = _grab(w)
     assert img.height() == w.height()
+
+
+def test_spectrum_axis_lane_separates_chart_and_legend(qapp):
+    """The cramped-layout regression (owner report 2026-07-01): the x-axis date
+    labels used to share their band with the first legend row. The model list
+    must now start BELOW a full axis lane: gap >= axis_h + 8."""
+    from PySide6.QtGui import QFontMetrics
+    from theme import Fonts
+    w = _spectrum(qapp, _board().spectrum)
+    _, chart_top, _, chart_h = w._chart_geom()
+    chart_bottom = chart_top + chart_h
+    first_row_top = w._legend_rects[0][1].top()
+    axis_h = QFontMetrics(Fonts.tiny()).height() + 4
+    assert first_row_top - chart_bottom == axis_h + 8
 
 
 def test_spectrum_band_order_descending(qapp):
@@ -248,6 +297,20 @@ def test_spectrum_band_order_descending(qapp):
     top0 = min(p.y() for p in poly0)          # sonnet top edge
     top1 = min(p.y() for p in poly1)          # haiku top edge (stacked above)
     assert top0 > top1                        # sonnet's top edge is LOWER on screen
+
+
+def test_spectrum_bands_accumulate_over_time(qapp):
+    """Spend-over-time contract (owner direction 2026-07-01): the stack's top
+    edge is a RUNNING TOTAL — it never descends across buckets, and its final
+    point sits at full chart height (the range total == the header amount)."""
+    w = _spectrum(qapp, _board().spectrum)
+    n = len(w._data.buckets)
+    _, top_poly = w._band_polys[-1]            # topmost band
+    ys = [top_poly[i].y() for i in range(n)]   # its TOP edge, left→right
+    for a, b in zip(ys, ys[1:]):
+        assert b <= a + 1e-6                   # y falls or holds: cum climbs
+    cl, ct, cw, ch = w._chart_geom()
+    assert ys[-1] == pytest.approx(ct + 4, abs=0.5)  # ends at full height
 
 
 def test_spectrum_spike_column_at_max_bucket(qapp):

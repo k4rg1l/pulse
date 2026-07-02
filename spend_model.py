@@ -10,6 +10,7 @@ week bucket-key NAME is not stable across dimension sets, so the parsers detect
 it by regex -- never hardcode ``date__day``.
 """
 
+import datetime
 import re
 import statistics
 from collections import defaultdict
@@ -135,13 +136,32 @@ class InsightsBoard:
     court: Optional[object] = None        # #18 (mixed) — None until built
 
 
+def _day_axis(start: str, end: str):
+    """Every ISO day from start..end inclusive (the zero-fill axis), or None
+    when the range doesn't parse or is silly-long. Accepts full ISO datetimes
+    (the fetch passes datetimes; the day buckets are bare dates)."""
+    try:
+        d0 = datetime.date.fromisoformat((start or "")[:10])
+        d1 = datetime.date.fromisoformat((end or "")[:10])
+    except ValueError:
+        return None
+    if d1 < d0 or (d1 - d0).days > 40:
+        return None
+    return [(d0 + datetime.timedelta(days=i)).isoformat()
+            for i in range((d1 - d0).days + 1)]
+
+
 def build_spend_spectrum(rows: list, granularity: str = "day",
-                         truncated: bool = False) -> SpendSpectrumData:
+                         truncated: bool = False, start: str = "",
+                         end: str = "") -> SpendSpectrumData:
     """Pure builder: the per-bucket per-model matrix + descending-spend model
     roll-up + hero total + spike bucket. Honors the data quirks:
       - bucket key detected via _bucket_key (date__day OR created_at__*)
       - request_count/tokens via _as_int (STRINGS); total_usage via _as_float
       - divide-by-zero guarded (share 0 when total==0)
+      - the API returns only days WITH usage; when start/end parse, the day
+        axis is zero-filled across the whole range so a one-day-old account
+        draws a spike on that day, not one giant full-chart block
     """
     rows = rows or []
     # Collect ordered buckets + per-(model,bucket) usage + per-model totals.
@@ -166,6 +186,16 @@ def build_spend_spectrum(rows: list, granularity: str = "day",
         per_model_reqs[model] += reqs
         if bucket is not None:
             cell[(model, bucket)] += usage
+
+    # Zero-fill the day axis across the queried range (only when there IS
+    # data: an all-empty range keeps buckets=() -> the tidy empty state).
+    if granularity == "day" and rows and bucket_order:
+        axis = _day_axis(start, end)
+        if axis:
+            for b in axis:
+                if b not in seen_buckets:
+                    seen_buckets.add(b)
+                    bucket_order.append(b)
 
     bucket_order.sort()  # chronological (ISO date/hour strings sort correctly)
     total = sum(per_model_usage.values())
@@ -294,14 +324,30 @@ class AutopsyReport:
         return self.spike_total <= 0.0 or not self.rows
 
 
+def _parse_iso_utc(s):
+    """Tolerant ISO parse -> naive UTC datetime, or None. Accepts 'Z', offsets,
+    a space separator, and bare dates (midnight)."""
+    try:
+        dt = datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def build_autopsy(rows: list, t0_iso: str, t1_iso: str,
                   label: Optional[str] = None) -> AutopsyReport:
     """Pure builder for #11 — aggregate the hourly dims=[model,provider] rows of
     the lassoed window into per-(model,provider) incisions, descending by $.
 
-    - bucket key detected via _bucket_key (created_at__hour for provider dims);
-      we don't filter on it (the query is already clamped to the window) but it
-      proves the row shape and is exercised by the tests.
+    - rows are CLAMPED to [t0, t1] by their bucket timestamp. Caught live
+      2026-07-01: the analytics API returned rows OUTSIDE the requested window
+      (lassoing a zero-spend flat zone showed today's spend), so the endpoint's
+      clamping cannot be trusted. A row with an unparseable/absent bucket gets
+      the benefit of the doubt; the end bound is inclusive because the client
+      passes an already-expanded exclusive end while raw bucket labels (the
+      tests' convention) name their bucket inclusively.
     - total_usage via _as_float; request_count/cached_tokens via _as_int
       (STRINGS); usage_cache NEGATIVE -> cache_offset = Σ abs(usage_cache).
     - share guarded against divide-by-zero (0 when spike_total==0).
@@ -316,9 +362,20 @@ def build_autopsy(rows: list, t0_iso: str, t1_iso: str,
     cache_offset = 0.0
     spike_total = 0.0
 
+    w0 = _parse_iso_utc(t0_iso)
+    w1 = _parse_iso_utc(t1_iso)
+    if w0 is not None and w1 is not None and w1 < w0:
+        w0, w1 = w1, w0
+    clamp = w0 is not None and w1 is not None
+
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if clamp:
+            bk = _bucket_key(row)
+            bdt = _parse_iso_utc(row.get(bk)) if bk else None
+            if bdt is not None and not (w0 <= bdt <= w1):
+                continue
         model = row.get("model") or ""
         provider = row.get("provider") or ""
         usage = _as_float(row.get("total_usage"))
@@ -917,7 +974,7 @@ def build_spend_board(rows: list, granularity: str = "day", start: str = "",
     the existing tests; later features' slots stay empty until they ride this
     same cached envelope."""
     spectrum = build_spend_spectrum(rows, granularity=granularity,
-                                    truncated=truncated)
+                                    truncated=truncated, start=start, end=end)
     receipts = build_receipts(rows)
     savings = build_savings(rows)
     return SpendBoard(spectrum=spectrum, receipts=receipts, savings=savings,

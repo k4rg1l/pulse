@@ -33,7 +33,7 @@ from config import (
 from widgets import (
     ArcGauge, SectionHeader, GradientStrip,
     ErrorBanner, PinnedModelCard, PinnedColumnHeader,
-    ModelPicker, ProviderPopup, SpendSpectrum, ReceiptStubList,
+    ModelPicker, ProviderPopup, SpendSpectrum,
     build_receipt_html, receipt_accent_hex,
     RebateStub, build_rebate_html, rebate_accent_hex,
     GhostVeil, build_seance_html, ghost_accent_hex,
@@ -293,6 +293,14 @@ class Dashboard(QWidget):
 
     def _on_set_dismiss(self, value):
         self._dismiss_enabled = bool(value)
+        # The poller's lifecycle must track the LIVE setting: leaving it
+        # running after a toggle-off let it orphan across a close/reopen with
+        # a stale foreground ref, insta-hiding every subsequent open.
+        if not self._dismiss_enabled:
+            self._outside_click_timer.stop()
+            self._show_foreground = None
+        elif self.isVisible():
+            self._arm_outside_click_dismiss()
 
     def _sync_rail(self):
         order = self._source_order()
@@ -403,6 +411,9 @@ class Dashboard(QWidget):
         spend_layout.setContentsMargins(0, 0, 0, 0)
         spend_layout.setSpacing(10)
 
+        # #9 + #10 share ONE card: the Spectrum's model list carries the till
+        # roll's $/call + price-drift stamp per row (one list, one click target
+        # per model -> the full thermal receipt).
         self.spend_spectrum = SpendSpectrum(self)
         self.spend_spectrum.band_clicked.connect(self._on_spend_band_clicked)
         self.spend_spectrum.spike_clicked.connect(self._on_spend_spike_clicked)
@@ -410,13 +421,6 @@ class Dashboard(QWidget):
         # drill-down (interaction-fired, debounced dossier on return).
         self.spend_spectrum.spike_selected.connect(self._on_spend_spike_selected)
         spend_layout.addWidget(self.spend_spectrum)
-
-        # #10 THE TILL ROLL — per-model receipt stubs directly under the hero.
-        # The whole stub row opens its full thermal receipt; #9's legend rows are
-        # an additional entry point into the SAME receipt (shared IA).
-        self.spend_receipts = ReceiptStubList(self)
-        self.spend_receipts.receipt_clicked.connect(self._on_receipt_clicked)
-        spend_layout.addWidget(self.spend_receipts)
 
         # #12 THE REBATE STUB — the torn money-back coupon directly below the
         # receipts (the discount line at the foot of the tape). Owns GREEN. The
@@ -458,7 +462,6 @@ class Dashboard(QWidget):
             self._spend_unlocked = False
         if not self._spend_unlocked:
             self.spend_spectrum.set_locked()
-            self.spend_receipts.set_locked()
             self.spend_savings.set_locked()
             self.spend_ghosts.set_locked()
             self.spend_budget.set_locked()
@@ -626,8 +629,8 @@ class Dashboard(QWidget):
             self._popup_model_id = None
             return
         receipt = None
-        if getattr(self, "spend_receipts", None) is not None:
-            receipt = self.spend_receipts.receipt_for(model_id)
+        if getattr(self, "spend_spectrum", None) is not None:
+            receipt = self.spend_spectrum.receipt_for(model_id)
         html_str = build_receipt_html(receipt)
         if not html_str:
             return
@@ -1033,8 +1036,6 @@ class Dashboard(QWidget):
             # chrome (still honest, no fake $).
             if not getattr(self, "_spend_unlocked", False):
                 self.spend_spectrum.set_locked()
-                if getattr(self, "spend_receipts", None) is not None:
-                    self.spend_receipts.set_locked()
                 if getattr(self, "spend_savings", None) is not None:
                     self.spend_savings.set_locked()
                 if getattr(self, "spend_ghosts", None) is not None:
@@ -1044,9 +1045,10 @@ class Dashboard(QWidget):
                 self._spend_header.right_label.setText("locked")
             return
 
+        # receipts BEFORE spectrum: set_data builds the row geometry, which
+        # reads the receipts for the $/call column + stamp pills.
+        self.spend_spectrum.set_receipts(board.receipts)
         self.spend_spectrum.set_data(board.spectrum)
-        if getattr(self, "spend_receipts", None) is not None:
-            self.spend_receipts.set_data(board.receipts)
         if getattr(self, "spend_savings", None) is not None:
             self.spend_savings.set_data(board.savings)
         if getattr(self, "spend_ghosts", None) is not None:
@@ -2121,21 +2123,27 @@ class Dashboard(QWidget):
 
     def toggle(self):
         if self.isVisible():
-            self.hide()
-            if self._dismiss_enabled:
-                self._outside_click_timer.stop()
-                self._show_foreground = None
+            self.hide()  # hideEvent stops the poller (as on every hide path)
         else:
             self.show_near_tray()
             if self._dismiss_enabled:
-                self._show_foreground = None
-                QTimer.singleShot(
-                    250, lambda: self._outside_click_timer.start(150)
-                )
+                self._arm_outside_click_dismiss()
 
     # ------------------------------------------------------------------
     #  Click-outside-to-dismiss
     # ------------------------------------------------------------------
+
+    def _arm_outside_click_dismiss(self):
+        """Start the outside-click poller after a grace period, so the click
+        that just opened the dashboard doesn't count as 'outside'."""
+        self._show_foreground = None
+        QTimer.singleShot(250, self._start_outside_click_poll)
+
+    def _start_outside_click_poll(self):
+        # Re-check at fire time: the setting can be toggled off (or the
+        # dashboard closed again) inside the grace window.
+        if self._dismiss_enabled and self.isVisible():
+            self._outside_click_timer.start(150)
 
     def _check_outside_click(self):
         if not self.isVisible():
@@ -2169,6 +2177,10 @@ class Dashboard(QWidget):
         self.refresh_requested.emit()
 
     def hideEvent(self, event):
+        # Stop the outside-click poller on EVERY hide path (tray toggle, the
+        # ✕ button, the poller itself) so it can never orphan across a reopen.
+        self._outside_click_timer.stop()
+        self._show_foreground = None
         # When dashboard hides, dismiss any floating children
         # (info popup + picker dropdown) so they don't get orphaned.
         self._hide_provider_popup()

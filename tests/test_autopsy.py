@@ -73,6 +73,26 @@ def test_build_autopsy_descending_and_dominant_share():
     assert not r.is_empty
 
 
+def test_build_autopsy_clamps_rows_outside_the_window():
+    """Caught LIVE 2026-07-01: lassoing a zero-spend flat zone still showed
+    today's spend — the analytics API returns rows OUTSIDE the requested
+    window, and the builder used to trust the endpoint's clamping. Rows whose
+    bucket falls outside [t0, t1] must be dropped client-side."""
+    intruder = {"created_at__hour": "2026-07-01 14:00:00", "model": SONNET,
+                "provider": "Alibaba", "total_usage": 99.0,
+                "request_count": "7", "cached_tokens": "5",
+                "reasoning_tokens": "0", "usage_cache": -1.0}
+    r = build_autopsy(_spike_rows() + [intruder], T0, T1)
+    assert r.spike_total == pytest.approx(4.8272)      # intruder excluded
+    assert all(row.provider != "Alibaba" for row in r.rows)
+    assert r.request_total == 95 + 8 + 4               # no intruder requests
+    assert r.cache_offset == pytest.approx(16.68)      # no intruder credit
+    # an ENTIRELY out-of-window result set -> the honest empty state (this is
+    # exactly the flat-zone lasso the owner hit).
+    empty = build_autopsy([intruder], T0, T1)
+    assert empty.is_empty and empty.rows == ()
+
+
 def test_build_autopsy_cache_offset_is_positive_green_magnitude():
     # usage_cache is NEGATIVE (a realized cache credit) -> cache_offset is the
     # POSITIVE magnitude Σ abs(usage_cache); NEVER a drain, NEVER negative.
@@ -247,8 +267,9 @@ def _strip(report):
 def test_dossier_pixmap_height_matches_formula(qapp):
     r = build_autopsy(_spike_rows(), T0, T1)   # 3 rows, no remainder
     w = _strip(r)
-    rows = len(r.visible)                       # 3 (no remainder bar)
-    expected = (w.PAD * 2 + rows * (w.BAR_H + w.BAR_GAP) - w.BAR_GAP)
+    rows = len(r.visible)                       # 3 (no remainder row)
+    # row block = text line + gap + thin bar (font-metric-driven).
+    expected = (w.PAD * 2 + rows * w._row_block_h() + (rows - 1) * w.ROW_GAP)
     assert w._h == int(expected)
     pm = w.render_pixmap()
     # the pixmap is the full measured height (no clip); dpr-aware so divide it out
@@ -272,14 +293,16 @@ def test_dossier_rows_descending_and_dominant_fill(qapp):
 def test_dossier_cache_offset_footer_green_never_negative(qapp):
     r = build_autopsy(_spike_rows(), T0, T1)
     htm = build_autopsy_html(r)
-    # the GREEN cache-offset line shows the POSITIVE magnitude with a minus SIGN
-    # in the copy ("offset −$16.68"), never a negative number / never a drain.
+    # the GREEN cache line shows the POSITIVE magnitude ("caching saved
+    # $16.68"), never a negative number / never a drain.
     assert "#2ed573" in htm                       # GREEN
-    assert "caching offset" in htm
+    assert "caching saved" in htm
     assert "16.68" in htm                         # abs(-16.28) + abs(-0.40)
     assert "-$-" not in htm and "$-16" not in htm  # never a negative magnitude
-    # the accent is CRIMSON (forensic), distinct from green/cyan popups
-    assert autopsy_accent_hex(r).lower() == "#e0463c"
+    # the accent is the panel accent, same as the other info popups (the
+    # crimson alarm frame was dropped 2026-07-01)
+    import theme_controller
+    assert autopsy_accent_hex(r).lower() == theme_controller.accent().name().lower()
 
 
 def test_dossier_remainder_bar_rendered(qapp):
@@ -305,9 +328,9 @@ def test_dossier_empty_clean_window(qapp):
     fw, tw, rem = w._bar_geom[0]
     assert fw == 0.0                              # no incision filled
     assert pm.width() > 0                          # rendered without error
-    # the HTML header reads the clean-window state, no "$ drained"
+    # the HTML header reads the no-spend state, plain English, no "drained"
     htm = build_autopsy_html(r)
-    assert "clean window" in htm and "drained" not in htm
+    assert "no spend in this window" in htm and "drained" not in htm
 
 
 def test_dossier_html_escapes_names(qapp):

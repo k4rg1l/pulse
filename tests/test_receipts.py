@@ -7,14 +7,13 @@ discipline):
      $/call math, the noise-gated stamp fires/suppresses per ORCHESTRATOR
      decision B, the cache credit == abs(usage_cache)/calls, reasoning is a COUNT
      with NO $ (decision A), and the divide-by-zero guard.
-  2. THE WIDGETS (qapp) — ReceiptStubList.set_data() a fixture board and MEASURE:
-     fixed height == n_models*(row_h+4) (no clip); the sonnet $/call string ==
-     f"${total/count:.4f}/call"; the stamp rect EXISTS for the spike + is ABSENT
-     for the synthesized 1-request $0.03 day; ReceiptStripWidget.render_pixmap()
-     returns a QPixmap of the measured height and its CACHE line $ ==
-     abs(usage_cache)/calls; the locked + populated-empty states; and a
-     reveal-doesn't-move-the-widget regression (the print-reveal Property is NOT
-     a QWidget builtin).
+  2. THE WIDGETS (qapp) — the receipts ride SpendSpectrum's MERGED model list
+     (set_receipts + set_data): receipt_for() serves the popup lookup; the
+     sonnet $/call string == f"${total/count:.4f}/call"; the stamp pill rect
+     EXISTS for the spike + is ABSENT for the synthesized 1-request $0.03 day;
+     the number columns align; ReceiptStripWidget.render_pixmap() returns a
+     QPixmap of the measured height and its CACHE line $ ==
+     abs(usage_cache)/calls.
 """
 import pytest
 
@@ -235,17 +234,19 @@ def test_build_spend_board_populates_receipts():
 
 
 # ===========================================================================
-#  THE STUB LIST widget (qapp) — implements the #10 TEST_PLAN
+#  THE MERGED MODEL LIST (qapp) — #10's columns ride #9's SpendSpectrum rows
+#  (the separate stub list was removed 2026-07-01: ONE list, one click target)
 # ===========================================================================
-def _stub_list(qapp, receipts=None, width=380):
-    from widgets import ReceiptStubList
+def _spectrum_with_receipts(qapp, rows, width=560):
+    from widgets import SpendSpectrum
     import anim
-    anim.set_enabled(False)   # deterministic: no in-flight print wipe during grab
-    w = ReceiptStubList()
+    anim.set_enabled(False)   # deterministic: no in-flight reveal during grab
+    board = build_spend_board(rows, granularity="day")
+    w = SpendSpectrum()
     w.resize(width, 100)
-    if receipts is not None:
-        w.set_data(receipts)
-    return w
+    w.set_receipts(board.receipts)
+    w.set_data(board.spectrum)
+    return w, board
 
 
 def _grab(w):
@@ -259,103 +260,69 @@ def _grab(w):
     return img
 
 
-def test_stub_list_fixed_height_matches_formula(qapp):
-    recs = build_receipts(_spike_rows())     # 2 models
-    w = _stub_list(qapp, recs)
-    expected = len(recs) * (w._row_h + w.ROW_GAP)
-    assert w.height() == int(expected)
-    # and the grab is full-size (no clip).
-    img = _grab(w)
+def test_merged_list_receipt_lookup_and_percall_math(qapp):
+    # receipt_for() serves the dashboard's popup lookup; the $/call string the
+    # row paints is the real range average (TEST_PLAN b, carried over).
+    w, board = _spectrum_with_receipts(qapp, _spike_rows())
+    s = w.receipt_for(SONNET)
+    assert s is not None
+    total = 0.10 + 0.12 + 0.11 + 0.10 + 0.13 + 0.11 + 190.0
+    reqs = 10 + 12 + 11 + 10 + 13 + 11 + 95
+    assert f"${s.per_call:.4f}/call" == f"${total / reqs:.4f}/call"
+    img = _grab(w)                     # paints the merged rows without error
     assert img.height() == w.height()
 
 
-def test_stub_list_percall_string_for_sonnet(qapp):
-    recs = build_receipts(_spike_rows())
-    w = _stub_list(qapp, recs)
-    s = _by_model(recs)[SONNET]
-    total = 0.10 + 0.12 + 0.11 + 0.10 + 0.13 + 0.11 + 190.0
-    reqs = 10 + 12 + 11 + 10 + 13 + 11 + 95
-    # the exact string the stub paints (TEST_PLAN b).
-    assert f"${s.per_call:.4f}/call" == f"${total / reqs:.4f}/call"
+def test_merged_row_stamp_rect_exists_on_spike(qapp):
+    # TEST_PLAN c: the stamp pill rect EXISTS for the sonnet spike row and is
+    # aligned to the legend rows (sonnet = rank 0 = row 0, descending spend).
+    w, board = _spectrum_with_receipts(qapp, _spike_rows())
+    assert [mid for mid, _ in w._legend_rects] == [SONNET, HAIKU]
+    assert board.receipts[0].model_id == SONNET and board.receipts[0].has_stamp
+    assert w._legend_stamp_rects[0] is not None
+    assert not board.receipts[1].has_stamp
+    assert w._legend_stamp_rects[1] is None
+    # the pill must sit INSIDE its row band (no overlap into neighbours).
+    _, row0 = w._legend_rects[0]
+    assert row0.contains(w._legend_stamp_rects[0])
 
 
-def test_stub_list_stamp_rect_exists_on_spike(qapp):
-    # TEST_PLAN c: the stamp rect EXISTS for the sonnet spike row.
-    recs = build_receipts(_spike_rows())
-    w = _stub_list(qapp, recs)
-    # sonnet is row 0 (descending spend).
-    assert recs[0].model_id == SONNET and recs[0].has_stamp
-    assert w._stamp_rects[0] is not None
-    # haiku (no stamp) has no rect.
-    assert recs[1].model_id == HAIKU and not recs[1].has_stamp
-    assert w._stamp_rects[1] is None
-
-
-def test_stub_list_stamp_rect_absent_on_noise_day(qapp):
+def test_merged_row_stamp_rect_absent_on_noise_day(qapp):
     # TEST_PLAN c: ABSENT for the synthesized 1-request $0.03 day (noise gate).
-    recs = build_receipts(_noise_rows())
-    w = _stub_list(qapp, recs)
-    s_idx = [r.model_id for r in recs].index(SONNET)
-    assert not recs[s_idx].has_stamp
-    assert w._stamp_rects[s_idx] is None
+    w, board = _spectrum_with_receipts(qapp, _noise_rows())
+    s_idx = [mid for mid, _ in w._legend_rects].index(SONNET)
+    assert w._legend_stamp_rects[s_idx] is None
 
 
-def test_stub_list_locked_state(qapp):
-    # a single dim parchment ghost stub + dotted outline + unlock copy; NO rows.
-    w = _stub_list(qapp)
+def test_merged_list_locked_clears_receipts(qapp):
+    w, board = _spectrum_with_receipts(qapp, _spike_rows())
+    assert w.receipt_for(SONNET) is not None
     w.set_locked()
-    assert w._locked is True
-    assert w._row_rects == [] and w._stamp_rects == []
-    assert w.height() > 0           # keeps a real fixed height (one stub)
-    _grab(w)                        # paints without error
-    # the unlock copy is the canonical phrase (decision F).
-    from widgets import SPEND_UNLOCK_BASE
-    assert SPEND_UNLOCK_BASE == "Add a management key at openrouter.ai to unlock"
+    assert w.receipt_for(SONNET) is None
+    assert w._legend_stamp_rects == []
+    _grab(w)                           # locked chrome still paints
 
 
-def test_stub_list_populated_empty_state(qapp):
-    # key present but $0 in range -> real "$0.0000/call" zeros, no stamp, NOT
-    # the locked placeholder (decision F).
-    recs = build_receipts(
-        [{"date__day": "2026-06-21", "model": SONNET, "total_usage": 0.0,
-          "request_count": "0", "tokens_prompt": "0", "tokens_completion": "0",
-          "reasoning_tokens": "0", "cached_tokens": "0", "usage_cache": 0.0}])
-    w = _stub_list(qapp, recs)
-    assert w._locked is False
-    assert recs[0].per_call == 0.0
-    assert f"${recs[0].per_call:.4f}/call" == "$0.0000/call"
-    assert w._stamp_rects[0] is None
-    _grab(w)
+def test_merged_list_number_columns_align_across_rows(qapp):
+    # The formatting contract: $/call, $total and share% are COLUMNS (measured
+    # once per build), not per-row free floats — every row lines up.
+    w, board = _spectrum_with_receipts(qapp, _spike_rows())
+    assert w._col_share_right > w._col_total_right > w._col_percall_right
+    assert w._col_share_right == w.width() - w.PAD_X
 
 
-def test_stub_list_print_reveal_does_not_move_widget(qapp):
-    # the print-reveal Property must NOT be a QWidget builtin (pos/size) —
-    # setting it changes the clip only, never the widget geometry (TEST_PLAN +
-    # the INVARIANT against naming a Property after a QWidget builtin).
-    recs = build_receipts(_spike_rows())
-    w = _stub_list(qapp, recs)
-    pos_before = (w.x(), w.y())
-    geom_before = (w.width(), w.height())
-    w.set_print_reveal(0.3)
-    assert w.get_print_reveal() == pytest.approx(0.3)
-    assert (w.x(), w.y()) == pos_before
-    assert (w.width(), w.height()) == geom_before
+def test_dashboard_update_spend_feeds_merged_list(qapp):
+    # Integration: update_spend routes board.receipts INTO the spectrum (the
+    # old spend_receipts widget is gone) and the receipt popup lookup works.
+    from dashboard import Dashboard
+    from persistence import History
+    from settings import Settings
 
-
-def test_stub_list_whole_row_emits_receipt_clicked(qapp):
-    from PySide6.QtCore import Qt, QPointF, QEvent
-    from PySide6.QtGui import QMouseEvent
-    recs = build_receipts(_spike_rows())
-    w = _stub_list(qapp, recs)
-    captured = []
-    w.receipt_clicked.connect(lambda mid, anchor: captured.append(mid))
-    mid, rect = w._row_rects[0]
-    c = rect.center()
-    ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(c), QPointF(c),
-                     Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier)
-    w.mousePressEvent(ev)
-    assert captured == [SONNET]
+    d = Dashboard(History(), Settings())
+    assert getattr(d, "spend_receipts", None) is None
+    board = build_spend_board(_spike_rows(), granularity="day")
+    d.update_spend(board)
+    assert d.spend_spectrum.receipt_for(SONNET) is not None
 
 
 # ===========================================================================
@@ -385,30 +352,35 @@ def test_receipt_strip_pixmap_height_and_cache_line(qapp):
 
 
 def test_receipt_strip_no_per_line_dollars_on_token_items(qapp):
-    # decision A: INPUT/OUTPUT/REASONING line items carry NO $ (value is None).
+    # decision A: INPUT/OUTPUT/REASONING/CACHE READ line items carry NO $ —
+    # their right-aligned value is a token COUNT ("9,752 tok"), never money.
     from widgets import ReceiptStripWidget
     s = _by_model(build_receipts(_spike_rows()))[SONNET]
     strip = ReceiptStripWidget(s)
     tok_items = [it for it in strip._line_items() if it[2] == "tok"]
     assert len(tok_items) >= 2          # at least INPUT + OUTPUT
     for label, value, role in tok_items:
-        assert value is None            # NO fabricated per-line $
-        assert "tok" in label           # it's a token COUNT line
+        assert value.endswith("tok")    # a token COUNT value column
+        assert "$" not in value         # NO fabricated per-line $
+        assert "$" not in label
 
 
-def test_receipt_html_escapes_model_name(qapp):
-    # decision C: any API-sourced string in the popup HTML wrapper is escaped.
+def test_receipt_html_never_carries_api_strings(qapp):
+    # decision C, tightened 2026-07-01: the popup HTML is ONLY the painted
+    # paper <img> — an API-sourced name must never reach the HTML in ANY form
+    # (the paper text is QPainter-drawn, injection-safe by construction).
     from widgets import build_receipt_html
     from dataclasses import replace
     s = _by_model(build_receipts(_spike_rows()))[SONNET]
     evil = replace(s, short_name="<script>alert(1)</script>")
     html_str = build_receipt_html(evil)
     assert "<script>" not in html_str
-    assert "&lt;script&gt;" in html_str
+    assert "alert(1)" not in html_str
+    assert "<img" in html_str          # the paper is the whole dossier
 
 
 def test_receipt_html_none_is_no_receipt_on_file(qapp):
-    # decision F: locked / no receipt -> "— NO RECEIPT ON FILE —".
+    # decision F: locked / no receipt -> "NO RECEIPT ON FILE".
     from widgets import build_receipt_html
     html_str = build_receipt_html(None)
     assert "NO RECEIPT ON FILE" in html_str

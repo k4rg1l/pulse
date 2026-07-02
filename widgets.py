@@ -6,6 +6,7 @@ import datetime
 import html
 import logging
 import math
+from itertools import accumulate as _accumulate
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QGraphicsDropShadowEffect, QSizePolicy, QLineEdit,
@@ -337,14 +338,21 @@ class SectionHeader(QWidget):
 #  Burn Rate Bar
 # ---------------------------------------------------------------------------
 class GradientStrip(QWidget):
-    """Thin animated gradient strip at the top of the dashboard."""
+    """Thin animated rainbow strip at the top of the dashboard: one full hue
+    wheel spread across the width, drifting steadily sideways. The wheel is
+    cyclic and the cycle count is an integer, so both ends always carry the
+    same color for any phase — no seam, no visible restart, ever."""
+
+    STOPS = 16     # gradient stops per wheel; RGB lerp between them reads smooth
+    SAT = 0.85     # a notch under full saturation so it sits in the dark palette
+    VAL = 0.90
+    SPEED = 0.008  # wheel fraction per tick; full cycle ~12.5s at 100ms ticks
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(4)
         self._offset = 0.0
         self._ok = True
-        theme_controller.changed.connect(self.update)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -356,8 +364,19 @@ class GradientStrip(QWidget):
     def _tick(self):
         if not self.isVisible():
             return
-        self._offset = (self._offset + 0.008) % 1.0
+        self._offset = (self._offset + self.SPEED) % 1.0
         self.update()
+
+    def _stops(self):
+        """The (position, color) gradient stops for the current phase — one
+        integer hue wheel across [0, 1], so stop 0 and stop N are always the
+        same color. Shared by paintEvent and the seamlessness tests."""
+        n = self.STOPS
+        return [
+            (i / n,
+             QColor.fromHsvF((i / n - self._offset) % 1.0, self.SAT, self.VAL))
+            for i in range(n + 1)
+        ]
 
     def paintEvent(self, event):
         if not _safe_paint(self):
@@ -378,14 +397,12 @@ class GradientStrip(QWidget):
         painter.setClipPath(clip)
 
         grad = QLinearGradient(0, 0, w, 0)
-        base = Colors.RED if not self._ok else theme_controller.accent()
-        bright = base.lighter(160)
-        o = self._offset
-        # Solid accent across the whole top with a bright sheen sweeping over
-        # it — fully covered (no dim gaps), just a moving highlight.
-        grad.setColorAt(0.0, base)
-        grad.setColorAt(o, bright)
-        grad.setColorAt(1.0, base)
+        if self._ok:
+            for pos, color in self._stops():
+                grad.setColorAt(pos, color)
+        else:
+            grad.setColorAt(0.0, Colors.RED)
+            grad.setColorAt(1.0, Colors.RED)
 
         painter.fillRect(0, 0, w, h, QBrush(grad))
         painter.end()
@@ -440,9 +457,11 @@ class ProviderPopup(QWidget):
 
         # Let the popup size to its content (the table is wider than a
         # fixed 340px). Bounded so it doesn't grow huge on a wide screen.
-        self.setMinimumWidth(360)
+        # The floors must stay BELOW the narrowest strip content (the 300px
+        # receipt paper) or the slack piles up as a lopsided right gap.
+        self.setMinimumWidth(340)
         self.setMaximumWidth(560)
-        self.label.setMinimumWidth(320)
+        self.label.setMinimumWidth(272)
 
         # App-wide event filter so any mouse press outside us dismisses.
         # Installed lazily on first show to avoid touching QApplication
@@ -4458,10 +4477,12 @@ def _paint_padlock(painter: QPainter, cx: float, cy: float, size: float,
 
 
 class SpendSpectrum(QWidget):
-    """THE SPECTRUM (#9): a hand-painted stacked gradient-area chart of daily
-    ground-truth spend — every model a colored band (time on X, model
-    composition stacked on Y) — anchored top-right by a count-up range TOTAL and
-    below by a per-model legend-spine. A spike day glows as a clickable column.
+    """THE SPECTRUM (#9): a hand-painted stacked gradient-area chart of
+    CUMULATIVE ground-truth spend — every model a colored band (time on X,
+    running total stacked on Y, so the stack climbs as money is spent and the
+    top-right edge equals the range total in the header) — with a calm header
+    line and a per-model list below. The heaviest single day glows as a
+    clickable column (the steepest climb).
 
     Echoes TimelineChart's gradient-area fill idiom + ArcGauge's single held
     QPropertyAnimation count-up + the measure-then-paint geometry contract (one
@@ -4494,7 +4515,7 @@ class SpendSpectrum(QWidget):
 
     # -- geometry constants (the measure pass derives everything from these) --
     PAD_X = 14
-    PAD_TOP = 26
+    PAD_TOP = 20
     PAD_BOTTOM = 18
     CHART_H = 130
     SWATCH = 10
@@ -4507,9 +4528,13 @@ class SpendSpectrum(QWidget):
         self._locked = False
         self._signature = None     # cheap reveal-gate signature
         self._reveal = 1.0         # 0..1 grow factor (animated once)
+        # #10's receipts ride the SAME card (merged list): {model_id: Receipt}
+        # feeds the rows' $/call + price-drift stamp and receipt_for().
+        self._receipts_by_id = {}
         # Cached geometry from the measure pass (rebuilt in set_data/resize):
         self._band_polys = []      # list[(model_id, QPolygonF)] bottom→top
         self._legend_rects = []    # list[(model_id, QRectF)]
+        self._legend_stamp_rects = []  # list[QRectF|None] aligned to _legend_rects
         self._spike_rect = None    # QRectF | None (the clickable spike column)
         self._legend_block_h = 0
         self._hover_model = None
@@ -4570,6 +4595,21 @@ class SpendSpectrum(QWidget):
             self._reveal = 1.0
         self.update()
 
+    def set_receipts(self, receipts):
+        """#10's per-model receipts (board.receipts) — the merged model list
+        paints each row's $/call + price-drift stamp from these, and the
+        dashboard's receipt popup looks them up via receipt_for(). None keeps
+        last-good (same contract as set_data)."""
+        if receipts is None:
+            return
+        self._receipts_by_id = {r.model_id: r for r in receipts}
+        if self._data is not None:
+            self._build_geometry()
+            self.update()
+
+    def receipt_for(self, model_id):
+        return self._receipts_by_id.get(model_id)
+
     def set_locked(self):
         """No management key: paint full chrome + a faint ghost silhouette +
         the padlock + unlock line + greyed legend placeholders. Zero fake $."""
@@ -4577,9 +4617,11 @@ class SpendSpectrum(QWidget):
         self._data = None
         self._signature = None
         self._reveal = 1.0
+        self._receipts_by_id = {}
         self._measure()
         self._band_polys = []
         self._legend_rects = []
+        self._legend_stamp_rects = []
         self._spike_rect = None
         self.update()
 
@@ -4614,7 +4656,9 @@ class SpendSpectrum(QWidget):
     #  Measure pass (drives BOTH paint and setFixedHeight — no clipping)
     # ------------------------------------------------------------------
     def _legend_row_h(self) -> int:
-        return QFontMetrics(Fonts.body()).height() + 6
+        # Roomier than a plain legend: these rows are CLICK TARGETS (they open
+        # the model's receipt), so give them a real hit height.
+        return QFontMetrics(Fonts.body()).height() + 10
 
     def _legend_rows_count(self) -> int:
         if self._locked or self._data is None:
@@ -4627,17 +4671,21 @@ class SpendSpectrum(QWidget):
         return n
 
     def _measure(self):
-        f_hero = Fonts.mono_large()
         f_tiny = Fonts.tiny()
-        header_h = QFontMetrics(f_hero).height() + QFontMetrics(f_tiny).height()
+        # ONE calm header line (label left, range total right) — the old
+        # two-line 22pt hero block read as a billboard.
+        header_h = max(QFontMetrics(Fonts.label()).height(),
+                       QFontMetrics(Fonts.metric()).height())
         legend_row_h = self._legend_row_h()
         self._legend_block_h = legend_row_h * self._legend_rows_count()
-        savings_strip_h = QFontMetrics(f_tiny).height() + 8  # RESERVED for #12
-        total_h = (self.PAD_TOP + header_h + 8 + self.CHART_H + 10
-                   + self._legend_block_h + savings_strip_h + self.PAD_BOTTOM)
+        # The x-axis date labels get their OWN lane under the baseline so the
+        # model list never crowds the chart (the old layout overlapped them).
+        axis_h = QFontMetrics(f_tiny).height() + 4
+        total_h = (self.PAD_TOP + header_h + 8 + self.CHART_H + axis_h + 8
+                   + self._legend_block_h + self.PAD_BOTTOM)
         self._header_h = header_h
         self._legend_row_h_cached = legend_row_h
-        self._savings_strip_h = savings_strip_h
+        self._axis_h = axis_h
         self.setFixedHeight(int(total_h))
 
     # ------------------------------------------------------------------
@@ -4713,6 +4761,7 @@ class SpendSpectrum(QWidget):
     def _build_geometry(self):
         self._band_polys = []
         self._legend_rects = []
+        self._legend_stamp_rects = []
         self._spike_rect = None
         data = self._data
         if data is None or data.is_empty:
@@ -4731,9 +4780,17 @@ class SpendSpectrum(QWidget):
             col_w = chart_w / (n - 1)
 
         chart_bottom = chart_top + chart_h
-        # Per-bucket stacked totals define the y-scale (peak == full chart_h).
+        # SPEND OVER TIME (owner direction 2026-07-01): each model's series is
+        # its RUNNING TOTAL across the window, so the stack climbs as money is
+        # spent and never falls back. The y-scale peak is the final cumulative
+        # total — the top-right of the chart IS the header amount, and each
+        # band's final thickness is that model's total in the list below.
+        running = {
+            m.model_id: list(_accumulate(data.matrix[m.model_id]))
+            for m in data.models
+        }
         bucket_totals = [
-            sum(data.matrix[m.model_id][i] for m in data.models)
+            sum(running[m.model_id][i] for m in data.models)
             for i in range(n)
         ]
         peak = max(bucket_totals) if bucket_totals else 0.0
@@ -4748,7 +4805,7 @@ class SpendSpectrum(QWidget):
         # Cumulative bottom edge per bucket, ascending the stack.
         cum_bottom = [0.0] * n
         for m in data.models:
-            row = data.matrix[m.model_id]
+            row = running[m.model_id]
             top_pts = []   # left→right across the cumulative TOP edge
             bot_pts = []   # the cumulative BOTTOM edge (to walk back)
             for i in range(n):
@@ -4778,15 +4835,44 @@ class SpendSpectrum(QWidget):
             self._spike_rect = QRectF(sx - half, chart_top, max(8.0, col_w),
                                       chart_h)
 
-        # Legend rows (top-aligned under the chart + 10px gap).
-        legend_top = chart_bottom + 10
+        # The merged model list (legend + #10's till roll in ONE list), below
+        # the chart's own axis lane. Columns are measured ONCE here so every
+        # row aligns: [swatch | name … (stamp) | $/call | $total | share%].
+        legend_top = chart_bottom + self._axis_h + 8
         row_h = self._legend_row_h_cached
         w = max(1, self.width())
+        fm_mono = QFontMetrics(Fonts.mono_small())
+        fm_tiny = QFontMetrics(Fonts.tiny())
         rows = min(len(data.models), self.MAX_LEGEND_ROWS)
+        shown = data.models[:rows]
+        share_w = fm_tiny.horizontalAdvance("(100%)")
+        total_w = max(
+            (fm_mono.horizontalAdvance(f"${m.total_usage:,.2f}") for m in shown),
+            default=0,
+        )
+        percall_w = fm_mono.horizontalAdvance("$0.0000/call")
+        right = w - self.PAD_X
+        self._col_share_right = right
+        self._col_total_right = right - share_w - 6
+        self._col_percall_right = self._col_total_right - total_w - 14
+        percall_left = self._col_percall_right - percall_w
         for idx in range(rows):
-            r = QRectF(self.PAD_X, legend_top + idx * row_h,
-                       w - 2 * self.PAD_X, row_h)
-            self._legend_rects.append((data.models[idx].model_id, r))
+            m = shown[idx]
+            y = legend_top + idx * row_h
+            r = QRectF(self.PAD_X, y, w - 2 * self.PAD_X, row_h)
+            self._legend_rects.append((m.model_id, r))
+            # The price-drift stamp pill (from #10's receipt) sits just left of
+            # the $/call column — only when the tripwire fired.
+            stamp_rect = None
+            rec = self._receipts_by_id.get(m.model_id)
+            if rec is not None and rec.has_stamp:
+                arrow = "▲" if rec.stamp_dir > 0 else "▼"
+                stamp_txt = f"×{_stamp_mult_label(rec.stamp_mult)}{arrow}"
+                sw = fm_tiny.horizontalAdvance(stamp_txt) + 12
+                sh = min(row_h - 6.0, fm_tiny.height() + 6.0)
+                stamp_rect = QRectF(percall_left - 8 - sw,
+                                    y + (row_h - sh) / 2.0, sw, sh)
+            self._legend_stamp_rects.append(stamp_rect)
 
     def resizeEvent(self, event):
         self._build_geometry()
@@ -4814,10 +4900,10 @@ class SpendSpectrum(QWidget):
         chart_left, chart_top, chart_w, chart_h = self._chart_geom()
         chart_bottom = chart_top + chart_h
 
-        # 2) HEADER ROW — left range label, right hero total + ground-truth tag
-        f_hero = Fonts.mono_large()
+        # 2) HEADER ROW — one calm line: the label left, the range total right.
+        #    (The old 22pt hero + accent underline + "ground truth" tag made
+        #    the number read like a billboard; owner killed it 2026-07-01.)
         f_tiny = Fonts.tiny()
-        hero_h = QFontMetrics(f_hero).height()
         painter.setPen(Colors.TEXT_SECONDARY)
         painter.setFont(Fonts.label())
         label = "SPEND"
@@ -4825,41 +4911,32 @@ class SpendSpectrum(QWidget):
             label = "SPEND · " + self._data_range_label().upper()
         elif self._locked:
             label = "SPEND · LAST 7 DAYS"
-        painter.drawText(QRectF(self.PAD_X, 4, chart_w, 18),
+        header_rect = QRectF(self.PAD_X, self.PAD_TOP - 12,
+                             w - 2 * self.PAD_X, self._header_h)
+        painter.drawText(header_rect,
                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          label)
 
-        hero_top = self.PAD_TOP - 4
         if self._locked:
-            # a small lock glyph where the hero $ would be (no "$0.00")
-            _paint_padlock(painter, w - self.PAD_X - 9, hero_top + hero_h / 2,
-                           16, Colors.TEXT_MUTED)
+            # a small lock glyph where the total would sit (no "$0.00")
+            _paint_padlock(painter, w - self.PAD_X - 7,
+                           header_rect.center().y(), 13, Colors.TEXT_MUTED)
         else:
             total = self._data.total if self._data is not None else 0.0
-            shown = total * self._reveal
-            hero_text = f"${shown:,.2f}"
+            amount = f"${total * self._reveal:,.2f}"
+            f_metric = Fonts.metric()
             painter.setPen(Colors.TEXT_PRIMARY)
-            painter.setFont(f_hero)
-            hero_rect = QRectF(w / 2.0, hero_top, w / 2.0 - self.PAD_X, hero_h)
-            painter.drawText(hero_rect,
-                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                             hero_text)
-            # "ground truth" tag beneath, right-aligned
-            painter.setPen(Colors.TEXT_MUTED)
-            painter.setFont(f_tiny)
-            tag = "ground truth"
+            painter.setFont(f_metric)
+            painter.drawText(header_rect,
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                             amount)
             if self._data is not None and self._data.truncated:
-                tag = "ground truth · truncated"
-            tag_rect = QRectF(w / 2.0, hero_top + hero_h,
-                              w / 2.0 - self.PAD_X, QFontMetrics(f_tiny).height())
-            painter.drawText(tag_rect,
-                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, tag)
-            # 2px accent underline under the hero total
-            hw = QFontMetrics(f_hero).horizontalAdvance(hero_text)
-            ux1 = (w - self.PAD_X) - hw
-            uy = hero_top + hero_h - 1
-            painter.setPen(QPen(accent, 2))
-            painter.drawLine(int(ux1), int(uy), int(w - self.PAD_X), int(uy))
+                amt_w = QFontMetrics(f_metric).horizontalAdvance(amount)
+                painter.setPen(Colors.TEXT_MUTED)
+                painter.setFont(f_tiny)
+                painter.drawText(header_rect.adjusted(0, 0, -(amt_w + 8), 0),
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                                 "partial data")
 
         # 3) CHART BODY
         if self._locked:
@@ -4884,8 +4961,8 @@ class SpendSpectrum(QWidget):
             painter.drawText(QRectF(chart_left + chart_w - 120, ax_y, 120, 12),
                              Qt.AlignmentFlag.AlignRight, self._data.buckets[-1])
 
-        # 6) LEGEND-SPINE
-        legend_top = chart_bottom + 10
+        # 6) THE MODEL LIST (merged legend + till-roll), below the axis lane
+        legend_top = chart_bottom + self._axis_h + 8
         if self._locked or self._data is None:
             self._paint_locked_legend(painter, legend_top)
         elif self._data.is_empty:
@@ -5011,7 +5088,6 @@ class SpendSpectrum(QWidget):
                 painter.drawPath(top_path)
         # spike caret + tiny $ label at the top of the spike column
         if self._spike_rect is not None and rv >= 0.999:
-            si = data.spike_index
             sx = self._spike_rect.center().x()
             caret_y = ct - 2
             painter.setPen(Qt.PenStyle.NoPen)
@@ -5022,11 +5098,14 @@ class SpendSpectrum(QWidget):
                 QPointF(sx, caret_y),
             ])
             painter.drawPolygon(caret)
-            painter.setPen(Colors.TEXT_SECONDARY)
-            painter.setFont(Fonts.tiny())
-            painter.drawText(QRectF(sx - 30, caret_y - 18, 60, 12),
-                             Qt.AlignmentFlag.AlignCenter,
-                             f"${data.spike_total:,.1f}")
+            # the $ label is skipped when the spike IS the whole range (a
+            # single active day) — the header total already says it.
+            if data.spike_total < data.total * 0.999:
+                painter.setPen(Colors.TEXT_SECONDARY)
+                painter.setFont(Fonts.tiny())
+                painter.drawText(QRectF(sx - 30, caret_y - 18, 60, 12),
+                                 Qt.AlignmentFlag.AlignCenter,
+                                 f"${data.spike_total:,.2f}")
 
     def _paint_empty_chart(self, painter, cl, ct, cw, ch):
         # flat baseline already drawn by caller; centered tidy message
@@ -5079,39 +5158,73 @@ class SpendSpectrum(QWidget):
         f_mono = Fonts.mono_small()
         f_tiny = Fonts.tiny()
         fm_body = QFontMetrics(f_body)
-        fm_mono = QFontMetrics(f_mono)
         rows = min(len(data.models), self.MAX_LEGEND_ROWS)
         for idx in range(rows):
             m = data.models[idx]
             y = legend_top + idx * row_h
             mid_y = y + row_h / 2.0
-            # swatch
+            # hover wash — the row is a click target (opens the receipt), so
+            # give it a visible affordance.
+            if self._hover_model == m.model_id:
+                hov_path = QPainterPath()
+                hov_path.addRoundedRect(
+                    QRectF(self.PAD_X - 6, y, w - 2 * self.PAD_X + 12, row_h),
+                    5, 5)
+                painter.fillPath(hov_path, QBrush(Colors.BG_CARD_HOVER))
+            # swatch (ties the row to its chart band)
             sw = self.SWATCH
             sw_rect = QRectF(self.PAD_X, mid_y - sw / 2.0, sw, sw)
             color = spend_palette.model_color(m.model_id, idx)
             sw_path = QPainterPath()
             sw_path.addRoundedRect(sw_rect, 3, 3)
             painter.fillPath(sw_path, QBrush(color))
-            # right side: $ amount + (share%)
-            amt = f"${m.total_usage:,.2f}"
+            # $total + (share%) at the measured right columns
             share = f"({m.share * 100:.0f}%)"
-            amt_w = fm_mono.horizontalAdvance(amt)
-            share_w = QFontMetrics(f_tiny).horizontalAdvance(share)
-            right = w - self.PAD_X
             painter.setPen(Colors.TEXT_MUTED)
             painter.setFont(f_tiny)
-            painter.drawText(QRectF(right - share_w, y, share_w, row_h),
+            painter.drawText(QRectF(self.PAD_X, y,
+                                    self._col_share_right - self.PAD_X, row_h),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                              share)
-            amt_x = right - share_w - 6 - amt_w
             painter.setPen(Colors.TEXT_PRIMARY)
             painter.setFont(f_mono)
-            painter.drawText(QRectF(amt_x, y, amt_w, row_h),
+            painter.drawText(QRectF(self.PAD_X, y,
+                                    self._col_total_right - self.PAD_X, row_h),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                             amt)
-            # name (elided to the gap between swatch and the $ block)
-            name_x = self.PAD_X + sw + 6
-            name_avail = max(10, int(amt_x - 6 - name_x))
+                             f"${m.total_usage:,.2f}")
+            # $/call from #10's receipt (unit economics, right-aligned to its
+            # own column so every row lines up)
+            rec = self._receipts_by_id.get(m.model_id)
+            percall_left = self._col_percall_right
+            if rec is not None and rec.request_count > 0:
+                painter.setPen(QPen(accent))
+                painter.setFont(f_mono)
+                painter.drawText(QRectF(self.PAD_X, y,
+                                        self._col_percall_right - self.PAD_X,
+                                        row_h),
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                                 f"${rec.per_call:.4f}/call")
+                percall_left = (self._col_percall_right
+                                - QFontMetrics(f_mono).horizontalAdvance(
+                                    f"${rec.per_call:.4f}/call"))
+            # the price-drift stamp pill (only when #10's tripwire fired)
+            stamp_rect = self._legend_stamp_rects[idx]
+            if stamp_rect is not None and rec is not None:
+                s_color = Colors.RED if rec.stamp_dir > 0 else Colors.GREEN
+                arrow = "▲" if rec.stamp_dir > 0 else "▼"
+                pill = QPainterPath()
+                pill.addRoundedRect(stamp_rect, 3, 3)
+                painter.fillPath(pill, QBrush(_alpha(s_color, 46)))
+                painter.setPen(QPen(s_color, 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(pill)
+                painter.setFont(f_tiny)
+                painter.drawText(stamp_rect, Qt.AlignmentFlag.AlignCenter,
+                                 f"×{_stamp_mult_label(rec.stamp_mult)}{arrow}")
+                percall_left = stamp_rect.left()
+            # name (elided to the gap between the swatch and the number block)
+            name_x = self.PAD_X + sw + 8
+            name_avail = max(10, int(percall_left - 10 - name_x))
             name = fm_body.elidedText(m.short_name, Qt.TextElideMode.ElideRight,
                                       name_avail)
             painter.setPen(Colors.TEXT_SECONDARY if idx > 0 else Colors.TEXT_PRIMARY)
@@ -5189,6 +5302,9 @@ class SpendSpectrum(QWidget):
                 break
         if hov != self._hover_model:
             self._hover_model = hov
+            # the row is a click target (opens the receipt) — show a hand.
+            self.setCursor(Qt.CursorShape.PointingHandCursor if hov
+                           else Qt.CursorShape.ArrowCursor)
             self.update()
         super().mouseMoveEvent(event)
 
@@ -5287,7 +5403,7 @@ def _format_price_pair(prompt, completion):
 
 
 # ---------------------------------------------------------------------------
-#  THE TILL ROLL (#10) — per-model receipt stubs + the full thermal receipt
+#  THE TILL ROLL (#10) — the full thermal receipt (rows live in SpendSpectrum)
 # ---------------------------------------------------------------------------
 # The ONE intentional light surface in the dark app — kept ONLY inside the
 # receipt object so it reads as "paper", not a broken theme (decision E). The
@@ -5308,390 +5424,6 @@ def _fmt_tok(n: int) -> str:
     return f"{n:,}"
 
 
-class ReceiptStubList(QWidget):
-    """THE TILL ROLL stub list (#10): a thin stacked list of per-model receipt
-    'stubs' (one ~26px row per active model) directly under #9's Spectrum, each a
-    faint parchment strip with a left perforated edge, the model short-name, a
-    right-aligned avg $/call in accent, a 7-tick cost-per-call micro-sparkline,
-    and — when the latest day's $/call silently spiked vs the trailing median — a
-    small rotated RED 'x{mult} PRICE UP' stamp (GREEN on a downshift).
-
-    Measure-then-paint (PinnedModelCard idiom): one _measure() pass derives both
-    the cached row geometry and setFixedHeight so nothing clips. The whole row is
-    the hit target -> receipt_clicked(model_id, global_anchor) opens the full
-    thermal receipt in the shared ProviderPopup. Shares #9's name-column metric
-    so the two read as one block.
-
-    Motion: a ONE-TIME 'print' wipe reveal on first data arrival (a held
-    QPropertyAnimation on a distinct `print_reveal` float — NOT a QWidget builtin
-    — that the paint clips each row to, top-to-bottom like a receipt printing),
-    skipped if animations are off / the widget isn't visible, and re-gated by a
-    signature compare so a 15-min identical poll doesn't re-animate.
-    """
-
-    receipt_clicked = Signal(str, QPointF)
-
-    # -- geometry constants (the measure pass derives the rest) --
-    PAD_X = 14
-    GUTTER = 10          # left perforation gutter width
-    ROW_PAD = 4          # vertical pad inside a row (row_h = text + 2*ROW_PAD)
-    ROW_GAP = 4          # gap between stacked stubs
-    SPARK_W = 48         # the micro-sparkline slot width
-    PERF_PITCH = 5.0     # perforation dot pitch down the gutter
-    PERF_D = 2.0         # perforation dot diameter
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._receipts = ()       # tuple[Receipt]
-        self._locked = False
-        self._signature = None
-        self._print_reveal = 1.0  # 0..1 top-to-bottom print wipe (animated once)
-        # Cached geometry (rebuilt in set_data/resize) — never alloc in paint.
-        self._row_h = 0
-        self._row_rects = []      # list[(model_id, QRectF)] full-row hit targets
-        self._spark_pts = []      # list[list[QPointF]] aligned to _row_rects
-        self._stamp_rects = []    # list[QRectF|None] aligned to _row_rects
-        self._name_col_w = 0      # shared with #9's legend name column metric
-
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        # ONE held animation (ArcGauge idiom) — never per-frame alloc.
-        self._anim = QPropertyAnimation(self, b"print_reveal")
-        self._anim.setDuration(320)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        self._measure()
-        theme_controller.changed.connect(self._on_theme_changed)
-
-    # -- the print-reveal Property (distinct name; NOT a QWidget builtin) --
-    def get_print_reveal(self):
-        return self._print_reveal
-
-    def set_print_reveal(self, v):
-        self._print_reveal = float(v)
-        self.update()
-
-    print_reveal = Property(float, get_print_reveal, set_print_reveal)
-
-    def _on_theme_changed(self):
-        self._build_geometry()
-        self.update()
-
-    # ------------------------------------------------------------------
-    #  Public API
-    # ------------------------------------------------------------------
-    def set_data(self, receipts):
-        """receipts: a tuple[Receipt] (board.receipts) or None (keep last-good)."""
-        if receipts is None:
-            return
-        self._locked = False
-        self._receipts = tuple(receipts)
-        sig = self._compute_signature(self._receipts)
-        first_or_changed = (sig != self._signature)
-        self._signature = sig
-        self._measure()
-        self._build_geometry()
-        if first_or_changed and self._receipts:
-            self._start_print()
-        else:
-            self._print_reveal = 1.0
-        self.update()
-
-    def set_locked(self):
-        """No management key: a SINGLE dim parchment ghost stub + dotted outline
-        + the canonical unlock copy. No rows, no prices, ZERO fake numbers."""
-        self._locked = True
-        self._receipts = ()
-        self._signature = None
-        self._print_reveal = 1.0
-        self._measure()
-        self._row_rects = []
-        self._spark_pts = []
-        self._stamp_rects = []
-        self.update()
-
-    def receipt_for(self, model_id):
-        for r in self._receipts:
-            if r.model_id == model_id:
-                return r
-        return None
-
-    # ------------------------------------------------------------------
-    #  Print-reveal animation
-    # ------------------------------------------------------------------
-    def _start_print(self):
-        try:
-            import anim
-            on = anim.ANIMATIONS_ON
-        except Exception:
-            on = True
-        self._anim.stop()
-        if not on or not self.isVisible():
-            self._print_reveal = 1.0
-            return
-        self._print_reveal = 0.0
-        self._anim.setStartValue(0.0)
-        self._anim.setEndValue(1.0)
-        self._anim.start()
-
-    @staticmethod
-    def _compute_signature(receipts):
-        return tuple(
-            (r.model_id, round(r.per_call, 6), r.stamp_dir, round(r.stamp_mult, 2))
-            for r in receipts
-        )
-
-    # ------------------------------------------------------------------
-    #  Measure pass (drives BOTH paint and setFixedHeight — no clip)
-    # ------------------------------------------------------------------
-    def _row_height(self) -> int:
-        fm_body = QFontMetrics(Fonts.body())
-        fm_mono = QFontMetrics(Fonts.mono_small())
-        text_h = max(fm_body.height(), fm_mono.height())
-        return int(text_h + 2 * self.ROW_PAD)
-
-    def _n_rows(self) -> int:
-        if self._locked:
-            return 1                       # the single ghost stub
-        return max(1, len(self._receipts)) if self._receipts else 1
-
-    def _measure(self):
-        self._row_h = self._row_height()
-        n = self._n_rows()
-        total = n * (self._row_h + self.ROW_GAP)
-        self.setFixedHeight(int(total))
-
-    # ------------------------------------------------------------------
-    #  Geometry build (cache row rects + sparkline points + stamp rects)
-    # ------------------------------------------------------------------
-    def _price_col_w(self) -> int:
-        return QFontMetrics(Fonts.mono_small()).horizontalAdvance("$0.0000/call")
-
-    def _build_geometry(self):
-        self._row_rects = []
-        self._spark_pts = []
-        self._stamp_rects = []
-        if self._locked or not self._receipts:
-            return
-        w = max(1, self.width())
-        row_h = self._row_h
-        price_w = self._price_col_w()
-        fm_stamp = QFontMetrics(Fonts.tiny())
-        for idx, r in enumerate(self._receipts):
-            y = idx * (row_h + self.ROW_GAP)
-            row_rect = QRectF(0, y, w, row_h)
-            self._row_rects.append((r.model_id, row_rect))
-
-            # right edge: price column (right-padded by PAD_X).
-            price_right = w - self.PAD_X
-            price_left = price_right - price_w
-            # stamp slot sits just LEFT of the price when triggered.
-            stamp_rect = None
-            stamp_left = price_left
-            if r.has_stamp:
-                stamp_txt = f"x{_stamp_mult_label(r.stamp_mult)}"
-                sw = fm_stamp.horizontalAdvance(stamp_txt) + 14
-                sh = row_h - 8
-                stamp_rect = QRectF(price_left - 8 - sw, y + 4, sw, sh)
-                stamp_left = stamp_rect.left()
-            self._stamp_rects.append(stamp_rect)
-
-            # sparkline slot sits left of the stamp/price block.
-            spark_right = stamp_left - 8
-            spark_left = spark_right - self.SPARK_W
-            spark = r.spark
-            pts = []
-            if len(spark) >= 2:
-                mn, mx = min(spark), max(spark)
-                rng = (mx - mn) if mx != mn else 1.0
-                sp_top = y + 5.0
-                sp_bot = y + row_h - 5.0
-                sp_h = sp_bot - sp_top
-                n = len(spark)
-                for i, v in enumerate(spark):
-                    px = spark_left + (self.SPARK_W) * i / (n - 1)
-                    py = sp_bot - sp_h * (v - mn) / rng
-                    pts.append(QPointF(px, py))
-            self._spark_pts.append(pts)
-
-        # name column: from the left gutter to the sparkline slot. Mirror #9 by
-        # using the same Fonts.body() metric for elision.
-        name_left = self.PAD_X + self.GUTTER + 6
-        # the narrowest available name width across rows (so all elide alike).
-        if self._spark_pts:
-            min_spark_left = min(
-                (pts[0].x() if pts else (self.width() - self.PAD_X
-                                         - self._price_col_w() - self.SPARK_W))
-                for pts in self._spark_pts
-            )
-        else:
-            min_spark_left = self.width() - self.PAD_X - self._price_col_w() - self.SPARK_W
-        self._name_col_w = max(20, int(min_spark_left - 8 - name_left))
-
-    def resizeEvent(self, event):
-        self._build_geometry()
-        super().resizeEvent(event)
-
-    # ------------------------------------------------------------------
-    #  Paint (allocation-light: cached rects/points + cached strokes)
-    # ------------------------------------------------------------------
-    def paintEvent(self, event):
-        if not _safe_paint(self):
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if self._locked:
-            self._paint_locked(p)
-            p.end()
-            return
-        if not self._receipts:
-            p.end()
-            return
-        accent = theme_controller.accent()
-        rv = self._print_reveal
-        f_body = Fonts.body()
-        f_mono = Fonts.mono_small()
-        f_tiny = Fonts.tiny()
-        fm_body = QFontMetrics(f_body)
-        fm_mono = QFontMetrics(f_mono)
-        for idx, (mid, row_rect) in enumerate(self._row_rects):
-            r = self._receipts[idx]
-            # --- the one-time 'print' wipe: clip each row to a growing top edge.
-            if rv < 1.0:
-                p.save()
-                clip_h = row_rect.height() * rv
-                p.setClipRect(QRectF(row_rect.left(), row_rect.top(),
-                                     row_rect.width(), clip_h))
-            self._paint_row(p, idx, r, row_rect, accent, f_body, f_mono, f_tiny,
-                            fm_body, fm_mono)
-            if rv < 1.0:
-                p.restore()
-        p.end()
-
-    def _paint_row(self, p, idx, r, row_rect, accent, f_body, f_mono, f_tiny,
-                   fm_body, fm_mono):
-        # 1) faint parchment wash (the stub reads as paper, not a broken theme).
-        wash = _alpha(RECEIPT_PARCHMENT, 26)   # ~10%
-        body = QRectF(row_rect.left() + 1, row_rect.top(), row_rect.width() - 2,
-                      row_rect.height())
-        path = QPainterPath()
-        path.addRoundedRect(body, 4, 4)
-        p.fillPath(path, QBrush(wash))
-
-        # 2) the LEFT perforated edge — a column of dots down the gutter.
-        dot = _alpha(Colors.TEXT_MUTED, 128)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(dot))
-        gx = row_rect.left() + self.PAD_X + self.GUTTER / 2.0
-        yy = row_rect.top() + self.PERF_PITCH
-        while yy < row_rect.bottom() - 1:
-            p.drawEllipse(QPointF(gx, yy), self.PERF_D / 2.0, self.PERF_D / 2.0)
-            yy += self.PERF_PITCH
-
-        # 3) model short-name, elided to the shared name column.
-        name_left = row_rect.left() + self.PAD_X + self.GUTTER + 6
-        name = fm_body.elidedText(r.short_name, Qt.TextElideMode.ElideRight,
-                                  self._name_col_w)
-        p.setPen(Colors.TEXT_PRIMARY)
-        p.setFont(f_body)
-        p.drawText(QRectF(name_left, row_rect.top(), self._name_col_w,
-                          row_rect.height()),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   name)
-
-        # 4) the 7-tick cost-per-call micro-sparkline (accent + end-dot).
-        pts = self._spark_pts[idx]
-        if len(pts) >= 2:
-            p.setPen(QPen(accent, 1.4, Qt.PenStyle.SolidLine,
-                          Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            sp_path = QPainterPath()
-            sp_path.moveTo(pts[0])
-            for q in pts[1:]:
-                sp_path.lineTo(q)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(sp_path)
-            p.setBrush(QBrush(accent))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(pts[-1], 1.8, 1.8)
-
-        # 5) the STAMP (still, not pulsing — a still stamp reads 'official').
-        stamp_rect = self._stamp_rects[idx]
-        if stamp_rect is not None:
-            self._paint_stamp(p, stamp_rect, r, f_tiny)
-
-        # 6) right-aligned avg $/call in accent mono.
-        price_txt = f"${r.per_call:.4f}/call"
-        price_w = self._price_col_w()
-        price_right = row_rect.right() - self.PAD_X
-        p.setPen(QPen(accent))
-        p.setFont(f_mono)
-        p.drawText(QRectF(price_right - price_w, row_rect.top(), price_w,
-                          row_rect.height()),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                   price_txt)
-
-    def _paint_stamp(self, p, rect, r, f_tiny):
-        color = Colors.RED if r.stamp_dir > 0 else Colors.GREEN
-        p.save()
-        # rotate -7deg about the stamp center for the hand-stamped look.
-        c = rect.center()
-        p.translate(c)
-        p.rotate(-7)
-        p.translate(-c)
-        fill = _alpha(color, 46)   # ~18%
-        path = QPainterPath()
-        path.addRoundedRect(rect, 3, 3)
-        p.fillPath(path, QBrush(fill))
-        p.setPen(QPen(color, 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-        p.setPen(QPen(color))
-        p.setFont(f_tiny)
-        p.drawText(rect, Qt.AlignmentFlag.AlignCenter,
-                   f"x{_stamp_mult_label(r.stamp_mult)}")
-        p.restore()
-
-    def _paint_locked(self, p):
-        # a single dim parchment ghost stub with a DOTTED outline + unlock copy.
-        w = self.width()
-        row_rect = QRectF(1, 0, w - 2, self._row_h)
-        wash = _alpha(RECEIPT_PARCHMENT, 16)
-        path = QPainterPath()
-        path.addRoundedRect(row_rect, 4, 4)
-        p.fillPath(path, QBrush(wash))
-        p.setPen(QPen(Colors.TEXT_MUTED, 1, Qt.PenStyle.DotLine))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(row_rect, 4, 4)
-        msg = SPEND_UNLOCK_BASE + " · print per-call receipts"
-        fm = QFontMetrics(Fonts.body())
-        msg = fm.elidedText(msg, Qt.TextElideMode.ElideRight, int(w - 2 * self.PAD_X - 18))
-        msg_w = fm.horizontalAdvance(msg)
-        cx = w / 2.0
-        cy = self._row_h / 2.0
-        _paint_padlock(p, cx - msg_w / 2.0 - 11, cy, 13, Colors.TEXT_MUTED)
-        p.setPen(Colors.TEXT_MUTED)
-        p.setFont(Fonts.body())
-        p.drawText(row_rect, Qt.AlignmentFlag.AlignCenter, msg)
-
-    # ------------------------------------------------------------------
-    #  Interaction — whole row opens the full thermal receipt
-    # ------------------------------------------------------------------
-    def mousePressEvent(self, event):
-        if self._locked or not self._receipts:
-            super().mousePressEvent(event)
-            return
-        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
-        gpos = event.globalPosition() if hasattr(event, "globalPosition") \
-            else QPointF(self.mapToGlobal(event.pos()))
-        for mid, rect in self._row_rects:
-            if rect.contains(pos):
-                self.receipt_clicked.emit(mid, gpos)
-                return
-        super().mousePressEvent(event)
-
-
 def _stamp_mult_label(mult: float) -> str:
     """Compact stamp multiplier ('3.1', '12', '0.4')."""
     if mult >= 10:
@@ -5707,11 +5439,15 @@ class ReceiptStripWidget(PopupStrip):
 
     Honest by construction (decision A): the line items show real AVERAGE token
     COUNTS per call (INPUT / OUTPUT / REASONING — token counts, NO per-line $);
-    the only itemized $ are the GREEN cache CREDIT (abs(usage_cache)/calls) and
-    the bold SUBTOTAL / CALL (total_usage/calls). A RED 'PRICE UP Nx vs 7d
-    MEDIAN' banner prints only when the receipt's stamp fired; a deterministic
-    barcode is seeded from the model-id hash. Header label '7-DAY AVG / CALL' so
-    nothing is implied as one real call.
+    the only itemized $ are the GREEN cache CREDIT (abs(usage_cache)/calls),
+    the PER CALL average (total_usage/calls), and the bold 7-day TOTAL (the
+    headline money). The register flow reads PER CALL x N CALLS = TOTAL. A RED
+    price-change banner prints only when the receipt's stamp fired; a
+    deterministic barcode is seeded from the model-id hash. Header label
+    '7-DAY AVERAGE PER CALL' so nothing is implied as one real call. Clean
+    straight paper edges (the sawtooth tears, brand line, joke footer and
+    young-account footnote were all cut 2026-07-01: owner wants only the
+    information).
 
     devicePixelRatio-aware: the pixmap is rendered at the device ratio so the
     mono text stays crisp on a HiDPI display; the <img> is sized in logical px.
@@ -5730,57 +5466,44 @@ class ReceiptStripWidget(PopupStrip):
         return QFontMetrics(Fonts.mono_small()).height() + 3
 
     def _line_items(self):
-        """The ordered (label, value, role) line items. role: 'tok' (count, no
-        $), 'credit' (green $), 'sub' (bold subtotal $), 'tie' (muted)."""
+        """The ordered (label, value, role) line items. role: 'tok' (a token
+        count, NO $ — decision A), 'credit' (green $). Every row is a plain
+        label with a right-aligned value so the columns line up."""
         r = self._r
         items = [
-            (f"INPUT  {_fmt_tok(r.avg_prompt_tok)} tok", None, "tok"),
-            (f"OUTPUT {_fmt_tok(r.avg_completion_tok)} tok", None, "tok"),
+            ("INPUT", f"{_fmt_tok(r.avg_prompt_tok)} tok", "tok"),
+            ("OUTPUT", f"{_fmt_tok(r.avg_completion_tok)} tok", "tok"),
         ]
         if r.avg_reasoning_tok > 0:
-            items.append((f"REASON {_fmt_tok(r.avg_reasoning_tok)} tok", None, "tok"))
-        if r.cache_credit_per_call > 0 or r.avg_cached_tok > 0:
-            items.append((f"CACHE READ {_fmt_tok(r.avg_cached_tok)} tok",
-                          f"-${r.cache_credit_per_call:.4f}", "credit"))
+            items.append(("REASONING", f"{_fmt_tok(r.avg_reasoning_tok)} tok",
+                          "tok"))
+        if r.avg_cached_tok > 0:
+            items.append(("CACHE READ", f"{_fmt_tok(r.avg_cached_tok)} tok",
+                          "tok"))
+        if r.cache_credit_per_call > 0:
+            items.append(("CACHE CREDIT", f"-${r.cache_credit_per_call:.4f}",
+                          "credit"))
         return items
 
     def _measure_height(self) -> int:
         line_h = self._line_h()
-        tear = 8
-        header_lines = 3            # name / OPENROUTER·RECEIPT / 7-DAY AVG/CALL
+        pad_v = 10                  # flat paper edge (the tears are gone)
+        header_lines = 2            # name / 7-DAY AVERAGE PER CALL
         n_items = len(self._line_items())
         banner = 22 if (self._r is not None and self._r.has_stamp) else 0
-        footnote = line_h if (self._r is not None and self._r.young) else 0
-        # tear + header + rule + items + rule + subtotal + tie + banner + barcode
-        # + joke + tear
-        h = (tear + header_lines * line_h + 6
+        # pad + header + rule + items + rule + PER CALL + x N CALLS + rule
+        # + TOTAL (bold headline) + banner + barcode + pad
+        h = (pad_v + header_lines * line_h + 6
              + n_items * line_h + 6
-             + line_h          # subtotal
-             + line_h          # "TIMES N CALLS = $total" tie-back
+             + line_h          # PER CALL
+             + line_h          # x N CALLS
+             + 6               # rule
+             + line_h          # TOTAL · 7 DAYS (the real money, bold)
              + banner
-             + footnote
+             + 6               # air between the total and the barcode
              + 22              # barcode block
-             + line_h          # joke line
-             + tear)
+             + pad_v)
         return int(h)
-
-    def _paint_tear(self, p, y, w, down: bool):
-        """A jagged sawtooth tear (6px teeth) across the paper width."""
-        teeth = 6.0
-        pts = []
-        x = 0.0
-        up = y - 4 if down else y
-        dn = y if down else y + 4
-        toggle = True
-        while x <= w:
-            pts.append(QPointF(x, dn if toggle else up))
-            toggle = not toggle
-            x += teeth
-        pts.append(QPointF(w, dn if toggle else up))
-        poly = QPolygonF(pts)
-        p.setPen(QPen(RECEIPT_PAPER_EDGE, 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPolyline(poly)
 
     def _paint_into(self, p):
         r = self._r
@@ -5791,12 +5514,12 @@ class ReceiptStripWidget(PopupStrip):
         fm = QFontMetrics(f_mono)
         pad = 16
 
-        # 1) parchment paper with a top + bottom jagged tear.
-        paper = QPainterPath()
-        paper.addRect(QRectF(0, 4, w, h - 8))
+        # 1) clean parchment paper: straight edges, a faint 1px border.
+        paper = _rounded(QRectF(0.5, 0.5, w - 1, h - 1), 3)
         p.fillPath(paper, QBrush(RECEIPT_PARCHMENT))
-        self._paint_tear(p, 4, w, down=True)
-        self._paint_tear(p, h - 4, w, down=False)
+        p.setPen(QPen(RECEIPT_PAPER_EDGE, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(paper)
 
         y = 10.0
 
@@ -5809,11 +5532,10 @@ class ReceiptStripWidget(PopupStrip):
                        text)
             y += line_h
 
-        # 2) centered mono header.
+        # 2) centered mono header: the model, then the unit of every number.
         center(r.short_name if r else "", RECEIPT_INK, f_mono)
-        faint = _alpha(RECEIPT_INK, 120)
-        center("OPENROUTER · RECEIPT", faint, Fonts.tiny())
-        center("7-DAY AVG / CALL", faint, Fonts.tiny())
+        faint = _alpha(RECEIPT_INK, 140)
+        center("7-DAY AVERAGE PER CALL", faint, Fonts.tiny())
 
         # 3) a dotted rule.
         def rule():
@@ -5860,27 +5582,30 @@ class ReceiptStripWidget(PopupStrip):
 
         rule()
 
-        # 5) the bold SUBTOTAL / CALL (a REAL $ we know: total_usage/calls).
+        # 5) the register flow: PER CALL, x N CALLS, then the bold TOTAL.
+        #    Both $ are REAL (total_usage/calls and total_usage) — decision A.
+        line_item("PER CALL", f"${r.per_call:.4f}" if r else "$0.0000", "tok")
+        qty = _alpha(RECEIPT_INK, 140)
+        p.setFont(f_mono)
+        p.setPen(QPen(qty))
+        p.drawText(QPointF(pad, y + fm.ascent()),
+                   f"x {r.request_count:,} CALLS")
+        y += line_h
+
+        rule()
+
+        # 6) TOTAL · 7 DAYS — the headline money, the ONE bold line.
         sub_font = QFont(f_mono)
         sub_font.setWeight(QFont.Weight.Bold)
         p.setFont(sub_font)
         p.setPen(QPen(RECEIPT_INK))
-        sub_val = f"${r.per_call:.4f}" if r else "$0.0000"
-        p.drawText(QPointF(pad, y + fm.ascent()), "SUBTOTAL / CALL")
+        p.drawText(QPointF(pad, y + fm.ascent()), "TOTAL · 7 DAYS")
         p.drawText(QRectF(0, y, w - pad, line_h),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, sub_val)
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                   f"${r.total_usage:,.2f}")
         y += line_h
 
-        # 6) tie-back to #9: TIMES N CALLS = $range_total (muted).
-        tie = _alpha(RECEIPT_INK, 120)
-        p.setFont(Fonts.tiny())
-        p.setPen(QPen(tie))
-        p.drawText(QRectF(pad, y, w - 2 * pad, line_h),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   f"TIMES {r.request_count:,} CALLS  =  ${r.total_usage:,.2f}")
-        y += line_h
-
-        # 7) the RED 'PRICE UP Nx vs 7d MEDIAN' banner — only when triggered.
+        # 7) the RED price-change banner — only when the tripwire fired.
         if r and r.has_stamp:
             up = r.stamp_dir > 0
             col = Colors.RED if up else Colors.GREEN
@@ -5895,69 +5620,55 @@ class ReceiptStripWidget(PopupStrip):
             bf = QFont(Fonts.tiny()); bf.setWeight(QFont.Weight.Bold)
             p.setFont(bf)
             p.drawText(band, Qt.AlignmentFlag.AlignCenter,
-                       f"{word} {_stamp_mult_label(r.stamp_mult)}x vs 7d MEDIAN")
+                       f"{word} {_stamp_mult_label(r.stamp_mult)}x vs 7-DAY MEDIAN")
             y += 22
 
-        # 8) YOUNG-account footnote (no false trigger; building history).
-        if r and r.young:
-            fn = _alpha(RECEIPT_INK, 120)
-            p.setFont(Fonts.tiny())
-            p.setPen(QPen(fn))
-            p.drawText(QRectF(pad, y, w - 2 * pad, line_h),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
-                       "building history — needs 7 days for a price tripwire")
-            y += line_h
-
-        # 9) a deterministic barcode (variable-width bars from the model-id hash).
+        # 8) a deterministic barcode (variable-width bars from the model-id hash).
+        y += 6
         self._paint_barcode(p, pad, y, w - 2 * pad, 16)
-        y += 22
-
-        # 10) the joke line (muted).
-        joke = _alpha(RECEIPT_INK, 110)
-        p.setFont(Fonts.tiny())
-        p.setPen(QPen(joke))
-        p.drawText(QRectF(0, y, w, line_h),
-                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                   "* NOT A TAX RECEIPT *")
 
     def _paint_barcode(self, p, x, y, w, h):
+        """A dense Code-128-style barcode: EVERY slot draws a bar (1-3px wide,
+        1-2px gaps) so the band reads as solid symbology, not scattered ticks.
+        Bar widths stream from a chained sha256 of the model id (deterministic
+        per model, no visible repeat), with a small quiet zone at each end."""
         import hashlib
-        seed = hashlib.md5((self._r.model_id if self._r else "").encode("utf-8")).digest()
+        seed = hashlib.sha256(
+            (self._r.model_id if self._r else "").encode("utf-8")).digest()
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(RECEIPT_INK))
-        cx = x
+        quiet = 6.0
+        cx = x + quiet
+        right = x + w - quiet
         i = 0
-        while cx < x + w - 1:
+        while cx < right:
+            if i and i % len(seed) == 0:      # chain: never repeat the pattern
+                seed = hashlib.sha256(seed).digest()
             byte = seed[i % len(seed)]
-            bar_w = 1.0 + (byte & 0x03)        # 1..4 px wide
-            gap = 1.0 + ((byte >> 2) & 0x03)   # 1..4 px gap
-            if (byte >> 4) & 1:                # ~half the slots are bars
-                p.drawRect(QRectF(cx, y, bar_w, h))
+            bar_w = 1.0 + (byte % 3)          # 1..3 px bar
+            gap = 1.0 + ((byte >> 3) & 0x01)  # 1..2 px gap
+            p.drawRect(QRectF(cx, y, min(bar_w, right - cx), h))
             cx += bar_w + gap
             i += 1
 
 
 def build_receipt_html(receipt) -> str:
-    """The full thermal-receipt dossier for the ProviderPopup: a header + the
-    painted receipt pixmap embedded as a data-URI <img> (single-QLabel contract).
-    Every API-sourced string (the model short-name) is html.escape'd before it
-    enters the HTML wrapper (decision C); the pixmap text itself is QPainter-drawn
-    so it's injection-safe by construction. Returns '' when there's no receipt."""
+    """JUST the receipt paper (owner call 2026-07-01: no popup header/footer —
+    the paper is the whole dossier), embedded as a data-URI <img>
+    (single-QLabel contract). Every string on the paper is QPainter-drawn, so
+    API-sourced names never enter the HTML at all (injection-safe by
+    construction). Returns the no-receipt line when nothing is on file."""
     if receipt is None:
         return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
-                "— NO RECEIPT ON FILE —</div>")
-    name = html.escape(receipt.short_name or "")
-    out = [f"<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>{name}</div>"]
-    out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
-               "per-call receipt · 7-day average · ground truth</div>")
+                "NO RECEIPT ON FILE</div>")
     try:
         strip = ReceiptStripWidget(receipt)
-        out.append(_strip_img_div(strip))
+        # centered so any residual label slack splits evenly, never a
+        # lopsided right gap.
+        return f"<div align='center'>{_strip_img_div(strip)}</div>"
     except Exception:
         log.debug("receipt strip render failed", exc_info=True)
-    out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
-               "live from openrouter.ai · analytics · refreshed every ~15 min</div>")
-    return "".join(out)
+        return ""
 
 
 def receipt_accent_hex(receipt) -> str:
@@ -7306,15 +7017,22 @@ class AutopsyStripWidget(PopupStrip):
     """#11 dossier strip (mirrors UptimeStripWidget/SeanceLedgerStrip: STRIP_W=292,
     render_pixmap()+_paint_into(p), measure-before-allocate so nothing clips).
 
+    Row anatomy (2026-07-01 redesign, owner-driven): a TEXT LINE
+    ("model · provider" left, "$X · N%" right) above a thin 4px share bar.
+    Text NEVER sits on a filled bar (the old text-over-crimson-pill read as a
+    broken selection highlight). Bar colors come from spend_palette so the
+    breakdown matches the chart bands and the model-list swatches; the
+    remainder row is muted.
+
     All text is QPainter-drawn here (injection-safe); the HTML wrapper ALSO
     html.escapes every model/provider name. devicePixelRatio-aware for crisp
     HiDPI text."""
 
     STRIP_W = 292
     PAD = 8
-    BAR_H = 18
-    BAR_GAP = 6
-    TRACK_H = 8
+    LABEL_GAP = 3       # text line -> bar
+    TRACK_H = 4         # the thin share bar
+    ROW_GAP = 8         # between rows
 
     def __init__(self, report, parent=None):
         super().__init__(parent)
@@ -7326,181 +7044,155 @@ class AutopsyStripWidget(PopupStrip):
         self._bar_geom = []
 
     def _rows_drawn(self) -> int:
-        """How many bars the strip paints: visible rows (+1 for a remainder bar),
-        or exactly 1 for the empty 'clean window' state."""
+        """How many rows the strip paints: visible rows (+1 for a remainder
+        row), or exactly 1 for the empty no-spend state."""
         r = self._report
         if r is None or r.is_empty:
             return 1
         return len(r.visible) + (1 if r.remainder_count > 0 else 0)
 
+    def _row_block_h(self) -> int:
+        # font-metric-driven: text line + gap + bar (the card-geometry rule).
+        return int(QFontMetrics(Fonts.body()).height() + self.LABEL_GAP
+                   + self.TRACK_H)
+
     def _measure_height(self) -> int:
-        # PAD*2 + rows*(BAR_H+BAR_GAP) - BAR_GAP  (the GEOMETRY_PLAN formula).
         rows = max(1, self._row_count)
-        return int(self.PAD * 2 + rows * (self.BAR_H + self.BAR_GAP)
-                   - self.BAR_GAP)
+        return int(self.PAD * 2 + rows * self._row_block_h()
+                   + (rows - 1) * self.ROW_GAP)
 
-    def _value_col_w(self) -> int:
-        # Reserve a fixed value column wide enough for "$9999.99 · 100%".
-        return QFontMetrics(Fonts.mono_small()).horizontalAdvance(
-            "$9999.99 · 100%") + 8
-
-    def _row_color(self, rank: int, n: int) -> QColor:
-        """Dominant row = deepest CRIMSON; minor rows lerp toward the panel accent
-        so 'one model drained it' reads as a wound while the tail cools off."""
-        if n <= 1:
-            return QColor(Colors.CRIMSON)
-        t = rank / (n - 1)
-        return _lerp_color(Colors.CRIMSON, theme_controller.accent(), t)
-
-    def _paint_into(self, p):
+    def _paint_row(self, p, y, label, value, fill_frac, color,
+                   emphasize, is_remainder):
+        """One row: label left + value right on the text line, then the thin
+        track with a color fill sized to fill_frac. Appends to _bar_geom."""
         w = self.STRIP_W
         pad = self.PAD
-        self._bar_geom = []
-        r = self._report
         f_body = Fonts.body()
         f_mono = Fonts.mono_small()
         fm_body = QFontMetrics(f_body)
         fm_mono = QFontMetrics(f_mono)
-        val_w = self._value_col_w()
-        track_left = pad
+        text_h = fm_body.height()
         track_w = w - 2 * pad
-        label_avail = max(10, track_w - val_w - 6)
+        val_w = fm_mono.horizontalAdvance(value) if value else 0
+        label_avail = max(10, track_w - val_w - 8)
 
-        # EMPTY window -> a single muted "clean window" bar (no crimson).
+        text_col = Colors.TEXT_PRIMARY if emphasize else Colors.TEXT_SECONDARY
+        if is_remainder:
+            text_col = Colors.TEXT_MUTED
+        p.setFont(f_body)
+        p.setPen(QPen(text_col))
+        p.drawText(QRectF(pad, y, label_avail, text_h),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   fm_body.elidedText(label, Qt.TextElideMode.ElideRight,
+                                      int(label_avail)))
+        if value:
+            p.setFont(f_mono)
+            p.drawText(QRectF(w - pad - val_w, y, val_w, text_h),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                       value)
+
+        bar_y = y + text_h + self.LABEL_GAP
+        track = _alpha(Colors.TEXT_MUTED, 40)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.fillPath(_rounded(QRectF(pad, bar_y, track_w, self.TRACK_H), 2),
+                   QBrush(track))
+        frac = max(0.0, min(1.0, fill_frac))
+        fill_w = max(2.0, track_w * frac) if frac > 0 else 0.0
+        if fill_w > 0:
+            p.fillPath(_rounded(QRectF(pad, bar_y, fill_w, self.TRACK_H), 2),
+                       QBrush(color))
+        self._bar_geom.append((float(fill_w), float(track_w), is_remainder))
+
+    def _paint_into(self, p):
+        self._bar_geom = []
+        r = self._report
+
+        # EMPTY window -> one muted row, plain words, no fill.
         if r is None or r.is_empty:
-            y = pad
-            cy = y + self.BAR_H / 2.0
-            track = _alpha(Colors.TEXT_MUTED, 40)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
-                                       track_w, self.TRACK_H), 4), QBrush(track))
-            self._bar_geom.append((0.0, float(track_w), False))
-            label = "No spend — clean window"
+            label = "No spend in this window"
             if r is not None:
-                label = f"No spend in {r.window_label} — clean window"
-            p.setFont(f_body)
-            p.setPen(QPen(Colors.TEXT_MUTED))
-            p.drawText(QRectF(track_left, y, track_w, self.BAR_H),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       fm_body.elidedText(label, Qt.TextElideMode.ElideRight,
-                                          int(track_w)))
+                label = f"No spend in {r.window_label}"
+            self._paint_row(p, self.PAD, label, "", 0.0,
+                            Colors.TEXT_MUTED, False, False)
             return
 
-        n = len(r.visible) + (1 if r.remainder_count > 0 else 0)
         spike = r.spike_total if r.spike_total > 0 else 1.0
-        y = pad
+        y = self.PAD
         for rank, row in enumerate(r.visible):
-            cy = y + self.BAR_H / 2.0
-            color = self._row_color(rank, n)
-            # 1) the full-width track.
-            track = _alpha(Colors.TEXT_MUTED, 40)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
-                                       track_w, self.TRACK_H), 4), QBrush(track))
-            # 2) the crimson incision filled to (usage/spike_total).
-            frac = max(0.0, min(1.0, row.usage / spike))
-            fill_w = max(2.0, track_w * frac) if frac > 0 else 0.0
-            if fill_w > 0:
-                p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
-                                           fill_w, self.TRACK_H), 4),
-                           QBrush(color))
-            self._bar_geom.append((float(fill_w), float(track_w), False))
-            # 3) left label "model · provider" (elided), over the track.
-            label = f"{row.short_name} · {row.provider}"
-            p.setFont(f_body)
-            p.setPen(QPen(Colors.TEXT_PRIMARY if rank == 0
-                          else Colors.TEXT_SECONDARY))
-            p.drawText(QRectF(track_left + 2, y, label_avail, self.BAR_H),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       fm_body.elidedText(label, Qt.TextElideMode.ElideRight,
-                                          int(label_avail)))
-            # 4) right value col "$X.XX · NN%".
-            val = f"${row.usage:,.2f} · {round(row.share * 100)}%"
-            p.setFont(f_mono)
-            p.setPen(QPen(Colors.TEXT_PRIMARY if rank == 0
-                          else Colors.TEXT_SECONDARY))
-            p.drawText(QRectF(w - pad - val_w, y, val_w, self.BAR_H),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                       fm_mono.elidedText(val, Qt.TextElideMode.ElideRight,
-                                          int(val_w)))
-            y += self.BAR_H + self.BAR_GAP
+            # the SAME per-model color the chart bands + list swatches use.
+            color = spend_palette.model_color(row.model_id, rank)
+            self._paint_row(
+                p, y,
+                f"{row.short_name} · {row.provider}",
+                f"${row.usage:,.2f} · {round(row.share * 100)}%",
+                row.usage / spike, color, emphasize=(rank == 0),
+                is_remainder=False)
+            y += self._row_block_h() + self.ROW_GAP
 
-        # the bounded "+N more · $Y" remainder bar (TEXT_MUTED, never crimson).
+        # the bounded "+N more" remainder row (muted, never a model color).
         if r.remainder_count > 0:
-            cy = y + self.BAR_H / 2.0
-            track = _alpha(Colors.TEXT_MUTED, 40)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
-                                       track_w, self.TRACK_H), 4), QBrush(track))
-            frac = max(0.0, min(1.0, r.remainder_usage / spike))
-            fill_w = max(2.0, track_w * frac) if frac > 0 else 0.0
-            mut = _alpha(Colors.TEXT_MUTED, 150)
-            if fill_w > 0:
-                p.fillPath(_rounded(QRectF(track_left, cy - self.TRACK_H / 2.0,
-                                           fill_w, self.TRACK_H), 4), QBrush(mut))
-            self._bar_geom.append((float(fill_w), float(track_w), True))
-            label = f"+{r.remainder_count} more"
-            val = f"${r.remainder_usage:,.2f}"
-            p.setFont(f_body)
-            p.setPen(QPen(Colors.TEXT_MUTED))
-            p.drawText(QRectF(track_left + 2, y, label_avail, self.BAR_H),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       label)
-            p.setFont(f_mono)
-            p.drawText(QRectF(w - pad - val_w, y, val_w, self.BAR_H),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                       val)
+            self._paint_row(
+                p, y,
+                f"+{r.remainder_count} more",
+                f"${r.remainder_usage:,.2f}",
+                r.remainder_usage / spike,
+                _alpha(Colors.TEXT_MUTED, 150), emphasize=False,
+                is_remainder=True)
 
 
 def autopsy_accent_hex(report) -> str:
-    """The popup border accent for the autopsy dossier — always CRIMSON (the
-    forensic/alarm role), so the frame reads distinct from the cyan info popups
-    and the green rebate. Returns a #rrggbb."""
-    return Colors.CRIMSON.name()
+    """The popup border accent for the spend-breakdown dossier: the panel
+    accent, same as the other info popups (the crimson alarm frame was dropped
+    2026-07-01 — a breakdown is information, not an alert). Returns #rrggbb."""
+    return theme_controller.accent().name()
 
 
 def build_autopsy_html(report) -> str:
-    """The forensic dossier for the ProviderPopup: an HTML header
-    'AUTOPSY · HH:00–HH:00 · $Z drained' + the painted incision pixmap (data-URI
-    <img>) + a footer 'N reqs · M cached tokens' and, when a cache offset exists,
-    a GREEN 'caching offset −$X here' line (an offset, NEVER a drain — decision
-    D). EVERY API name reaching the HTML is html.escape'd (the pixmap text is
-    QPainter-drawn, injection-safe by construction). Returns a 'no window' card
-    when report is None; a tidy 'clean window' header when $0 was drained."""
-    crimson = _safe_color(Colors.CRIMSON.name(), "#e0463c")
+    """The spend-breakdown dossier for the ProviderPopup (#11, code-named THE
+    AUTOPSY — the user-facing copy is plain English, owner request 2026-07-01):
+    a 'SPEND BREAKDOWN · window' header with the $ total and the largest
+    spender, the painted bar-strip pixmap (data-URI <img>), and a footer with
+    request/cached-token totals plus a GREEN 'caching saved $X' line (an
+    offset, NEVER a drain — decision D). Neutral header colors (the crimson
+    title was dropped 2026-07-01). EVERY API name reaching the HTML is
+    html.escape'd (the pixmap text is QPainter-drawn, injection-safe by
+    construction)."""
     if report is None:
         return ("<div style='font-size:9.5pt;color:#a0a0c8;font-weight:bold;'>"
-                "— NO AUTOPSY ON FILE —</div>")
+                "NO DATA FOR THIS WINDOW</div>")
     window = html.escape(report.window_label)
     out = []
     if report.is_empty:
-        out.append(f"<div style='font-size:11pt;font-weight:bold;color:{crimson};'>"
-                   f"AUTOPSY · {window}</div>")
+        out.append("<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>"
+                   f"SPEND BREAKDOWN · {window}</div>")
         out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
-                   "clean window · ground truth</div>")
+                   "no spend in this window</div>")
     else:
         top = report.rows[0]
         top_name = html.escape(f"{top.short_name} · {top.provider}")
-        out.append(f"<div style='font-size:11pt;font-weight:bold;color:{crimson};'>"
-                   f"AUTOPSY · {window} · ${report.spike_total:,.2f} drained</div>")
+        out.append("<div style='font-size:11pt;font-weight:bold;color:#f0f0ff;'>"
+                   f"SPEND BREAKDOWN · {window}</div>")
         out.append("<div style='color:#64648c;font-size:8pt;margin-bottom:6px;'>"
-                   f"top suspect: {top_name} · {round(top.share * 100)}% of the "
-                   f"spike{' · truncated' if report.truncated else ''}</div>")
+                   f"${report.spike_total:,.2f} spent · largest: {top_name} "
+                   f"({round(top.share * 100)}%)"
+                   f"{' · top rows only' if report.truncated else ''}</div>")
     try:
         strip = AutopsyStripWidget(report)
         out.append(_strip_img_div(strip))
     except Exception:
         log.debug("autopsy strip render failed", exc_info=True)
-    # FOOTER: request + cached-token totals, then the GREEN caching-offset line.
+    # FOOTER: request + cached-token totals, then the GREEN caching-saved line.
     if not report.is_empty:
         out.append("<div style='color:#a0a0c8;font-size:8pt;'>"
-                   f"{report.request_total:,} reqs · "
+                   f"{report.request_total:,} requests · "
                    f"{_fmt_tok(report.cached_total)} cached tokens</div>")
         if report.cache_offset > 0:
             out.append("<div style='color:#2ed573;font-size:8pt;'>"
-                       f"caching offset −${report.cache_offset:,.2f} here</div>")
+                       f"caching saved ${report.cache_offset:,.2f} in this "
+                       f"window</div>")
     out.append("<div style='margin-top:2px;color:#64648c;font-size:8pt;'>"
-               "live from openrouter.ai · analytics · drag the chart to drill</div>")
+               "openrouter.ai analytics · drag on the chart to pick a "
+               "window</div>")
     return "".join(out)
 
 
